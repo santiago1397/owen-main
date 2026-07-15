@@ -1,0 +1,8 @@
+# Normalize to LF in the repo so shell scripts and Dockerfiles run on the Linux VPS.
+* text=auto eol=lf
+*.sh text eol=lf
+*.py text eol=lf
+Dockerfile text eol=lf
+*.png binary
+*.jpg binary
+*.mp3 binary

@@ -1,0 +1,101 @@
+# Call Monitoring Platform — conforms to ../../santiago/SERVER_SETUP.md.
+# Native host Postgres (not containerized). No host ports — Traefik routes by label.
+name: callmon
+
+services:
+  app:
+    build: { context: ./backend, dockerfile: Dockerfile }
+    image: callmon/app:latest
+    container_name: callmon_app
+    env_file: [.env.prod]
+    environment:
+      - ENVIRONMENT=production
+      - DEBUG=false
+    extra_hosts:
+      - "host.docker.internal:host-gateway"   # reach native Postgres on the host
+    expose: ["8888"]
+    volumes:
+      - recordings:/data/recordings
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8888/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks: [callmon-net, traefik-public]
+    security_opt: ["no-new-privileges:true"]
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=traefik-public"
+      - "traefik.http.routers.callmon-api.rule=Host(`api.${APP_DOMAIN}`)"
+      - "traefik.http.routers.callmon-api.entrypoints=websecure"
+      - "traefik.http.routers.callmon-api.tls=true"
+      - "traefik.http.routers.callmon-api.tls.certresolver=letsencrypt"
+      - "traefik.http.services.callmon-api.loadbalancer.server.port=8888"
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+    deploy:
+      resources:
+        limits: { cpus: '1', memory: 512M }
+        reservations: { cpus: '0.5', memory: 256M }
+
+  worker:
+    build: { context: ./backend, dockerfile: Dockerfile }
+    image: callmon/app:latest
+    container_name: callmon_worker
+    command: ["python", "-m", "app.worker"]
+    env_file: [.env.prod]
+    environment:
+      - ENVIRONMENT=production
+      - DEBUG=false
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - recordings:/data/recordings
+    networks: [callmon-net]           # NOT traefik-public — no inbound routing
+    security_opt: ["no-new-privileges:true"]
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+    deploy:
+      resources:
+        limits: { cpus: '0.5', memory: 256M }
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        VITE_API_BASE: "https://api.${APP_DOMAIN}"
+    image: callmon/frontend:latest
+    container_name: callmon_frontend
+    expose: ["3333"]
+    networks: [traefik-public]
+    security_opt: ["no-new-privileges:true"]
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=traefik-public"
+      - "traefik.http.routers.callmon-web.rule=Host(`app.${APP_DOMAIN}`)"
+      - "traefik.http.routers.callmon-web.entrypoints=websecure"
+      - "traefik.http.routers.callmon-web.tls=true"
+      - "traefik.http.routers.callmon-web.tls.certresolver=letsencrypt"
+      - "traefik.http.services.callmon-web.loadbalancer.server.port=3333"
+    depends_on:
+      app: { condition: service_healthy }
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+    deploy:
+      resources:
+        limits: { cpus: '0.5', memory: 128M }
+
+networks:
+  callmon-net: { driver: bridge }
+  traefik-public: { name: traefik-public, external: true }
+
+volumes:
+  recordings:
