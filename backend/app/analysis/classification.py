@@ -113,7 +113,57 @@ class ClaudeAnalysisEngine:
         )
 
 
-_ENGINES = {"dummy": DummyAnalysisEngine, "claude": ClaudeAnalysisEngine}
+class MinimaxAnalysisEngine:
+    """MiniMax chat completions (OpenAI-compatible function-calling)."""
+
+    name = "minimax"
+
+    async def analyze(self, transcript: str) -> AnalysisResult:
+        if not settings.MINIMAX_API_KEY:
+            raise RuntimeError("MINIMAX_API_KEY not set")
+        prompt = (
+            "Analyze this phone call transcript. Decide if it is unwanted sales/solicitation "
+            "(is_spam), assign one category, add a few descriptive tags, and summarize.\n\n"
+            f"Transcript:\n{transcript}"
+        )
+        tool = {"type": "function", "function": {
+            "name": _TOOL["name"],
+            "description": _TOOL["description"],
+            "parameters": _TOOL["input_schema"],
+        }}
+        async with httpx.AsyncClient(timeout=60) as client:
+            resp = await client.post(
+                f"{settings.MINIMAX_BASE_URL}/text/chatcompletion_v2",
+                headers={
+                    "Authorization": f"Bearer {settings.MINIMAX_API_KEY}",
+                    "content-type": "application/json",
+                },
+                json={
+                    "model": settings.ANALYSIS_MODEL,
+                    "max_tokens": 512,
+                    "tools": [tool],
+                    "tool_choice": {"type": "function", "function": {"name": _TOOL["name"]}},
+                    "messages": [{"role": "user", "content": prompt}],
+                },
+            )
+        resp.raise_for_status()
+        message = resp.json()["choices"][0]["message"]
+        tool_calls = message.get("tool_calls") or []
+        if tool_calls:
+            data = json.loads(tool_calls[0]["function"]["arguments"])
+        else:
+            data = json.loads(message["content"])
+        return AnalysisResult(
+            is_spam=bool(data["is_spam"]),
+            spam_confidence=float(data["spam_confidence"]),
+            category=data["category"] if data["category"] in CATEGORIES else "other",
+            tags=list(data.get("tags", [])),
+            summary=data.get("summary", ""),
+            model=settings.ANALYSIS_MODEL,
+        )
+
+
+_ENGINES = {"dummy": DummyAnalysisEngine, "claude": ClaudeAnalysisEngine, "minimax": MinimaxAnalysisEngine}
 
 
 def get_analysis_engine() -> AnalysisEngine:

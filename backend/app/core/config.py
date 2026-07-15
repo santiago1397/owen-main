@@ -54,9 +54,13 @@ class Settings(BaseSettings):
     OPENAI_API_KEY: str = ""
     OPENAI_TRANSCRIBE_MODEL: str = "whisper-1"
 
-    ANALYSIS_ENGINE: str = "dummy"  # dummy | claude
+    ANALYSIS_ENGINE: str = "dummy"  # dummy | claude | minimax
     ANTHROPIC_API_KEY: str = ""
     ANALYSIS_MODEL: str = "claude-haiku-4-5-20251001"
+
+    # MiniMax (OpenAI-compatible chat completions with function-calling)
+    MINIMAX_API_KEY: str = ""
+    MINIMAX_BASE_URL: str = "https://api.minimax.io/v1"
 
     @property
     def database_url(self) -> str:

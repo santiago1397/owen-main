@@ -4,7 +4,7 @@
 set -euo pipefail
 
 SSH_ALIAS="${SSH_ALIAS:-callmon}"
-VPS_REPO_PATH="${VPS_REPO_PATH:-/opt/owen/callmon}"
+VPS_REPO_PATH="${VPS_REPO_PATH:-/opt/santiagoproperties/owen-main}"
 HEALTHCHECK_URL="${HEALTHCHECK_URL:-http://localhost:8888/health}"
 COMPOSE="docker compose -f docker-compose.prod.yml --env-file .env.prod"
 

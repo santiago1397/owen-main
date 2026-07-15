@@ -78,7 +78,7 @@ services:
     labels:
       - "traefik.enable=true"
       - "traefik.docker.network=traefik-public"
-      - "traefik.http.routers.callmon-web.rule=Host(`app.${APP_DOMAIN}`)"
+      - "traefik.http.routers.callmon-web.rule=Host(`${APP_DOMAIN}`)"
       - "traefik.http.routers.callmon-web.entrypoints=websecure"
       - "traefik.http.routers.callmon-web.tls=true"
       - "traefik.http.routers.callmon-web.tls.certresolver=letsencrypt"

@@ -1,5 +1,5 @@
 SSH_ALIAS ?= callmon
-VPS_REPO_PATH ?= /opt/owen/callmon
+VPS_REPO_PATH ?= /opt/santiagoproperties/owen-main
 COMPOSE = docker compose -f docker-compose.prod.yml --env-file .env.prod
 
 .PHONY: help build up down logs db-revision db-upgrade create-admin deploy
