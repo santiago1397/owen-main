@@ -48,6 +48,9 @@ class Settings(BaseSettings):
     # Recordings
     RECORDINGS_DIR: str = "/data/recordings"
     RECORDING_RETENTION_DAYS: int = 30
+    # Delete the provider's copy of the recording right after we download it, so
+    # provider-side storage is never billed (the local copy + transcript remain).
+    DELETE_REMOTE_RECORDING: bool = True
 
     # Phase 6 — transcription + analysis (pluggable engines; dummy is the offline default).
     TRANSCRIPTION_ENGINE: str = "dummy"  # dummy | openai

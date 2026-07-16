@@ -19,6 +19,7 @@ from app.analysis.classification import get_analysis_engine
 from app.analysis.transcription import get_transcription_engine
 from app.core.config import settings
 from app.models import Call, CallAnalysis, Caller, Recording, Transcription
+from app.providers import signalwire_client, twilio_client
 from app.services import queue
 
 logger = logging.getLogger("worker.handlers")
@@ -27,6 +28,13 @@ logger = logging.getLogger("worker.handlers")
 _PROVIDER_AUTH = {
     "twilio": lambda: (settings.TWILIO_ACCOUNT_SID, settings.TWILIO_AUTH_TOKEN),
     "signalwire": lambda: (settings.SIGNALWIRE_PROJECT_ID, settings.SIGNALWIRE_AUTH_TOKEN),
+}
+
+# Per-provider remote-delete (ARCHITECTURE.md #12). Called only after the local copy is
+# safely on disk, so provider-side storage is never billed. Kept per-provider, never shared.
+_PROVIDER_DELETE = {
+    "twilio": twilio_client.delete_recording,
+    "signalwire": signalwire_client.delete_recording,
 }
 
 
@@ -58,6 +66,19 @@ async def handle_recording_fetch(db: AsyncSession, payload: dict) -> None:
         rec.downloaded_at = datetime.now(timezone.utc)
         await db.commit()
         logger.info("recording_fetch: stored %s", rec.provider_recording_sid)
+
+        # Local copy is safe on disk — now drop the provider's copy so we're never
+        # billed for their storage (the cheap-storage strategy). Best-effort: a failed
+        # delete must not fail the pipeline; the transcript/local audio are already kept.
+        if settings.DELETE_REMOTE_RECORDING:
+            deleter = _PROVIDER_DELETE.get(payload.get("provider", "twilio"))
+            if deleter and rec.provider_recording_sid:
+                try:
+                    await deleter(rec.provider_recording_sid)
+                    logger.info("recording_fetch: deleted remote %s", rec.provider_recording_sid)
+                except Exception as exc:  # noqa: BLE001 - non-fatal; retry happens next poll
+                    logger.warning("recording_fetch: remote delete failed for %s: %s",
+                                   rec.provider_recording_sid, exc)
 
     # Next stage: transcribe (unless already done).
     if not rec.transcribed:

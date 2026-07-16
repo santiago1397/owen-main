@@ -15,6 +15,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app.db import SessionLocal
 from app.models import Call, Campaign, Number, Provider
+from app.providers import signalwire_client
 
 
 async def _provider(db, name: str) -> Provider:
@@ -55,9 +56,46 @@ async def list_all() -> None:
         print(f"== calls: {total} ==")
 
 
+async def list_sw_recordings(hours: int) -> None:
+    """Read-only: what the SignalWire Recordings API returns for the last N hours.
+    Use this to confirm Call Flow Builder recordings are actually exposed via the
+    Compatibility API before relying on the poll."""
+    recs = await signalwire_client.fetch_recent_recordings(hours)
+    print(f"== signalwire recordings (last {hours}h): {len(recs)} ==")
+    for r in recs:
+        print(f"  sid={r.provider_recording_sid} call_sid={r.provider_call_sid} "
+              f"status={r.status} dur={r.duration_seconds}s url={r.provider_url}")
+
+
+async def list_sw_calls(hours: int) -> None:
+    """Read-only: what the SignalWire Calls API returns for the last N hours (all legs)."""
+    calls = await signalwire_client.fetch_recent_calls(hours)
+    print(f"== signalwire calls (last {hours}h): {len(calls)} ==")
+    for c in calls:
+        print(f"  sid={c.provider_call_sid} to={c.to_number} from={c.from_number} "
+              f"dir={c.direction} status={c.status}")
+
+
+async def reconcile_now(hours: int | None) -> None:
+    """Run the reconciler once, on demand — no need to wait for the 5-min schedule."""
+    from app.workers.reconciler import reconcile_recent
+
+    n = await reconcile_recent(hours)
+    print(f"reconcile done: {n} inbound calls ingested")
+
+
 def main() -> None:
     p = argparse.ArgumentParser(prog="manage")
     sub = p.add_subparsers(dest="cmd", required=True)
+
+    lr = sub.add_parser("list-recordings", help="SignalWire Recordings API dump (read-only)")
+    lr.add_argument("--hours", type=int, default=24)
+
+    lc = sub.add_parser("list-calls", help="SignalWire Calls API dump (read-only)")
+    lc.add_argument("--hours", type=int, default=24)
+
+    rn = sub.add_parser("reconcile-now", help="Run the reconciler once immediately")
+    rn.add_argument("--hours", type=int, default=None)
 
     c = sub.add_parser("add-campaign")
     c.add_argument("--name", required=True)
@@ -79,6 +117,12 @@ def main() -> None:
         asyncio.run(add_number(args.phone, args.campaign, args.friendly, args.forwards_to, args.provider))
     elif args.cmd == "list":
         asyncio.run(list_all())
+    elif args.cmd == "list-recordings":
+        asyncio.run(list_sw_recordings(args.hours))
+    elif args.cmd == "list-calls":
+        asyncio.run(list_sw_calls(args.hours))
+    elif args.cmd == "reconcile-now":
+        asyncio.run(reconcile_now(args.hours))
 
 
 if __name__ == "__main__":

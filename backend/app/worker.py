@@ -80,7 +80,9 @@ async def retention_sweep() -> None:
 
 def build_scheduler() -> AsyncIOScheduler:
     sched = AsyncIOScheduler(timezone="UTC")
-    sched.add_job(reconcile_recent, "interval", hours=1, id="reconcile")
+    # Polling is the primary ingestion path for Call Flow Builder numbers (no per-status
+    # webhooks), so keep it frequent — calls/recordings should surface within minutes.
+    sched.add_job(reconcile_recent, "interval", minutes=5, id="reconcile")
     sched.add_job(retention_sweep, "interval", hours=6, id="retention")
     return sched
 
