@@ -8,6 +8,7 @@ Correctness rules (ARCHITECTURE.md #6):
 - `is_new_for_campaign` computed once, at first sight of the call.
 """
 
+import logging
 from datetime import datetime, timezone
 
 from sqlalchemy import select, update
@@ -16,6 +17,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import Call, CallEvent, Caller, Number, Provider
 from app.providers.base import NormalizedCallEvent
+
+logger = logging.getLogger("ingestion")
 
 
 async def _get_or_create_provider(db: AsyncSession, name: str) -> Provider:
@@ -63,6 +66,12 @@ async def ingest_status_event(
                 )
             )
         ).scalar_one_or_none()
+        if number is None:
+            logger.warning(
+                "ingest_status_event: no registered Number for to=%s (provider=%s, call_sid=%s) "
+                "— call will have no campaign attribution",
+                evt.to_number, provider_name, evt.provider_call_sid,
+            )
 
     caller = None
     if evt.from_number:
@@ -110,6 +119,15 @@ async def ingest_status_event(
     await db.execute(insert_call)
 
     # Atomic forward-only status advance. Never regress on a late/duplicate event.
+    #
+    # Also (re)fills number_id/caller_id/campaign_id/direction here — not just on
+    # first insert. A recording event can create a bare stub row (services/recordings.py
+    # _ensure_call, no attribution info available yet) before the status event that
+    # actually knows the number/caller arrives; if this UPDATE didn't set them too,
+    # that row would stay permanently unattributed even once the real status event
+    # showed up, since the INSERT above is a no-op on conflict. COALESCE onto the
+    # existing column so a later event with less information (e.g. no to_number)
+    # can't regress previously-correct attribution.
     await db.execute(
         update(Call)
         .where(
@@ -123,6 +141,10 @@ async def ingest_status_event(
             answered_at=evt.answered_at,
             ended_at=evt.ended_at,
             duration_seconds=evt.duration_seconds,
+            number_id=(number.id if number else None) or Call.number_id,
+            caller_id=(caller.id if caller else None) or Call.caller_id,
+            campaign_id=campaign_id or Call.campaign_id,
+            direction=evt.direction or Call.direction,
         )
     )
 
@@ -166,3 +188,9 @@ async def ingest_status_event(
             )
 
     await db.commit()
+    logger.info(
+        "ingest_status_event: call_id=%s call_sid=%s number=%s campaign_id=%s status=%s "
+        "new_event_row=%s",
+        call.id, evt.provider_call_sid, number.friendly_name if number else None,
+        campaign_id, evt.status, bool(inserted),
+    )

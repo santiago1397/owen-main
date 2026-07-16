@@ -6,6 +6,8 @@ status event fills it in — same event-sourced row), then upsert the recording 
 its provider SID for idempotency.
 """
 
+import logging
+
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -13,6 +15,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models import Call, Recording
 from app.providers.base import NormalizedRecordingEvent
 from app.services.ingestion import _get_or_create_provider
+
+logger = logging.getLogger("ingestion")
 
 
 async def _ensure_call(db: AsyncSession, provider_id: int, call_sid: str) -> Call:
@@ -55,10 +59,15 @@ async def ingest_recording_event(
         )
     )
     await db.commit()
-    return (
+    row = (
         await db.execute(
             select(Recording).where(
                 Recording.provider_recording_sid == rec.provider_recording_sid
             )
         )
     ).scalar_one()
+    logger.info(
+        "ingest_recording_event: recording_id=%s call_id=%s sid=%s status=%s",
+        row.id, call.id, rec.provider_recording_sid, rec.status,
+    )
+    return row

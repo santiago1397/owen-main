@@ -3,14 +3,24 @@ signature, persist the event, enqueue slow work, return 200 fast — differing o
 the adapter, provider name, and which header carries the signature.
 """
 
+import base64
+import hmac
+import logging
+
 from fastapi import APIRouter, Request, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from sqlalchemy import select
+
+from app.core.config import settings
 from app.db import SessionLocal
+from app.models import Call, Number
 from app.providers.base import ProviderAdapter
 from app.services import queue
 from app.services.ingestion import ingest_status_event
 from app.services.recordings import ingest_recording_event
+
+logger = logging.getLogger("webhooks")
 
 
 def _public_url(request: Request) -> str:
@@ -28,14 +38,68 @@ def _signature(request: Request, headers: list[str]) -> str:
     return ""
 
 
+def _cfb_basic_auth_ok(request: Request) -> bool:
+    """Call Flow Builder's generic 'Request' node can't produce a Twilio-style HMAC
+    signature, so it authenticates via HTTP Basic Auth (embedded in its URL field)
+    against a shared secret instead. Only meaningful for signalwire."""
+    secret = settings.SIGNALWIRE_CFB_WEBHOOK_SECRET
+    auth = request.headers.get("authorization", "")
+    if not (secret and auth.startswith("Basic ")):
+        return False
+    try:
+        _, _, password = base64.b64decode(auth[6:]).decode().partition(":")
+    except Exception:
+        return False
+    return hmac.compare_digest(password, secret)
+
+
+async def _fallback_call_sid(db: AsyncSession, tracking_number: str) -> str | None:
+    """Correlate a recording to a call by tracking number + recency, for when Call Flow
+    Builder's CallSid-equivalent template variable doesn't resolve to a usable value."""
+    number = (
+        await db.execute(select(Number).where(Number.phone_number == tracking_number))
+    ).scalar_one_or_none()
+    if number is None:
+        return None
+    call = (
+        await db.execute(
+            select(Call)
+            .where(Call.number_id == number.id)
+            .order_by(Call.started_at.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    return call.provider_call_sid if call else None
+
+
 def build_router(adapter: ProviderAdapter, provider: str, signature_headers: list[str]) -> APIRouter:
     router = APIRouter(prefix=f"/webhooks/{provider}", tags=["webhooks"])
 
     async def _verified(request: Request) -> dict[str, str] | None:
-        form = await request.form()
-        params = {k: str(v) for k, v in form.items()}
+        content_type = request.headers.get("content-type", "")
+        if "application/json" in content_type:
+            body = await request.json()
+            params = {k: str(v) for k, v in body.items()} if isinstance(body, dict) else {}
+        else:
+            form = await request.form()
+            params = {k: str(v) for k, v in form.items()}
+        # Call Flow Builder's own event schema doesn't reliably identify which tracking
+        # number was originally dialed (see providers/signalwire.py), so we pass it
+        # explicitly as a query param on the webhook URL instead of trusting the payload.
+        tracking_number = request.query_params.get("tracking_number")
+        if tracking_number:
+            params["_tracking_number"] = tracking_number
         sig = _signature(request, signature_headers)
+        logger.info("%s webhook hit: path=%s content_type=%s sig_present=%s keys=%s",
+                    provider, request.url.path, content_type, bool(sig), sorted(params.keys()))
+
+        if provider == "signalwire" and _cfb_basic_auth_ok(request):
+            logger.info("%s webhook: verified via Call Flow Builder basic-auth secret", provider)
+            return params
+
         if not adapter.verify_signature(_public_url(request), params, sig):
+            logger.warning("%s webhook: signature verification FAILED (url=%s)",
+                           provider, _public_url(request))
             return None
         return params
 
@@ -44,8 +108,12 @@ def build_router(adapter: ProviderAdapter, provider: str, signature_headers: lis
         params = await _verified(request)
         if params is None:
             return Response(status_code=403)
+        evt = adapter.parse_status_event(params)
+        logger.info("%s status: call_sid=%s status=%s from=%s to=%s direction=%s",
+                    provider, evt.provider_call_sid, evt.status, evt.from_number,
+                    evt.to_number, evt.direction)
         async with SessionLocal() as db:  # type: AsyncSession
-            await ingest_status_event(db, provider, adapter.parse_status_event(params))
+            await ingest_status_event(db, provider, evt)
         return Response(status_code=200)
 
     @router.post("/recording")
@@ -54,9 +122,24 @@ def build_router(adapter: ProviderAdapter, provider: str, signature_headers: lis
         if params is None:
             return Response(status_code=403)
         rec = adapter.parse_recording_event(params)
+        logger.info("%s recording: call_sid=%s recording_sid=%s status=%s url=%s",
+                    provider, rec.provider_call_sid, rec.provider_recording_sid,
+                    rec.status, rec.provider_url)
         async with SessionLocal() as db:
+            tracking_number = params.get("_tracking_number")
+            if (not rec.provider_call_sid or "%{" in rec.provider_call_sid) and tracking_number:
+                fallback_sid = await _fallback_call_sid(db, tracking_number)
+                if fallback_sid:
+                    logger.info(
+                        "%s recording: CallSid unresolved (%r), falling back to most "
+                        "recent call %s for tracking_number=%s",
+                        provider, rec.provider_call_sid, fallback_sid, tracking_number,
+                    )
+                    rec.provider_call_sid = fallback_sid
             recording_row = await ingest_recording_event(db, provider, rec)
             if (rec.status or "").lower() == "completed":
+                logger.info("%s recording: enqueueing recording_fetch for recording_id=%s",
+                            provider, recording_row.id)
                 await queue.enqueue(
                     db,
                     "recording_fetch",
@@ -67,6 +150,9 @@ def build_router(adapter: ProviderAdapter, provider: str, signature_headers: lis
                         "provider_url": rec.provider_url,
                     },
                 )
+            else:
+                logger.info("%s recording: status=%s not completed yet, not enqueueing",
+                            provider, rec.status)
         return Response(status_code=200)
 
     return router

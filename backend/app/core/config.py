@@ -43,6 +43,12 @@ class Settings(BaseSettings):
     SIGNALWIRE_AUTH_TOKEN: str = ""
     SIGNALWIRE_SPACE_URL: str = ""  # e.g. yourspace.signalwire.com
 
+    # Shared secret (HTTP Basic Auth) for Call Flow Builder's generic "Request" node,
+    # which can't produce a Twilio-style HMAC signature. Only accepted as an alternate
+    # verification path on /webhooks/signalwire/recording, never in place of the
+    # signature check for real signed webhooks.
+    SIGNALWIRE_CFB_WEBHOOK_SECRET: str = ""
+
     RECONCILE_WINDOW_HOURS: int = 4
 
     # Recordings

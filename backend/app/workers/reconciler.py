@@ -16,13 +16,16 @@ logger = logging.getLogger("worker.reconciler")
 
 _SOURCES = {
     "twilio": twilio_client.fetch_recent_calls,
-    "signalwire": signalwire_client.fetch_recent_calls,
+    # The classic Compatibility API (fetch_recent_calls) never reports calls routed
+    # through Call Flow Builder — confirmed dead for this account. The modern Voice
+    # API (GET /api/voice/logs) is what actually works; see SIGNALWIRE_CFB_INGESTION.md.
+    "signalwire": signalwire_client.fetch_recent_calls_voice_logs,
 }
 
 # Providers whose recordings we discover by polling (Call Flow Builder does not POST
 # a recordingStatusCallback to us reliably; webhooks still work too and are idempotent).
 _RECORDING_SOURCES = {
-    "signalwire": signalwire_client.fetch_recent_recordings,
+    "signalwire": signalwire_client.fetch_recordings_via_voice_logs,
 }
 
 
@@ -39,7 +42,11 @@ async def reconcile_recent(window_hours: int | None = None) -> int:
     hours = window_hours or settings.RECONCILE_WINDOW_HOURS
     total = 0
     for provider, fetch in _SOURCES.items():
-        events = await fetch(hours)
+        try:
+            events = await fetch(hours)
+        except Exception as exc:  # noqa: BLE001 - one provider's outage must not block others
+            logger.warning("reconcile: %s call fetch failed: %s", provider, exc)
+            continue
         kept = 0
         for evt in events:
             if not evt.provider_call_sid or not _is_inbound(evt):
@@ -53,7 +60,11 @@ async def reconcile_recent(window_hours: int | None = None) -> int:
                         provider, kept, len(events), hours)
 
     for provider, fetch_recordings in _RECORDING_SOURCES.items():
-        recs = await fetch_recordings(hours)
+        try:
+            recs = await fetch_recordings(hours)
+        except Exception as exc:  # noqa: BLE001 - one provider's outage must not block others
+            logger.warning("reconcile: %s recording fetch failed: %s", provider, exc)
+            continue
         enqueued = 0
         for rec in recs:
             if not rec.provider_recording_sid:
