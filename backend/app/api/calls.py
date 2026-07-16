@@ -2,10 +2,10 @@ import uuid
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import exists, func, select
+from sqlalchemy import exists, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import current_user
+from app.api.deps import SHORT_CALL_MAX_DURATION_SECONDS, current_user
 from app.db import get_db
 from app.models import (
     Call,
@@ -32,7 +32,8 @@ from app.schemas.api import (
 router = APIRouter(prefix="/api/calls", tags=["calls"])
 
 
-def _apply_filters(stmt, provider, number_id, campaign_id, caller, status_, date_from, date_to):
+def _apply_filters(stmt, provider, number_id, campaign_id, caller, status_, date_from, date_to,
+                   include_short):
     if provider:
         stmt = stmt.where(Provider.name == provider)
     if number_id:
@@ -47,6 +48,15 @@ def _apply_filters(stmt, provider, number_id, campaign_id, caller, status_, date
         stmt = stmt.where(Call.started_at >= date_from)
     if date_to:
         stmt = stmt.where(Call.started_at <= date_to)
+    if not include_short:
+        # Hide 0–1s misdials/hang-ups. Keep NULL-duration calls (still ringing / no-answer)
+        # so we never silently drop a call that simply hasn't reported a duration yet.
+        stmt = stmt.where(
+            or_(
+                Call.duration_seconds.is_(None),
+                Call.duration_seconds > SHORT_CALL_MAX_DURATION_SECONDS,
+            )
+        )
     return stmt
 
 
@@ -59,6 +69,7 @@ async def list_calls(
     status: str | None = None,  # noqa: A002 - query param name
     date_from: datetime | None = None,
     date_to: datetime | None = None,
+    include_short: bool = Query(False, description="Include 0–1s misdial/hang-up calls (hidden by default)"),
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=200),
     _: User = Depends(current_user),
@@ -69,7 +80,7 @@ async def list_calls(
         .join(Provider, Call.provider_id == Provider.id, isouter=True)
         .join(Caller, Call.caller_id == Caller.id, isouter=True)
     )
-    base = _apply_filters(base, provider, number_id, campaign_id, caller, status, date_from, date_to)
+    base = _apply_filters(base, provider, number_id, campaign_id, caller, status, date_from, date_to, include_short)
 
     total = (await db.execute(select(func.count()).select_from(base.subquery()))).scalar_one()
 
@@ -96,7 +107,7 @@ async def list_calls(
         .join(Campaign, Call.campaign_id == Campaign.id, isouter=True)
         .join(CallAnalysis, CallAnalysis.call_id == Call.id, isouter=True)
     )
-    rows_stmt = _apply_filters(rows_stmt, provider, number_id, campaign_id, caller, status, date_from, date_to)
+    rows_stmt = _apply_filters(rows_stmt, provider, number_id, campaign_id, caller, status, date_from, date_to, include_short)
     rows_stmt = rows_stmt.order_by(Call.started_at.desc().nullslast()).offset((page - 1) * page_size).limit(page_size)
 
     rows = (await db.execute(rows_stmt)).mappings().all()

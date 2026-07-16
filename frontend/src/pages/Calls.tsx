@@ -113,6 +113,14 @@ export default function Calls() {
           <option value="">any status</option>
           {["completed", "no-answer", "busy", "failed"].map((s) => <option key={s} value={s}>{s}</option>)}
         </select>
+        <label className="muted" style={{ display: "flex", alignItems: "center", gap: 6, marginLeft: "auto" }}>
+          <input
+            type="checkbox"
+            checked={!!filters.include_short}
+            onChange={(e) => set("include_short", e.target.checked || undefined)}
+          />
+          Show 0–1s calls
+        </label>
       </div>
 
       <div className="card">

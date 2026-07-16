@@ -1,10 +1,10 @@
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import current_user
+from app.api.deps import SHORT_CALL_MAX_DURATION_SECONDS, current_user
 from app.core.config import settings
 from app.db import get_db
 from app.models import Call, CallAnalysis, Caller, Campaign, Number, User
@@ -18,6 +18,7 @@ _RANGES = {"today": 1, "7d": 7, "30d": 30, "90d": 90}
 @router.get("/summary", response_model=DashboardSummary)
 async def summary(
     range: str = "7d",  # noqa: A002
+    include_short: bool = False,
     _: User = Depends(current_user),
     db: AsyncSession = Depends(get_db),
 ) -> DashboardSummary:
@@ -26,31 +27,45 @@ async def summary(
     start = now - timedelta(days=days)
     in_range = Call.started_at >= start
 
-    total_calls = (await db.execute(select(func.count()).where(in_range))).scalar_one()
+    # Every call-based aggregate shares this filter, so 0–1s misdial/hang-up junk is
+    # excluded from the stats by default (matches the calls list). Pass include_short=true
+    # to count them. NULL durations (never reported) are kept.
+    call_filters = [in_range]
+    if not include_short:
+        call_filters.append(
+            or_(
+                Call.duration_seconds.is_(None),
+                Call.duration_seconds > SHORT_CALL_MAX_DURATION_SECONDS,
+            )
+        )
+
+    total_calls = (await db.execute(select(func.count()).select_from(Call).where(*call_filters))).scalar_one()
     spam_calls = (await db.execute(
         select(func.count()).select_from(Call)
         .join(CallAnalysis, CallAnalysis.call_id == Call.id)
-        .where(in_range, func.coalesce(CallAnalysis.is_spam_override, CallAnalysis.is_spam).is_(True))
+        .where(*call_filters, func.coalesce(CallAnalysis.is_spam_override, CallAnalysis.is_spam).is_(True))
     )).scalar_one()
     avg_duration = (
-        await db.execute(select(func.avg(Call.duration_seconds)).where(in_range, Call.duration_seconds.is_not(None)))
+        await db.execute(select(func.avg(Call.duration_seconds)).where(*call_filters, Call.duration_seconds.is_not(None)))
     ).scalar_one()
 
     # Per-campaign new vs returning (call-level flag stamped at ingest).
     new_for_campaign = (await db.execute(
-        select(func.count()).where(in_range, Call.is_new_for_campaign.is_(True))
+        select(func.count()).select_from(Call).where(*call_filters, Call.is_new_for_campaign.is_(True))
     )).scalar_one()
     returning_for_campaign = (await db.execute(
-        select(func.count()).where(in_range, Call.is_new_for_campaign.is_(False))
+        select(func.count()).select_from(Call).where(*call_filters, Call.is_new_for_campaign.is_(False))
     )).scalar_one()
 
-    # Global new vs returning: distinct callers active in range, split by whether their
-    # first-ever sighting falls inside the window.
+    # Global new vs returning: distinct callers active (non-junk) in range, split by whether
+    # their first-ever sighting falls inside the window.
     distinct_callers = (await db.execute(
-        select(func.count(func.distinct(Call.caller_id))).where(in_range, Call.caller_id.is_not(None))
+        select(func.count(func.distinct(Call.caller_id))).where(*call_filters, Call.caller_id.is_not(None))
     )).scalar_one()
     new_global = (await db.execute(
-        select(func.count()).select_from(Caller).where(Caller.first_seen_at >= start)
+        select(func.count(func.distinct(Call.caller_id)))
+        .join(Caller, Call.caller_id == Caller.id)
+        .where(*call_filters, Call.caller_id.is_not(None), Caller.first_seen_at >= start)
     )).scalar_one()
     returning_global = max(distinct_callers - new_global, 0)
 
@@ -59,7 +74,7 @@ async def summary(
         for name, count in (await db.execute(
             select(Campaign.name, func.count(Call.id))
             .join(Campaign, Call.campaign_id == Campaign.id, isouter=True)
-            .where(in_range).group_by(Campaign.name).order_by(func.count(Call.id).desc())
+            .where(*call_filters).group_by(Campaign.name).order_by(func.count(Call.id).desc())
         )).all()
     ]
 
@@ -68,7 +83,7 @@ async def summary(
         for num, friendly, count in (await db.execute(
             select(Number.phone_number, Number.friendly_name, func.count(Call.id))
             .join(Number, Call.number_id == Number.id, isouter=True)
-            .where(in_range).group_by(Number.phone_number, Number.friendly_name)
+            .where(*call_filters).group_by(Number.phone_number, Number.friendly_name)
             .order_by(func.count(Call.id).desc()).limit(20)
         )).all()
     ]
@@ -79,7 +94,7 @@ async def summary(
     daily = [
         {"day": d.date().isoformat() if d else None, "calls": count}
         for d, count in (await db.execute(
-            select(day.label("day"), func.count(Call.id)).where(in_range).group_by("day").order_by("day")
+            select(day.label("day"), func.count(Call.id)).where(*call_filters).group_by("day").order_by("day")
         )).all()
     ]
 
@@ -88,7 +103,7 @@ async def summary(
         for phone, count in (await db.execute(
             select(Caller.phone_number, func.count(Call.id))
             .join(Caller, Call.caller_id == Caller.id)
-            .where(in_range).group_by(Caller.phone_number)
+            .where(*call_filters).group_by(Caller.phone_number)
             .order_by(func.count(Call.id).desc()).limit(10)
         )).all()
     ]

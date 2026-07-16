@@ -40,6 +40,9 @@ export default function Dashboard() {
           {RANGES.map((r) => <option key={r} value={r}>{r}</option>)}
         </select>
       </div>
+      <p className="muted" style={{ marginTop: 0, fontSize: 12 }}>
+        Excludes 0–1s misdial/hang-up calls.
+      </p>
 
       <div className="row" style={{ marginBottom: 16 }}>
         <Stat n={data.total_calls} l="Total calls" />
