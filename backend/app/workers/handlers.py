@@ -7,6 +7,8 @@ earlier work.
 
 import logging
 import os
+import shutil
+import tempfile
 import uuid
 from datetime import datetime, timezone
 
@@ -15,8 +17,9 @@ from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.analysis import audio
 from app.analysis.classification import get_analysis_engine
-from app.analysis.transcription import get_transcription_engine
+from app.analysis.transcription import Transcript, get_transcription_engine
 from app.core.config import settings
 from app.models import Call, CallAnalysis, Caller, Message, Number, Recording, Transcription
 from app.providers import ghl_client, signalwire_client, twilio_client
@@ -85,6 +88,53 @@ async def handle_recording_fetch(db: AsyncSession, payload: dict) -> None:
         await queue.enqueue(db, "transcribe", {"recording_id": str(rec.id)})
 
 
+async def _transcribe_stereo(engine, audio_path: str) -> tuple[str, list] | None:
+    """Split a 2-channel recording into per-leg mono tracks, transcribe each, and merge
+    into a speaker-labeled transcript. Returns (flat_text, segments), or None to signal
+    "not stereo / couldn't split — use the mono path" (probe/split failure degrades
+    gracefully rather than losing the transcript, per the agreed failure policy).
+
+    Once split, a per-channel transcription failure is *not* swallowed: it propagates so
+    the queue retries the whole job (both channels), which is the correct move for a
+    transient STT error."""
+    if not settings.STEREO_TRANSCRIPTION_ENABLED:
+        return None
+    try:
+        channels = await audio.probe_channel_count(audio_path)
+    except Exception as exc:  # noqa: BLE001 - probe failure -> mono fallback, never fatal
+        logger.warning("transcribe: ffprobe failed for %s, using mono path: %s", audio_path, exc)
+        return None
+    if channels < 2:
+        return None
+
+    tmpdir = tempfile.mkdtemp(prefix="stereo_")
+    try:
+        ch0 = os.path.join(tmpdir, "ch0.mp3")
+        ch1 = os.path.join(tmpdir, "ch1.mp3")
+        try:
+            await audio.split_stereo(audio_path, ch0, ch1)
+        except Exception as exc:  # noqa: BLE001 - split failure -> mono fallback
+            logger.warning("transcribe: ffmpeg split failed for %s, using mono path: %s",
+                           audio_path, exc)
+            return None
+        # Past this point failures propagate (raise -> queue retry).
+        caller_idx = settings.STEREO_CALLER_CHANNEL
+        ch_by_index = {0: ch0, 1: ch1}
+        caller_res = await engine.transcribe_segmented(ch_by_index[caller_idx])
+        operator_res = await engine.transcribe_segmented(ch_by_index[1 - caller_idx])
+        text, segments = audio.merge_channels(
+            caller_res.segments or [], operator_res.segments or []
+        )
+        # Both legs empty (silent call, or everything filtered as hallucination) — fall back
+        # to the mono path so the whole-file model still gets a shot rather than storing an
+        # empty transcript (which would then fail analyze).
+        if not text.strip():
+            return None
+        return text, segments
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
 async def handle_transcribe(db: AsyncSession, payload: dict) -> None:
     rec = await db.get(Recording, uuid.UUID(payload["recording_id"]))
     if rec is None:
@@ -94,17 +144,29 @@ async def handle_transcribe(db: AsyncSession, payload: dict) -> None:
         raise RuntimeError(f"transcribe: audio missing for {rec.provider_recording_sid}")
 
     engine = get_transcription_engine()
-    result = await engine.transcribe(rec.storage_path)
+
+    stereo = await _transcribe_stereo(engine, rec.storage_path)
+    if stereo is not None:
+        # Merged two-channel transcript: labeled text + structured segments. Metadata is
+        # not meaningful across two sources, so it's left null (only `segments` is new).
+        text, segments = stereo
+        language, confidence, words = "en", None, None
+    else:
+        # Mono path — byte-identical to prior behavior: single unlabeled transcript, the
+        # engine's own metadata, and no segments.
+        result: Transcript = await engine.transcribe(rec.storage_path)
+        text, segments = result.text, None
+        language, confidence, words = result.language, result.confidence, result.words
 
     db.add(Transcription(
         call_id=rec.call_id, recording_id=rec.id, engine=engine.name,
-        text=result.text, language=result.language, confidence=result.confidence,
-        words=result.words, status="completed",
+        text=text, language=language, confidence=confidence, words=words,
+        segments=segments, status="completed",
     ))
     rec.transcribed = True  # this now permits retention to delete the audio; transcript kept
     await db.commit()
-    logger.info("transcribe: %s via %s (%d chars)", rec.provider_recording_sid, engine.name,
-                len(result.text or ""))
+    logger.info("transcribe: %s via %s (%d chars, %s)", rec.provider_recording_sid, engine.name,
+                len(text or ""), f"{len(segments)} segments" if segments else "mono")
 
     await queue.enqueue(db, "analyze", {"call_id": str(rec.call_id)})
 

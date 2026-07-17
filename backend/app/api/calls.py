@@ -165,12 +165,15 @@ async def get_call(
         )
     ).mappings().all()
 
-    transcript = (
+    transcript_row = (
         await db.execute(
-            select(Transcription.text).where(Transcription.call_id == call_id)
+            select(Transcription.text, Transcription.segments)
+            .where(Transcription.call_id == call_id)
             .order_by(Transcription.created_at.desc()).limit(1)
         )
-    ).scalar_one_or_none()
+    ).mappings().first()
+    transcript = transcript_row["text"] if transcript_row else None
+    transcript_segments = transcript_row["segments"] if transcript_row else None
 
     analysis_row = (
         await db.execute(select(CallAnalysis).where(CallAnalysis.call_id == call_id))
@@ -192,6 +195,7 @@ async def get_call(
             for r in recs
         ],
         transcript=transcript,
+        transcript_segments=transcript_segments,
         analysis=AnalysisOut(
             is_spam=analysis_row.is_spam, spam_confidence=float(analysis_row.spam_confidence)
             if analysis_row.spam_confidence is not None else None,

@@ -154,6 +154,10 @@ class Transcription(Base):
     language: Mapped[str | None] = mapped_column(String)
     confidence: Mapped[float | None] = mapped_column(Numeric)
     words: Mapped[dict | None] = mapped_column(JSONB)  # timestamped words, if the engine gives them
+    # Speaker-separated segments from dual-channel recordings (Q17): ordered list of
+    # {speaker: 'caller'|'operator', start: float, end: float, text: str}. NULL for mono
+    # recordings (Twilio / pre-stereo / split-failure fallback) — `text` alone is used then.
+    segments: Mapped[list | None] = mapped_column(JSONB)
     status: Mapped[str] = mapped_column(String, default="completed")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 

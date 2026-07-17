@@ -131,15 +131,15 @@ The whole schema in one file. Tables (PK type in parens):
 - **`calls`** (uuid) — the projection everything reads. `provider_id`, `provider_call_sid`, `number_id`, `caller_id`, `campaign_id` (all stamped at ingest), `direction`, `status`, `status_rank`, timestamps, `duration_seconds`, `forwarded_to`, `is_new_for_campaign`, `raw_payload`. Unique `(provider_id, provider_call_sid)` = idempotency key. Composite indexes on `(number_id, started_at)` and `(campaign_id, started_at)`.
 - **`call_events`** (uuid) — append-only truth. `call_id`, `event_type`, `provider_sequence`, `payload`. Unique `(call_id, event_type, provider_sequence)` = dedup key.
 - **`recordings`** (uuid) — `call_id`, `provider_recording_sid` (unique = idempotency), `status`, `storage_path`, `provider_url`, `downloaded_at`, `transcribed` (gates retention deletion).
-- **`transcriptions`** (uuid) — `call_id`, `recording_id`, `engine`, `text`, `language`, `confidence`, `words`.
+- **`transcriptions`** (uuid) — `call_id`, `recording_id`, `engine`, `text`, `language`, `confidence`, `words`, `segments` (speaker-labeled `{speaker,start,end,text}` list from dual-channel recordings; NULL for mono).
 - **`call_analysis`** (uuid) — `call_id` (unique), `is_spam`, `spam_confidence`, `category`, `tags`, `summary`, `model`, plus human `category_override` / `is_spam_override` (human wins).
 - **`messages`** (uuid) — inbound SMS on a tracking number. `provider_id`, `provider_message_sid` (unique = idempotency), `number_id`/`caller_id`/`campaign_id` (attributed like a call), `direction`, `from_number`, `to_number`, `body`, `status`, `num_media`, `media_urls`, `relayed_to_ghl`/`relayed_at` (GHL relay-once guard), `raw_payload`, `received_at`. Composite indexes on `(number_id, received_at)` and `(campaign_id, received_at)`.
 - **`jobs`** (uuid) — durable queue. `type`, `payload`, `status`, `attempts`, `last_error`, `run_after`, `locked_at`.
 - **`users`** (uuid) — `email` unique, `password_hash` (argon2), `role`, `active`.
 
-Migrations live in `backend/alembic/versions/` as a 5-step linear chain (initial
+Migrations live in `backend/alembic/versions/` as a 6-step linear chain (initial
 schema → composite call indexes → recording-sid unique → transcriptions + analysis →
-messages).
+messages → transcription segments).
 
 ### Ingestion — the correctness core (`app/services/ingestion.py`)
 
@@ -188,7 +188,7 @@ attribution (reusing `_get_or_create_provider`/`_get_or_create_caller`), then up
 - `services/queue.py` — the Postgres-backed job queue. `enqueue`, `claim_one` (`UPDATE … WHERE id = (SELECT … FOR UPDATE SKIP LOCKED)` so concurrent drainers never collide), `complete`, `fail` (linear backoff `30s × attempts`, up to `MAX_ATTEMPTS=5` then dead).
 - `workers/handlers.py` — the pipeline. `HANDLERS = {recording_fetch, transcribe, analyze, message_relay_ghl}`. The recording pipeline enqueues the next stage on success; `message_relay_ghl` POSTs the message to GHL (`ghl_client`) and sets `relayed_to_ghl`/`relayed_at` (raises to retry on failure):
   - **`recording_fetch`** — streams the provider media to `/data/recordings/{sid}.mp3` (atomic `.part` → `os.replace`), optionally deletes the remote copy, enqueues `transcribe`.
-  - **`transcribe`** — runs the configured `TranscriptionEngine`, writes a `Transcription`, sets `recording.transcribed=True` (now retention may delete the audio), enqueues `analyze`.
+  - **`transcribe`** — runs the configured `TranscriptionEngine`, writes a `Transcription`, sets `recording.transcribed=True` (now retention may delete the audio), enqueues `analyze`. **Dual-channel path:** if the recording is stereo (ffprobe) and `STEREO_TRANSCRIPTION_ENABLED`, ffmpeg splits it into two mono legs, each is transcribed with segment timestamps (whisper-1 → `transcribe_segmented`, hallucination-filtered), and `audio.merge_channels` interleaves them into a `[Caller]`/`[Operator]`-labeled transcript + `segments`. Probe/split failure degrades to the mono path; splits are temp files (cleaned in `finally`).
   - **`analyze`** — runs the configured `AnalysisEngine`, upserts `CallAnalysis`, updates the caller's `spam_score`.
 - `workers/reconciler.py` — `reconcile_recent(window_hours)` polls each provider's REST API (per-provider try/except isolation), feeds inbound legs through the same `ingest_*` code path, and enqueues `recording_fetch` for any recording not yet on disk.
 
@@ -196,7 +196,7 @@ attribution (reusing `_get_or_create_provider`/`_get_or_create_caller`), then up
 
 Selected at runtime by `settings.TRANSCRIPTION_ENGINE` / `settings.ANALYSIS_ENGINE`.
 
-- `transcription.py` — `TranscriptionEngine` protocol. `dummy` (canned, offline/tests) · `openai` (Whisper via API). **Prod uses `openai`.**
+- `transcription.py` — `TranscriptionEngine` protocol (`transcribe` + `transcribe_segmented` for timestamped output). `dummy` (canned, offline/tests) · `openai` (mono via `OPENAI_TRANSCRIBE_MODEL`=gpt-4o-transcribe; stereo legs via whisper-1 for segment timestamps). **Prod uses `openai`.**
 - `classification.py` — `AnalysisEngine` protocol; controlled `CATEGORIES` vocab. `dummy` (keyword heuristic) · `claude` (Anthropic Messages API, tool-use for structured output) · `minimax` (OpenAI-compatible function calling). **Prod uses `minimax`.**
 
 ### HTTP API (`app/api/`) — all JWT-authed except where noted

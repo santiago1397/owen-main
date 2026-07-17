@@ -63,6 +63,25 @@ class Settings(BaseSettings):
     OPENAI_API_KEY: str = ""
     OPENAI_TRANSCRIBE_MODEL: str = "whisper-1"
 
+    # Dual-channel ("who said what") transcription. SignalWire's Start Call Recording
+    # node records in stereo: each call leg lands on its own channel, so the channel IS
+    # the speaker — no AI diarization guessing. When enabled, the transcribe handler
+    # splits a 2-channel recording into two mono tracks, transcribes each, and merges
+    # them into a speaker-labeled transcript. Mono recordings are unaffected.
+    #   Kill-switch: set false to force the single-transcript path regardless of channels.
+    STEREO_TRANSCRIPTION_ENABLED: bool = True
+    #   Which channel index (0 or 1) carries the inbound caller; the other is the operator.
+    #   MUST be confirmed against a real stereo test call before trusting labels (the
+    #   node doesn't document a guaranteed mapping). One env flip if SignalWire changes it.
+    STEREO_CALLER_CHANNEL: int = 0
+    #   Segment timestamps (needed to interleave the two legs) require whisper-1 — the prod
+    #   OPENAI_TRANSCRIBE_MODEL (gpt-4o-transcribe) can't return them. whisper-1 hallucinates
+    #   on the silent stretches of a split channel, so segments are filtered by the two
+    #   thresholds below (whisper-1's per-segment no_speech_prob / avg_logprob).
+    OPENAI_STEREO_TRANSCRIBE_MODEL: str = "whisper-1"
+    STEREO_MAX_NO_SPEECH_PROB: float = 0.6   # drop segment if no_speech_prob above this
+    STEREO_MIN_AVG_LOGPROB: float = -1.2     # drop segment if avg_logprob below this
+
     ANALYSIS_ENGINE: str = "dummy"  # dummy | claude | minimax
     ANTHROPIC_API_KEY: str = ""
     ANALYSIS_MODEL: str = "claude-haiku-4-5-20251001"

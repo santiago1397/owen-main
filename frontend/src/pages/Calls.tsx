@@ -13,6 +13,37 @@ function RecordingPlayer({ recordingId }: { recordingId: string }) {
   return <audio controls src={url} style={{ width: "100%" }} />;
 }
 
+type Segment = { speaker: string; start?: number | null; end?: number | null; text: string };
+
+// Two-sided "who said what" view for dual-channel (stereo) recordings. Caller on the
+// left, operator on the right; falls back to the flat transcript when segments are absent.
+function TranscriptThread({ segments }: { segments: Segment[] }) {
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+      {segments.map((s, i) => {
+        const isCaller = s.speaker === "caller";
+        return (
+          <div
+            key={i}
+            style={{
+              alignSelf: isCaller ? "flex-start" : "flex-end",
+              maxWidth: "80%",
+              background: isCaller ? "var(--bubble-caller, #1e2a3a)" : "var(--bubble-operator, #23331f)",
+              borderRadius: 10,
+              padding: "6px 10px",
+            }}
+          >
+            <div className="muted" style={{ fontSize: 11, marginBottom: 2 }}>
+              {isCaller ? "Caller" : "Operator"}
+            </div>
+            <div style={{ whiteSpace: "pre-wrap" }}>{s.text}</div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 function CallDrawer({ id, onClose }: { id: string; onClose: () => void }) {
   const qc = useQueryClient();
   const { data: c } = useQuery({ queryKey: ["call", id], queryFn: () => api.call(id) });
@@ -75,10 +106,14 @@ function CallDrawer({ id, onClose }: { id: string; onClose: () => void }) {
           </div>
         )}
 
-        {c.transcript && (
+        {(c.transcript_segments?.length > 0 || c.transcript) && (
           <div className="card" style={{ marginBottom: 12 }}>
             <div className="l" style={{ marginBottom: 8 }}>Transcript</div>
-            <div className="muted" style={{ whiteSpace: "pre-wrap" }}>{c.transcript}</div>
+            {c.transcript_segments?.length > 0 ? (
+              <TranscriptThread segments={c.transcript_segments} />
+            ) : (
+              <div className="muted" style={{ whiteSpace: "pre-wrap" }}>{c.transcript}</div>
+            )}
           </div>
         )}
 

@@ -52,13 +52,21 @@ class AnalysisOut(BaseModel):
     is_spam_override: bool | None = None
 
 
+class TranscriptSegment(BaseModel):
+    speaker: str  # 'caller' | 'operator'
+    start: float | None = None
+    end: float | None = None
+    text: str
+
+
 class CallDetail(CallListItem):
     answered_at: datetime | None = None
     ended_at: datetime | None = None
     forwarded_to: str | None = None
     events: list[CallEventOut] = []
     recordings: list[RecordingOut] = []
-    transcript: str | None = None
+    transcript: str | None = None  # flat text; fallback for mono/old/Twilio transcripts
+    transcript_segments: list[TranscriptSegment] | None = None  # speaker-separated (stereo)
     analysis: AnalysisOut | None = None
 
 

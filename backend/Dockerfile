@@ -4,8 +4,11 @@ ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
 
 WORKDIR /app
 
+# ffmpeg (bundles ffprobe) is required by the worker's dual-channel transcription
+# path: ffprobe detects channel count, ffmpeg splits a stereo recording into two
+# mono tracks (one per call leg) for per-speaker transcription. See handlers.py.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends libpq5 curl \
+    && apt-get install -y --no-install-recommends libpq5 curl ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
