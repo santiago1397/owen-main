@@ -96,6 +96,7 @@ async def list_calls(
             Provider.name.label("provider"),
             Caller.phone_number.label("caller_number"),
             Number.phone_number.label("dialed_number"),
+            Number.friendly_name.label("dialed_number_label"),
             Campaign.name.label("campaign_name"),
             exists().where(Recording.call_id == Call.id).label("has_recording"),
             func.coalesce(CallAnalysis.category_override, CallAnalysis.category).label("category"),
@@ -130,6 +131,7 @@ async def get_call(
                 Provider.name.label("provider"),
                 Caller.phone_number.label("caller_number"),
                 Number.phone_number.label("dialed_number"),
+                Number.friendly_name.label("dialed_number_label"),
                 Campaign.name.label("campaign_name"),
                 exists().where(Recording.call_id == Call.id).label("has_recording"),
             )

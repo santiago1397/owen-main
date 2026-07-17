@@ -34,7 +34,7 @@ function CallDrawer({ id, onClose }: { id: string; onClose: () => void }) {
         <div className="kv">
           <span className="muted">Provider</span><span>{c.provider}</span>
           <span className="muted">Caller</span><span>{c.caller_number || "—"}</span>
-          <span className="muted">Dialed</span><span>{c.dialed_number || "—"}</span>
+          <span className="muted">Dialed</span><span>{c.dialed_number || "—"}{c.dialed_number_label ? ` (${c.dialed_number_label})` : ""}</span>
           <span className="muted">Campaign</span><span>{c.campaign_name || "—"}</span>
           <span className="muted">Status</span><span>{c.status || "—"}</span>
           <span className="muted">Started</span><span>{c.started_at ? new Date(c.started_at).toLocaleString() : "—"}</span>
@@ -126,13 +126,17 @@ export default function Calls() {
       <div className="card">
         <table>
           <thead>
-            <tr><th>When</th><th>Caller</th><th>Campaign</th><th>Status</th><th>Dur</th><th>Flags</th></tr>
+            <tr><th>When</th><th>Caller</th><th>Number</th><th>Campaign</th><th>Status</th><th>Dur</th><th>Flags</th></tr>
           </thead>
           <tbody>
             {(data?.items || []).map((c: any) => (
               <tr key={c.id} className="clickable" onClick={() => setSelected(c.id)}>
                 <td>{c.started_at ? new Date(c.started_at).toLocaleString() : "—"}</td>
                 <td>{c.caller_number || "—"}</td>
+                <td>
+                  {c.dialed_number || "—"}
+                  {c.dialed_number_label && <div className="muted">{c.dialed_number_label}</div>}
+                </td>
                 <td>{c.campaign_name || "—"}</td>
                 <td>{c.status || "—"}</td>
                 <td>{c.duration_seconds ?? "—"}</td>

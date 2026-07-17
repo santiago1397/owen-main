@@ -14,6 +14,7 @@ class CallListItem(BaseModel):
     duration_seconds: int | None = None
     caller_number: str | None = None
     dialed_number: str | None = None
+    dialed_number_label: str | None = None  # Number.friendly_name of the tracking number
     campaign_name: str | None = None
     is_new_for_campaign: bool | None = None
     has_recording: bool = False
