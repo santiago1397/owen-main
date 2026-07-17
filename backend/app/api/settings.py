@@ -31,6 +31,7 @@ async def get_settings(request: Request, _: User = Depends(current_user)) -> dic
                 "account_sid": _mask(settings.TWILIO_ACCOUNT_SID),
                 "status_webhook": f"{base}/webhooks/twilio/status",
                 "recording_webhook": f"{base}/webhooks/twilio/recording",
+                "message_webhook": f"{base}/webhooks/twilio/message",
             },
             "signalwire": {
                 "configured": bool(settings.SIGNALWIRE_AUTH_TOKEN),
@@ -38,11 +39,15 @@ async def get_settings(request: Request, _: User = Depends(current_user)) -> dic
                 "space_url": settings.SIGNALWIRE_SPACE_URL,
                 "status_webhook": f"{base}/webhooks/signalwire/status",
                 "recording_webhook": f"{base}/webhooks/signalwire/recording",
+                "message_webhook": f"{base}/webhooks/signalwire/message",
             },
         },
         "engines": {
             "transcription": settings.TRANSCRIPTION_ENGINE,
             "analysis": settings.ANALYSIS_ENGINE,
             "analysis_model": settings.ANALYSIS_MODEL,
+        },
+        "ghl": {
+            "inbound_relay_configured": bool(settings.GHL_INBOUND_WEBHOOK_URL),
         },
     }

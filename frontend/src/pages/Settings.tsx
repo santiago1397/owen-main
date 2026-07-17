@@ -20,6 +20,11 @@ function Provider({ name, p }: { name: string; p: any }) {
       <div className="kv">
         <span className="muted">Status webhook</span><Copy text={p.status_webhook} />
         <span className="muted">Recording webhook</span><Copy text={p.recording_webhook} />
+        {p.message_webhook && (
+          <>
+            <span className="muted">Message webhook</span><Copy text={p.message_webhook} />
+          </>
+        )}
       </div>
     </div>
   );
@@ -41,6 +46,17 @@ export default function Settings() {
           <span className="muted">Transcription</span><span>{data.engines.transcription}</span>
           <span className="muted">Analysis</span><span>{data.engines.analysis} ({data.engines.analysis_model})</span>
         </div>
+      </div>
+      <div className="card" style={{ marginTop: 12 }}>
+        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <b>GoHighLevel</b>
+          <span className={"badge " + (data.ghl?.inbound_relay_configured ? "new" : "")}>
+            {data.ghl?.inbound_relay_configured ? "inbound relay on" : "inbound relay off"}
+          </span>
+        </div>
+        <p className="muted" style={{ marginBottom: 0 }}>
+          Inbound texts to the message webhook are relayed to GHL's inbound webhook. Receive-only — no outbound SMS.
+        </p>
       </div>
     </div>
   );

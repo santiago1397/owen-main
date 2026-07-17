@@ -18,6 +18,7 @@ from app.models import Call, Number
 from app.providers.base import ProviderAdapter
 from app.services import queue
 from app.services.ingestion import ingest_status_event
+from app.services.messages import ingest_message_event
 from app.services.recordings import ingest_recording_event
 
 logger = logging.getLogger("webhooks")
@@ -153,6 +154,20 @@ def build_router(adapter: ProviderAdapter, provider: str, signature_headers: lis
             else:
                 logger.info("%s recording: status=%s not completed yet, not enqueueing",
                             provider, rec.status)
+        return Response(status_code=200)
+
+    @router.post("/message")
+    async def message(request: Request) -> Response:
+        params = await _verified(request)
+        if params is None:
+            return Response(status_code=403)
+        evt = adapter.parse_message_event(params)
+        logger.info("%s message: sid=%s from=%s to=%s num_media=%s",
+                    provider, evt.provider_message_sid, evt.from_number,
+                    evt.to_number, evt.num_media)
+        async with SessionLocal() as db:  # type: AsyncSession
+            msg = await ingest_message_event(db, provider, evt)
+            await queue.enqueue(db, "message_relay_ghl", {"message_id": str(msg.id)})
         return Response(status_code=200)
 
     return router

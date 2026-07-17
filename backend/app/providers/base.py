@@ -55,9 +55,23 @@ class NormalizedRecordingEvent:
     raw: dict = field(default_factory=dict)
 
 
+@dataclass
+class NormalizedMessageEvent:
+    provider_message_sid: str
+    from_number: str | None = None
+    to_number: str | None = None
+    body: str | None = None
+    status: str | None = None
+    num_media: int = 0
+    media_urls: list[str] = field(default_factory=list)
+    direction: str = "inbound"
+    raw: dict = field(default_factory=dict)
+
+
 class ProviderAdapter(Protocol):
     name: str
 
     def parse_status_event(self, params: dict[str, str]) -> NormalizedCallEvent: ...
     def parse_recording_event(self, params: dict[str, str]) -> NormalizedRecordingEvent: ...
+    def parse_message_event(self, params: dict[str, str]) -> NormalizedMessageEvent: ...
     def verify_signature(self, url: str, params: dict[str, str], signature: str) -> bool: ...

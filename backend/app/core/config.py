@@ -71,6 +71,10 @@ class Settings(BaseSettings):
     MINIMAX_API_KEY: str = ""
     MINIMAX_BASE_URL: str = "https://api.minimax.io/v1"
 
+    # GoHighLevel — inbound SMS relay. We only ever POST inbound texts to a GHL Workflow
+    # "Inbound Webhook" trigger URL (plain JSON, no auth/OAuth). Empty = relay disabled.
+    GHL_INBOUND_WEBHOOK_URL: str = ""
+
     @property
     def database_url(self) -> str:
         return (

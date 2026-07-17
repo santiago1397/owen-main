@@ -18,8 +18,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.analysis.classification import get_analysis_engine
 from app.analysis.transcription import get_transcription_engine
 from app.core.config import settings
-from app.models import Call, CallAnalysis, Caller, Recording, Transcription
-from app.providers import signalwire_client, twilio_client
+from app.models import Call, CallAnalysis, Caller, Message, Number, Recording, Transcription
+from app.providers import ghl_client, signalwire_client, twilio_client
 from app.services import queue
 
 logger = logging.getLogger("worker.handlers")
@@ -145,8 +145,39 @@ async def handle_analyze(db: AsyncSession, payload: dict) -> None:
     logger.info("analyze: call %s -> spam=%s category=%s", call_id, r.is_spam, r.category)
 
 
+async def handle_message_relay_ghl(db: AsyncSession, payload: dict) -> None:
+    """Relay an inbound SMS to GoHighLevel via its inbound webhook. Idempotent: the
+    relayed_to_ghl flag guards against re-sending on retry. Raises on failure so the
+    queue retries (backoff)."""
+    msg = await db.get(Message, uuid.UUID(payload["message_id"]))
+    if msg is None:
+        logger.warning("message_relay_ghl: message %s not found", payload.get("message_id"))
+        return
+    if msg.relayed_to_ghl:
+        logger.info("message_relay_ghl: %s already relayed, skipping", msg.provider_message_sid)
+        return
+
+    number = await db.get(Number, msg.number_id) if msg.number_id else None
+    await ghl_client.post_inbound_message({
+        "message_sid": msg.provider_message_sid,
+        "from": msg.from_number,
+        "to": msg.to_number,
+        "body": msg.body,
+        "direction": msg.direction,
+        "num_media": msg.num_media,
+        "media_urls": msg.media_urls or [],
+        "number_label": number.friendly_name if number else None,
+        "received_at": msg.received_at.isoformat() if msg.received_at else None,
+    })
+    msg.relayed_to_ghl = True
+    msg.relayed_at = datetime.now(timezone.utc)
+    await db.commit()
+    logger.info("message_relay_ghl: relayed %s to GHL", msg.provider_message_sid)
+
+
 HANDLERS = {
     "recording_fetch": handle_recording_fetch,
     "transcribe": handle_transcribe,
     "analyze": handle_analyze,
+    "message_relay_ghl": handle_message_relay_ghl,
 }

@@ -179,6 +179,39 @@ class CallAnalysis(Base):
     is_spam_override: Mapped[bool | None] = mapped_column(Boolean)
 
 
+class Message(Base):
+    """Inbound SMS received on a tracking number, attributed like a call and relayed to
+    GHL. Idempotent on provider_message_sid (mirrors Recording.provider_recording_sid).
+    """
+
+    __tablename__ = "messages"
+    __table_args__ = (
+        # Dashboards may group messages by number/campaign over time, like calls.
+        Index("ix_messages_number_received", "number_id", "received_at"),
+        Index("ix_messages_campaign_received", "campaign_id", "received_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_uuid)
+    provider_id: Mapped[int] = mapped_column(ForeignKey("providers.id"), index=True)
+    provider_message_sid: Mapped[str] = mapped_column(String, unique=True)  # idempotency key
+    number_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("numbers.id"), index=True)
+    caller_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("callers.id"), index=True)
+    campaign_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("campaigns.id"), index=True)
+
+    direction: Mapped[str | None] = mapped_column(String)  # 'inbound'
+    from_number: Mapped[str | None] = mapped_column(String)
+    to_number: Mapped[str | None] = mapped_column(String)
+    body: Mapped[str | None] = mapped_column(Text)
+    status: Mapped[str | None] = mapped_column(String)
+    num_media: Mapped[int] = mapped_column(Integer, default=0)
+    media_urls: Mapped[dict | None] = mapped_column(JSONB)  # list of MMS media URLs
+
+    relayed_to_ghl: Mapped[bool] = mapped_column(Boolean, default=False)  # relay-once guard
+    relayed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    raw_payload: Mapped[dict | None] = mapped_column(JSONB)
+    received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
 class Job(Base):
     """Durable Postgres-backed queue. Drained with SELECT ... FOR UPDATE SKIP LOCKED."""
 

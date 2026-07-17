@@ -117,7 +117,7 @@ owen-main-software/
 | `main.py` | Builds the `FastAPI` app; `lifespan` runs migrations at startup; adds CORS; includes all `api/*` + `webhooks/*` routers; `GET /health` (runs `SELECT 1`, gates the container healthcheck, no auth). |
 | `db.py` | `create_async_engine(database_url)` (asyncpg), `SessionLocal` (`async_sessionmaker`), `Base`, `get_db()` dependency. |
 | `migrate.py` | `run_migrations()` — swaps to a sync psycopg2 engine, takes `pg_advisory_lock(0x0CA11)` so only one container migrates, runs Alembic to head. Also re-enables loggers that Alembic's `fileConfig` would otherwise disable (see SignalWire doc infra-bug #1). |
-| `core/config.py` | `Settings` (pydantic-settings, reads `.env`). All tunables: DB creds, `SECRET_KEY`/JWT, `BUSINESS_TZ`, provider creds, `RECONCILE_WINDOW_HOURS`, recordings dir/retention, transcription + analysis engine selection + API keys. Singleton `settings`. |
+| `core/config.py` | `Settings` (pydantic-settings, reads `.env`). All tunables: DB creds, `SECRET_KEY`/JWT, `BUSINESS_TZ`, provider creds, `RECONCILE_WINDOW_HOURS`, recordings dir/retention, transcription + analysis engine selection + API keys, `GHL_INBOUND_WEBHOOK_URL` (inbound-SMS relay target). Singleton `settings`. |
 | `core/security.py` | argon2 password hashing; JWT create/decode (access / refresh / **playback** token types); webhook HMAC-SHA1 verifiers (`verify_twilio_signature`, `verify_signalwire_signature` — kept separate per provider). |
 
 ### Data model (`app/models/models.py`)
@@ -133,11 +133,13 @@ The whole schema in one file. Tables (PK type in parens):
 - **`recordings`** (uuid) — `call_id`, `provider_recording_sid` (unique = idempotency), `status`, `storage_path`, `provider_url`, `downloaded_at`, `transcribed` (gates retention deletion).
 - **`transcriptions`** (uuid) — `call_id`, `recording_id`, `engine`, `text`, `language`, `confidence`, `words`.
 - **`call_analysis`** (uuid) — `call_id` (unique), `is_spam`, `spam_confidence`, `category`, `tags`, `summary`, `model`, plus human `category_override` / `is_spam_override` (human wins).
+- **`messages`** (uuid) — inbound SMS on a tracking number. `provider_id`, `provider_message_sid` (unique = idempotency), `number_id`/`caller_id`/`campaign_id` (attributed like a call), `direction`, `from_number`, `to_number`, `body`, `status`, `num_media`, `media_urls`, `relayed_to_ghl`/`relayed_at` (GHL relay-once guard), `raw_payload`, `received_at`. Composite indexes on `(number_id, received_at)` and `(campaign_id, received_at)`.
 - **`jobs`** (uuid) — durable queue. `type`, `payload`, `status`, `attempts`, `last_error`, `run_after`, `locked_at`.
 - **`users`** (uuid) — `email` unique, `password_hash` (argon2), `role`, `active`.
 
-Migrations live in `backend/alembic/versions/` as a 4-step linear chain (initial
-schema → composite call indexes → recording-sid unique → transcriptions + analysis).
+Migrations live in `backend/alembic/versions/` as a 5-step linear chain (initial
+schema → composite call indexes → recording-sid unique → transcriptions + analysis →
+messages).
 
 ### Ingestion — the correctness core (`app/services/ingestion.py`)
 
@@ -157,27 +159,34 @@ normalized call event it:
 upsert for recordings; it `_ensure_call` first so a recording arriving before its
 status webhook still lands on the right row.
 
+`ingest_message_event` (in `services/messages.py`) is the analogous idempotent upsert
+for inbound SMS: resolves the `Number` by `(provider_id, to_number)` for campaign
+attribution (reusing `_get_or_create_provider`/`_get_or_create_caller`), then upserts
+`messages` `ON CONFLICT (provider_message_sid)`. The `/message` route enqueues a
+`message_relay_ghl` job to forward it to GoHighLevel.
+
 ### Webhooks (`app/webhooks/`) — real-time push ingestion
 
-- `common.py` — `build_router(adapter, provider, signature_headers)` factory. Reconstructs the public URL behind Traefik, verifies the signature (or SignalWire CFB HTTP Basic Auth via `SIGNALWIRE_CFB_WEBHOOK_SECRET`), parses body → adapter → `ingest_*`, returns 200 fast (slow work is enqueued). `POST /status` and `POST /recording`.
+- `common.py` — `build_router(adapter, provider, signature_headers)` factory. Reconstructs the public URL behind Traefik, verifies the signature (or SignalWire CFB HTTP Basic Auth via `SIGNALWIRE_CFB_WEBHOOK_SECRET`), parses body → adapter → `ingest_*`, returns 200 fast (slow work is enqueued). `POST /status`, `POST /recording`, and `POST /message` (inbound SMS → `ingest_message_event` → enqueue `message_relay_ghl`).
 - `twilio.py` / `signalwire.py` — one-liners that instantiate the router with the right adapter + signature header names.
 
 ### Providers (`app/providers/`) — per-provider translation
 
 | File | Role |
 |---|---|
-| `base.py` | `NormalizedCallEvent` / `NormalizedRecordingEvent` dataclasses, `ProviderAdapter` protocol, `STATUS_RANK` (the monotonic status ordering). |
+| `base.py` | `NormalizedCallEvent` / `NormalizedRecordingEvent` / `NormalizedMessageEvent` dataclasses, `ProviderAdapter` protocol, `STATUS_RANK` (the monotonic status ordering). |
 | `cxml.py` | Shared normalization of Twilio/SignalWire cXML REST resources → `NormalizedCallEvent` (used by reconciliation). |
 | `twilio.py` | `TwilioAdapter` — parses Twilio webhook form fields (`CallSid`, `CallStatus`, `From`, `To`, …), verifies signature. |
 | `signalwire.py` | `SignalWireAdapter(TwilioAdapter)` — adds a **native Relay/Calling** parser for CFB's `calling.call.state` events (single-quoted Python-repr `params`, `parent.call_id` leg correlation, `_tracking_number` override). |
 | `twilio_client.py` | REST reconciliation client: `fetch_recent_calls`, `delete_recording`. |
 | `signalwire_client.py` | REST client. **The modern Voice API path** (`fetch_recent_calls_voice_logs`, `fetch_recordings_via_voice_logs`) is what actually works for this account; classic Compatibility-API functions kept unused as fallback. |
+| `ghl_client.py` | GoHighLevel inbound-SMS relay: `post_inbound_message(payload)` POSTs to the `GHL_INBOUND_WEBHOOK_URL` Workflow trigger (plain JSON, no auth). No-op when unconfigured. Inbound-only — never sends outbound SMS. |
 
 ### Background worker (`app/worker.py`, `app/workers/`, `app/services/queue.py`)
 
 - `worker.py` — the worker container's entrypoint. Runs two things in one asyncio process: a **drain loop** (`claim_one` → dispatch to handler → complete/fail) and an **APScheduler** with `reconcile_recent` (every 5 min) + `retention_sweep` (every 6 hrs).
 - `services/queue.py` — the Postgres-backed job queue. `enqueue`, `claim_one` (`UPDATE … WHERE id = (SELECT … FOR UPDATE SKIP LOCKED)` so concurrent drainers never collide), `complete`, `fail` (linear backoff `30s × attempts`, up to `MAX_ATTEMPTS=5` then dead).
-- `workers/handlers.py` — the pipeline. `HANDLERS = {recording_fetch, transcribe, analyze}`, each enqueuing the next on success:
+- `workers/handlers.py` — the pipeline. `HANDLERS = {recording_fetch, transcribe, analyze, message_relay_ghl}`. The recording pipeline enqueues the next stage on success; `message_relay_ghl` POSTs the message to GHL (`ghl_client`) and sets `relayed_to_ghl`/`relayed_at` (raises to retry on failure):
   - **`recording_fetch`** — streams the provider media to `/data/recordings/{sid}.mp3` (atomic `.part` → `os.replace`), optionally deletes the remote copy, enqueues `transcribe`.
   - **`transcribe`** — runs the configured `TranscriptionEngine`, writes a `Transcription`, sets `recording.transcribed=True` (now retention may delete the audio), enqueues `analyze`.
   - **`analyze`** — runs the configured `AnalysisEngine`, upserts `CallAnalysis`, updates the caller's `spam_score`.

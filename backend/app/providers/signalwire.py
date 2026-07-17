@@ -97,5 +97,10 @@ class SignalWireAdapter(TwilioAdapter):
     def parse_recording_event(self, params: dict[str, str]) -> NormalizedRecordingEvent:
         return super().parse_recording_event(params)
 
+    # parse_message_event is inherited from TwilioAdapter: the number's Inbound Message
+    # resource is a cXML/Compatibility Messaging webhook, whose fields (MessageSid, From,
+    # To, Body, NumMedia, MediaUrl*) match Twilio's. Override only if a future native
+    # (Relay) message shape gets used here.
+
     def verify_signature(self, url: str, params: dict[str, str], signature: str) -> bool:
         return verify_signalwire_signature(url, params, signature)
