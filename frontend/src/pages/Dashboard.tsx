@@ -1,12 +1,14 @@
 import { useQuery } from "@tanstack/react-query";
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import {
   Bar, BarChart, CartesianGrid, Cell, Line, LineChart, Pie, PieChart,
   ResponsiveContainer, Tooltip, XAxis, YAxis,
 } from "recharts";
 import { api } from "../api";
+import {
+  PRESET_LABELS, PRESETS, type Preset, easternTodayInput, hourLabel, resolveRange,
+} from "../lib/dates";
 
-const RANGES = ["today", "7d", "30d", "90d"];
 const COLORS = ["#4f8cff", "#37d67a", "#ffb020", "#ff5c6c", "#a78bfa", "#22d3ee"];
 
 function Stat({ n, l }: { n: any; l: string }) {
@@ -19,33 +21,98 @@ function Stat({ n, l }: { n: any; l: string }) {
 }
 
 export default function Dashboard() {
-  const [range, setRange] = useState("7d");
+  // `now` is captured once so rolling windows (7d/30d/today) don't churn the query key
+  // on every render; a page reload re-anchors it.
+  const [now] = useState(() => new Date());
+  const [preset, setPreset] = useState<Preset>("7d");
+  const [customFrom, setCustomFrom] = useState(() => easternTodayInput(now));
+  const [customTo, setCustomTo] = useState(() => easternTodayInput(now));
+  const [hideJunk, setHideJunk] = useState(true);
+
+  const range = useMemo(
+    () => resolveRange(preset, now, customFrom, customTo),
+    [preset, now, customFrom, customTo],
+  );
+
   const { data, isLoading } = useQuery({
-    queryKey: ["dashboard", range],
-    queryFn: () => api.dashboard(range),
+    queryKey: ["dashboard", range?.from.toISOString(), range?.to.toISOString(), hideJunk],
+    queryFn: () =>
+      api.dashboard({
+        date_from: range!.from.toISOString(),
+        date_to: range!.to.toISOString(),
+        hide_junk: hideJunk,
+      }),
+    enabled: !!range,
   });
 
-  if (isLoading || !data) return <div>Loading…</div>;
+  return (
+    <div>
+      <div className="toolbar" style={{ flexWrap: "wrap", gap: 8 }}>
+        <h2 style={{ margin: 0, flex: 1 }}>Dashboard</h2>
+        <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
+          {PRESETS.map((p) => (
+            <button
+              key={p}
+              onClick={() => setPreset(p)}
+              className={preset === p ? "btn active" : "btn"}
+              style={{
+                padding: "4px 10px",
+                background: preset === p ? "#4f8cff" : "#1b1f27",
+                color: preset === p ? "#fff" : "#9aa4b2",
+                border: "1px solid #2a2f3a",
+                borderRadius: 6,
+                cursor: "pointer",
+              }}
+            >
+              {PRESET_LABELS[p]}
+            </button>
+          ))}
+        </div>
+      </div>
 
+      <div className="toolbar" style={{ gap: 12, flexWrap: "wrap", marginTop: 8 }}>
+        {preset === "custom" && (
+          <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+            <input type="date" value={customFrom} max={customTo}
+              onChange={(e) => setCustomFrom(e.target.value)} />
+            <span className="muted">to</span>
+            <input type="date" value={customTo} min={customFrom}
+              onChange={(e) => setCustomTo(e.target.value)} />
+          </div>
+        )}
+        <label style={{ display: "flex", gap: 6, alignItems: "center", fontSize: 13, cursor: "pointer" }}>
+          <input type="checkbox" checked={hideJunk} onChange={(e) => setHideJunk(e.target.checked)} />
+          Hide likely-junk calls (≤3s or never connected)
+        </label>
+      </div>
+
+      {!range && preset === "custom" ? (
+        <p className="muted">Pick a start and end date.</p>
+      ) : isLoading || !data ? (
+        <div>Loading…</div>
+      ) : (
+        <DashboardBody data={data} hideJunk={hideJunk} />
+      )}
+    </div>
+  );
+}
+
+function DashboardBody({ data, hideJunk }: { data: any; hideJunk: boolean }) {
   const donut = [
     { name: "New (campaign)", value: data.new_for_campaign },
     { name: "Returning", value: data.returning_for_campaign },
   ];
+  const hourData = (data.by_hour ?? []).map((h: any) => ({ ...h, label: hourLabel(h.hour) }));
 
   return (
-    <div>
-      <div className="toolbar">
-        <h2 style={{ margin: 0, flex: 1 }}>Dashboard</h2>
-        <select value={range} onChange={(e) => setRange(e.target.value)}>
-          {RANGES.map((r) => <option key={r} value={r}>{r}</option>)}
-        </select>
-      </div>
-      <p className="muted" style={{ marginTop: 0, fontSize: 12 }}>
-        Excludes 0–1s misdial/hang-up calls.
+    <>
+      <p className="muted" style={{ marginTop: 8, fontSize: 12 }}>
+        {hideJunk ? "Likely-junk calls excluded from stats." : "Including likely-junk calls."}
       </p>
 
       <div className="row" style={{ marginBottom: 16 }}>
         <Stat n={data.total_calls} l="Total calls" />
+        <Stat n={data.junk_calls} l="Likely junk" />
         <Stat n={data.spam_calls} l="Spam-flagged" />
         <Stat n={data.new_callers_global} l="New callers" />
         <Stat n={data.returning_callers_global} l="Returning callers" />
@@ -54,7 +121,7 @@ export default function Dashboard() {
 
       <div className="row">
         <div className="card" style={{ flex: 2, minWidth: 360, height: 260 }}>
-          <div className="l">Calls per day (Eastern)</div>
+          <div className="l">Calls per day (Miami time)</div>
           <ResponsiveContainer width="100%" height="90%">
             <LineChart data={data.daily}>
               <CartesianGrid stroke="#2a2f3a" />
@@ -75,6 +142,21 @@ export default function Dashboard() {
               </Pie>
               <Tooltip contentStyle={{ background: "#171a21", border: "1px solid #2a2f3a" }} />
             </PieChart>
+          </ResponsiveContainer>
+        </div>
+      </div>
+
+      <div className="row" style={{ marginTop: 16 }}>
+        <div className="card" style={{ flex: 1, minWidth: 360, height: 260 }}>
+          <div className="l">Call volume by hour (Miami time)</div>
+          <ResponsiveContainer width="100%" height="90%">
+            <BarChart data={hourData}>
+              <CartesianGrid stroke="#2a2f3a" />
+              <XAxis dataKey="label" stroke="#9aa4b2" fontSize={11} interval={2} />
+              <YAxis stroke="#9aa4b2" fontSize={11} allowDecimals={false} />
+              <Tooltip contentStyle={{ background: "#171a21", border: "1px solid #2a2f3a" }} />
+              <Bar dataKey="calls" fill="#22d3ee" />
+            </BarChart>
           </ResponsiveContainer>
         </div>
       </div>
@@ -104,6 +186,6 @@ export default function Dashboard() {
           </table>
         </div>
       </div>
-    </div>
+    </>
   );
 }

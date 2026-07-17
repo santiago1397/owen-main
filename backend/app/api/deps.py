@@ -14,6 +14,12 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/login")
 # callers can opt back in per request via `include_short=true`.
 SHORT_CALL_MAX_DURATION_SECONDS = 1
 
+# Dashboard "likely junk" heuristic (distinct from the LLM spam verdict): a call is junk
+# if it lasted this many seconds or fewer, OR it never connected (see JUNK_STATUSES).
+# NULL durations / NULL statuses are treated as NOT junk (call may still be in flight).
+JUNK_CALL_MAX_DURATION_SECONDS = 3
+JUNK_STATUSES = ("failed", "busy", "no-answer", "canceled")
+
 
 async def current_user(
     token: str = Depends(oauth2_scheme), db: AsyncSession = Depends(get_db)

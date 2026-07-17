@@ -1,10 +1,14 @@
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends
-from sqlalchemy import func, or_, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import SHORT_CALL_MAX_DURATION_SECONDS, current_user
+from app.api.deps import (
+    JUNK_CALL_MAX_DURATION_SECONDS,
+    JUNK_STATUSES,
+    current_user,
+)
 from app.core.config import settings
 from app.db import get_db
 from app.models import Call, CallAnalysis, Caller, Campaign, Number, User
@@ -12,32 +16,40 @@ from app.schemas.api import DashboardSummary
 
 router = APIRouter(prefix="/api/dashboard", tags=["dashboard"])
 
-_RANGES = {"today": 1, "7d": 7, "30d": 30, "90d": 90}
+# A call is "likely junk" if it lasted <= JUNK_CALL_MAX_DURATION_SECONDS OR never connected.
+# NULL duration / NULL status count as NOT junk (call may still be in flight).
+_IS_JUNK = or_(
+    and_(Call.duration_seconds.is_not(None), Call.duration_seconds <= JUNK_CALL_MAX_DURATION_SECONDS),
+    and_(Call.status.is_not(None), Call.status.in_(JUNK_STATUSES)),
+)
+# NULL-safe negation: an explicit not_(_IS_JUNK) would drop NULL-status rows (NULL logic),
+# so spell out "not junk" keeping NULLs on the non-junk side.
+_NOT_JUNK = and_(
+    or_(Call.duration_seconds.is_(None), Call.duration_seconds > JUNK_CALL_MAX_DURATION_SECONDS),
+    or_(Call.status.is_(None), Call.status.notin_(JUNK_STATUSES)),
+)
 
 
 @router.get("/summary", response_model=DashboardSummary)
 async def summary(
-    range: str = "7d",  # noqa: A002
-    include_short: bool = False,
+    date_from: datetime | None = None,
+    date_to: datetime | None = None,
+    hide_junk: bool = True,
     _: User = Depends(current_user),
     db: AsyncSession = Depends(get_db),
 ) -> DashboardSummary:
-    days = _RANGES.get(range, 7)
     now = datetime.now(timezone.utc)
-    start = now - timedelta(days=days)
-    in_range = Call.started_at >= start
+    # Frontend sends explicit UTC bounds (half-open: date_to is start-of-next-day so the
+    # last day is fully included). Absent both, default to the last 7 days.
+    start = date_from or (now - timedelta(days=7))
+    end = date_to or now
+    in_range = and_(Call.started_at >= start, Call.started_at < end)
 
-    # Every call-based aggregate shares this filter, so 0–1s misdial/hang-up junk is
-    # excluded from the stats by default (matches the calls list). Pass include_short=true
-    # to count them. NULL durations (never reported) are kept.
+    # Every call-based aggregate shares this filter. By default likely-junk calls
+    # (short / never-connected) are excluded from the stats; flip hide_junk=false to keep them.
     call_filters = [in_range]
-    if not include_short:
-        call_filters.append(
-            or_(
-                Call.duration_seconds.is_(None),
-                Call.duration_seconds > SHORT_CALL_MAX_DURATION_SECONDS,
-            )
-        )
+    if hide_junk:
+        call_filters.append(_NOT_JUNK)
 
     total_calls = (await db.execute(select(func.count()).select_from(Call).where(*call_filters))).scalar_one()
     spam_calls = (await db.execute(
@@ -48,6 +60,12 @@ async def summary(
     avg_duration = (
         await db.execute(select(func.avg(Call.duration_seconds)).where(*call_filters, Call.duration_seconds.is_not(None)))
     ).scalar_one()
+
+    # Likely-junk count is informational: always measured over the full range, independent
+    # of the hide_junk toggle (that's the whole point of the card — show what's being hidden).
+    junk_calls = (await db.execute(
+        select(func.count()).select_from(Call).where(in_range, _IS_JUNK)
+    )).scalar_one()
 
     # Per-campaign new vs returning (call-level flag stamped at ingest).
     new_for_campaign = (await db.execute(
@@ -98,6 +116,17 @@ async def summary(
         )).all()
     ]
 
+    # Hour-of-day histogram in business tz (Miami/Eastern). Zero-fill all 24 hours so the
+    # frontend renders a gapless 0–23 axis regardless of which hours saw traffic.
+    hour_expr = func.extract("hour", local_ts)
+    hour_counts = {
+        int(h): count
+        for h, count in (await db.execute(
+            select(hour_expr.label("hour"), func.count(Call.id)).where(*call_filters).group_by("hour")
+        )).all()
+    }
+    by_hour = [{"hour": h, "calls": hour_counts.get(h, 0)} for h in range(24)]
+
     top_callers = [
         {"phone": phone, "calls": count}
         for phone, count in (await db.execute(
@@ -109,9 +138,11 @@ async def summary(
     ]
 
     return DashboardSummary(
-        range_from=start, range_to=now, total_calls=total_calls, spam_calls=spam_calls,
+        range_from=start, range_to=end, total_calls=total_calls, spam_calls=spam_calls,
+        junk_calls=junk_calls,
         avg_duration_seconds=float(avg_duration) if avg_duration is not None else None,
         new_callers_global=new_global, returning_callers_global=returning_global,
         new_for_campaign=new_for_campaign, returning_for_campaign=returning_for_campaign,
-        by_campaign=by_campaign, by_number=by_number, daily=daily, top_callers=top_callers,
+        by_campaign=by_campaign, by_number=by_number, daily=daily, by_hour=by_hour,
+        top_callers=top_callers,
     )

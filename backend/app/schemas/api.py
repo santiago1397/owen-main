@@ -98,6 +98,7 @@ class DashboardSummary(BaseModel):
     range_to: datetime
     total_calls: int
     spam_calls: int = 0
+    junk_calls: int = 0  # likely-junk heuristic (short/never-connected), counted over the range
     avg_duration_seconds: float | None = None
     new_callers_global: int
     returning_callers_global: int
@@ -106,4 +107,5 @@ class DashboardSummary(BaseModel):
     by_campaign: list[dict]
     by_number: list[dict]
     daily: list[dict]
+    by_hour: list[dict]  # 24 rows, hour 0–23 in business tz, zero-filled
     top_callers: list[dict]

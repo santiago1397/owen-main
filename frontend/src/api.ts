@@ -59,7 +59,8 @@ const qs = (params: Record<string, any>) => {
 
 export const api = {
   me: () => request("/api/auth/me"),
-  dashboard: (range: string) => request(`/api/dashboard/summary${qs({ range })}`),
+  dashboard: (params: { date_from?: string; date_to?: string; hide_junk?: boolean }) =>
+    request(`/api/dashboard/summary${qs(params)}`),
   calls: (filters: Record<string, any>) => request(`/api/calls${qs(filters)}`),
   call: (id: string) => request(`/api/calls/${id}`),
   overrideAnalysis: (id: string, body: any) =>
