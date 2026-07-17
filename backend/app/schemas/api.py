@@ -83,6 +83,12 @@ class NumberStats(BaseModel):
     last_call_at: datetime | None = None
 
 
+class CampaignOut(BaseModel):
+    id: uuid.UUID
+    name: str
+    active: bool
+
+
 class CallerOut(BaseModel):
     id: uuid.UUID
     phone_number: str

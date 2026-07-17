@@ -1,13 +1,12 @@
 import { useQuery } from "@tanstack/react-query";
-import { useMemo, useState } from "react";
+import { useState } from "react";
 import {
   Bar, BarChart, CartesianGrid, Cell, Line, LineChart, Pie, PieChart,
   ResponsiveContainer, Tooltip, XAxis, YAxis,
 } from "recharts";
 import { api } from "../api";
-import {
-  PRESET_LABELS, PRESETS, type Preset, easternTodayInput, hourLabel, resolveRange,
-} from "../lib/dates";
+import DateRangeBar from "../components/DateRangeBar";
+import { type Range, hourLabel } from "../lib/dates";
 
 const COLORS = ["#4f8cff", "#37d67a", "#ffb020", "#ff5c6c", "#a78bfa", "#22d3ee"];
 
@@ -21,18 +20,8 @@ function Stat({ n, l }: { n: any; l: string }) {
 }
 
 export default function Dashboard() {
-  // `now` is captured once so rolling windows (7d/30d/today) don't churn the query key
-  // on every render; a page reload re-anchors it.
-  const [now] = useState(() => new Date());
-  const [preset, setPreset] = useState<Preset>("7d");
-  const [customFrom, setCustomFrom] = useState(() => easternTodayInput(now));
-  const [customTo, setCustomTo] = useState(() => easternTodayInput(now));
+  const [range, setRange] = useState<Range | null>(null);
   const [hideJunk, setHideJunk] = useState(true);
-
-  const range = useMemo(
-    () => resolveRange(preset, now, customFrom, customTo),
-    [preset, now, customFrom, customTo],
-  );
 
   const { data, isLoading } = useQuery({
     queryKey: ["dashboard", range?.from.toISOString(), range?.to.toISOString(), hideJunk],
@@ -49,44 +38,17 @@ export default function Dashboard() {
     <div>
       <div className="toolbar" style={{ flexWrap: "wrap", gap: 8 }}>
         <h2 style={{ margin: 0, flex: 1 }}>Dashboard</h2>
-        <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
-          {PRESETS.map((p) => (
-            <button
-              key={p}
-              onClick={() => setPreset(p)}
-              className={preset === p ? "btn active" : "btn"}
-              style={{
-                padding: "4px 10px",
-                background: preset === p ? "#4f8cff" : "#1b1f27",
-                color: preset === p ? "#fff" : "#9aa4b2",
-                border: "1px solid #2a2f3a",
-                borderRadius: 6,
-                cursor: "pointer",
-              }}
-            >
-              {PRESET_LABELS[p]}
-            </button>
-          ))}
-        </div>
+        <DateRangeBar defaultPreset="7d" onChange={setRange} />
       </div>
 
       <div className="toolbar" style={{ gap: 12, flexWrap: "wrap", marginTop: 8 }}>
-        {preset === "custom" && (
-          <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
-            <input type="date" value={customFrom} max={customTo}
-              onChange={(e) => setCustomFrom(e.target.value)} />
-            <span className="muted">to</span>
-            <input type="date" value={customTo} min={customFrom}
-              onChange={(e) => setCustomTo(e.target.value)} />
-          </div>
-        )}
         <label style={{ display: "flex", gap: 6, alignItems: "center", fontSize: 13, cursor: "pointer" }}>
           <input type="checkbox" checked={hideJunk} onChange={(e) => setHideJunk(e.target.checked)} />
           Hide likely-junk calls (≤3s or never connected)
         </label>
       </div>
 
-      {!range && preset === "custom" ? (
+      {!range ? (
         <p className="muted">Pick a start and end date.</p>
       ) : isLoading || !data ? (
         <div>Loading…</div>

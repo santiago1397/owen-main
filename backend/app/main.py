@@ -8,6 +8,7 @@ from sqlalchemy import text
 from app.api import auth
 from app.api import callers as callers_api
 from app.api import calls as calls_api
+from app.api import campaigns as campaigns_api
 from app.api import dashboard as dashboard_api
 from app.api import numbers as numbers_api
 from app.api import recordings as recordings_api
@@ -42,6 +43,7 @@ app.include_router(auth.router)
 app.include_router(calls_api.router)
 app.include_router(numbers_api.router)
 app.include_router(callers_api.router)
+app.include_router(campaigns_api.router)
 app.include_router(dashboard_api.router)
 app.include_router(recordings_api.router)
 app.include_router(settings_api.router)

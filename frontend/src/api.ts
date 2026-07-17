@@ -70,6 +70,7 @@ export const api = {
       body: JSON.stringify(body),
     }),
   numbers: () => request("/api/numbers"),
+  campaigns: () => request("/api/campaigns"),
   callers: (filters: Record<string, any>) => request(`/api/callers${qs(filters)}`),
   updateCaller: (id: string, body: any) =>
     request(`/api/callers/${id}`, {

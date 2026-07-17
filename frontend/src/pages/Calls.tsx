@@ -1,6 +1,8 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 import { API_BASE, api } from "../api";
+import DateRangeBar from "../components/DateRangeBar";
+import { type Range } from "../lib/dates";
 
 function RecordingPlayer({ recordingId }: { recordingId: string }) {
   const [url, setUrl] = useState<string | null>(null);
@@ -95,15 +97,32 @@ function CallDrawer({ id, onClose }: { id: string; onClose: () => void }) {
 
 export default function Calls() {
   const [filters, setFilters] = useState<any>({ page: 1, page_size: 50 });
+  const [hideJunk, setHideJunk] = useState(true);
   const [selected, setSelected] = useState<string | null>(null);
-  const { data } = useQuery({ queryKey: ["calls", filters], queryFn: () => api.calls(filters) });
+  const { data: campaigns } = useQuery({ queryKey: ["campaigns"], queryFn: api.campaigns });
+
+  const query = { ...filters, hide_junk: hideJunk || undefined };
+  const { data } = useQuery({ queryKey: ["calls", query], queryFn: () => api.calls(query) });
   const set = (k: string, v: any) => setFilters((f: any) => ({ ...f, [k]: v, page: 1 }));
+  const onRange = (r: Range | null) =>
+    setFilters((f: any) => ({
+      ...f, page: 1,
+      date_from: r?.from.toISOString(),
+      date_to: r?.to.toISOString(),
+    }));
 
   return (
     <div>
-      <h2 style={{ marginTop: 0 }}>Calls</h2>
-      <div className="toolbar">
+      <div className="toolbar" style={{ flexWrap: "wrap", gap: 8 }}>
+        <h2 style={{ marginTop: 0, marginBottom: 0, flex: 1 }}>Calls</h2>
+        <DateRangeBar defaultPreset="7d" onChange={onRange} />
+      </div>
+      <div className="toolbar" style={{ flexWrap: "wrap", gap: 8, marginTop: 8 }}>
         <input placeholder="caller number…" onChange={(e) => set("caller", e.target.value)} />
+        <select onChange={(e) => set("campaign_id", e.target.value || undefined)}>
+          <option value="">all campaigns</option>
+          {(campaigns || []).map((c: any) => <option key={c.id} value={c.id}>{c.name}</option>)}
+        </select>
         <select onChange={(e) => set("provider", e.target.value)}>
           <option value="">all providers</option>
           <option value="twilio">twilio</option>
@@ -116,10 +135,10 @@ export default function Calls() {
         <label className="muted" style={{ display: "flex", alignItems: "center", gap: 6, marginLeft: "auto" }}>
           <input
             type="checkbox"
-            checked={!!filters.include_short}
-            onChange={(e) => set("include_short", e.target.checked || undefined)}
+            checked={hideJunk}
+            onChange={(e) => { setHideJunk(e.target.checked); setFilters((f: any) => ({ ...f, page: 1 })); }}
           />
-          Show 0–1s calls
+          Hide failed &amp; ≤3s calls
         </label>
       </div>
 

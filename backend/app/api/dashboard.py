@@ -1,33 +1,17 @@
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends
-from sqlalchemy import and_, func, or_, select
+from sqlalchemy import and_, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import (
-    JUNK_CALL_MAX_DURATION_SECONDS,
-    JUNK_STATUSES,
-    current_user,
-)
+from app.api.deps import current_user
+from app.api.junk import IS_JUNK, NOT_JUNK
 from app.core.config import settings
 from app.db import get_db
 from app.models import Call, CallAnalysis, Caller, Campaign, Number, User
 from app.schemas.api import DashboardSummary
 
 router = APIRouter(prefix="/api/dashboard", tags=["dashboard"])
-
-# A call is "likely junk" if it lasted <= JUNK_CALL_MAX_DURATION_SECONDS OR never connected.
-# NULL duration / NULL status count as NOT junk (call may still be in flight).
-_IS_JUNK = or_(
-    and_(Call.duration_seconds.is_not(None), Call.duration_seconds <= JUNK_CALL_MAX_DURATION_SECONDS),
-    and_(Call.status.is_not(None), Call.status.in_(JUNK_STATUSES)),
-)
-# NULL-safe negation: an explicit not_(_IS_JUNK) would drop NULL-status rows (NULL logic),
-# so spell out "not junk" keeping NULLs on the non-junk side.
-_NOT_JUNK = and_(
-    or_(Call.duration_seconds.is_(None), Call.duration_seconds > JUNK_CALL_MAX_DURATION_SECONDS),
-    or_(Call.status.is_(None), Call.status.notin_(JUNK_STATUSES)),
-)
 
 
 @router.get("/summary", response_model=DashboardSummary)
@@ -49,7 +33,7 @@ async def summary(
     # (short / never-connected) are excluded from the stats; flip hide_junk=false to keep them.
     call_filters = [in_range]
     if hide_junk:
-        call_filters.append(_NOT_JUNK)
+        call_filters.append(NOT_JUNK)
 
     total_calls = (await db.execute(select(func.count()).select_from(Call).where(*call_filters))).scalar_one()
     spam_calls = (await db.execute(
@@ -64,7 +48,7 @@ async def summary(
     # Likely-junk count is informational: always measured over the full range, independent
     # of the hide_junk toggle (that's the whole point of the card — show what's being hidden).
     junk_calls = (await db.execute(
-        select(func.count()).select_from(Call).where(in_range, _IS_JUNK)
+        select(func.count()).select_from(Call).where(in_range, IS_JUNK)
     )).scalar_one()
 
     # Per-campaign new vs returning (call-level flag stamped at ingest).
