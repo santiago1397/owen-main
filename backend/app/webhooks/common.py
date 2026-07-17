@@ -77,6 +77,19 @@ def build_router(adapter: ProviderAdapter, provider: str, signature_headers: lis
     router = APIRouter(prefix=f"/webhooks/{provider}", tags=["webhooks"])
 
     async def _verified(request: Request) -> dict[str, str] | None:
+        # TEMP DIAGNOSTIC (remove after SMS webhook is confirmed): dump exactly what the
+        # provider sent so we can see headers/signature/body shape. request.body() is
+        # cached by Starlette, so the later form()/json() parse still works.
+        _raw = await request.body()
+        logger.info("%s webhook DIAG: method=%s ct=%r headers=%s raw[:800]=%r",
+                    provider, request.method,
+                    request.headers.get("content-type", ""),
+                    {k: v for k, v in request.headers.items()
+                     if k.lower() in ("content-type", "content-length", "user-agent",
+                                      "x-signalwire-signature", "x-twilio-signature",
+                                      "authorization", "signature", "x-forwarded-proto",
+                                      "x-forwarded-host")},
+                    _raw[:800])
         content_type = request.headers.get("content-type", "")
         if "application/json" in content_type:
             body = await request.json()
