@@ -56,6 +56,49 @@ async def list_all() -> None:
         print(f"== calls: {total} ==")
 
 
+async def sync_numbers(provider: str, dry_run: bool) -> None:
+    """Pull the account's number inventory from SignalWire and upsert into `numbers`.
+
+    Inserts numbers we don't have yet and refreshes `friendly_name` from SignalWire
+    (the source of truth). Leaves `campaign_id` and `forwards_to` untouched so manual
+    assignments survive re-runs. Idempotent — safe to run repeatedly.
+
+    With dry_run, prints the inventory SignalWire returns and writes nothing."""
+    inventory = await signalwire_client.fetch_incoming_phone_numbers()
+    if dry_run:
+        print(f"== signalwire numbers (dry-run): {len(inventory)} ==")
+        for entry in inventory:
+            print(f"  {entry.get('phone_number')}  friendly={entry.get('friendly_name')!r}  "
+                  f"sid={entry.get('sid')}")
+        print("(dry-run: nothing written)")
+        return
+    async with SessionLocal() as db:
+        prov = await _provider(db, provider)
+        inserted = updated = 0
+        for entry in inventory:
+            phone = entry.get("phone_number")
+            if not phone:
+                continue
+            friendly = entry.get("friendly_name")
+            existing = (
+                await db.execute(
+                    select(Number).where(
+                        Number.provider_id == prov.id, Number.phone_number == phone
+                    )
+                )
+            ).scalar_one_or_none()
+            if existing is None:
+                db.add(Number(provider_id=prov.id, phone_number=phone,
+                              friendly_name=friendly, active=True))
+                inserted += 1
+            elif existing.friendly_name != friendly:
+                existing.friendly_name = friendly
+                updated += 1
+        await db.commit()
+        print(f"sync-numbers: {len(inventory)} from SignalWire, "
+              f"{inserted} inserted, {updated} updated (provider {provider})")
+
+
 async def list_sw_recordings(hours: int) -> None:
     """Read-only: what the SignalWire Recordings API returns for the last N hours.
     Use this to confirm Call Flow Builder recordings are actually exposed via the
@@ -97,6 +140,10 @@ def main() -> None:
     rn = sub.add_parser("reconcile-now", help="Run the reconciler once immediately")
     rn.add_argument("--hours", type=int, default=None)
 
+    sn = sub.add_parser("sync-numbers", help="Import the SignalWire number inventory into the DB")
+    sn.add_argument("--provider", default="signalwire")
+    sn.add_argument("--dry-run", action="store_true", help="Print the inventory, write nothing")
+
     c = sub.add_parser("add-campaign")
     c.add_argument("--name", required=True)
     c.add_argument("--source")
@@ -123,6 +170,8 @@ def main() -> None:
         asyncio.run(list_sw_calls(args.hours))
     elif args.cmd == "reconcile-now":
         asyncio.run(reconcile_now(args.hours))
+    elif args.cmd == "sync-numbers":
+        asyncio.run(sync_numbers(args.provider, args.dry_run))
 
 
 if __name__ == "__main__":

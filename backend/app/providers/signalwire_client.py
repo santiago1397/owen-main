@@ -101,6 +101,34 @@ async def fetch_recent_recordings(window_hours: int) -> list[NormalizedRecording
     return recordings
 
 
+async def fetch_incoming_phone_numbers() -> list[dict]:
+    """List every phone number owned by the account.
+
+    Uses the Compatibility API's IncomingPhoneNumbers inventory resource. Unlike the
+    Calls/Recordings *logs* (confirmed dead for Call-Flow-Builder-routed numbers, see
+    SIGNALWIRE_CFB_INGESTION.md), this just enumerates owned resources, so it works
+    regardless of how a number is routed. Each entry carries `sid`, `phone_number`
+    (E.164), `friendly_name`, and `voice_url`. Note: for CFB-routed numbers `voice_url`
+    points at the flow, not a forward target, so it can't tell us `forwards_to`.
+    """
+    if not _configured():
+        return []
+    account = f"{_base()}/Accounts/{settings.SIGNALWIRE_PROJECT_ID}"
+    url = f"{account}/IncomingPhoneNumbers.json"
+    numbers: list[dict] = []
+    async with httpx.AsyncClient(timeout=30) as client:
+        params: dict | None = {"PageSize": "1000"}
+        next_url: str | None = url
+        while next_url:
+            resp = await client.get(next_url, params=params if next_url == url else None, auth=_auth())
+            resp.raise_for_status()
+            data = resp.json()
+            numbers.extend(data.get("incoming_phone_numbers", []))
+            nxt = data.get("next_page_uri")
+            next_url = f"https://{settings.SIGNALWIRE_SPACE_URL}{nxt}" if nxt else None
+    return numbers
+
+
 _VOICE_LOG_STATUS = {"ended": "completed"}
 
 
