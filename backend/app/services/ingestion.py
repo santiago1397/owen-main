@@ -148,6 +148,32 @@ async def ingest_status_event(
         )
     )
 
+    # Attribution back-fill, decoupled from the status-rank gate above. A call can reach
+    # its terminal status via an event that lacked the tracking number — e.g. a SignalWire
+    # Call-Flow-Builder *forward leg* whose to_number is the operator line, not the dialed
+    # tracking number — which leaves it permanently unattributed, because the status-advance
+    # UPDATE won't fire again once status_rank is maxed. When a later event (typically the
+    # reconciler's authoritative inbound leg) does carry a registered Number, heal the gap.
+    # Guarded on number_id IS NULL so it only ever fills a hole, never overwrites existing
+    # (correct) attribution; and only runs when this event actually resolved a Number.
+    if number is not None:
+        await db.execute(
+            update(Call)
+            .where(
+                Call.provider_id == provider.id,
+                Call.provider_call_sid == evt.provider_call_sid,
+                Call.number_id.is_(None),
+            )
+            .values(
+                number_id=number.id,
+                campaign_id=campaign_id or Call.campaign_id,
+                is_new_for_campaign=(
+                    is_new_for_campaign if is_new_for_campaign is not None
+                    else Call.is_new_for_campaign
+                ),
+            )
+        )
+
     call = (
         await db.execute(
             select(Call).where(
