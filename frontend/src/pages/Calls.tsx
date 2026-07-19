@@ -136,7 +136,10 @@ export default function Calls() {
   const [selected, setSelected] = useState<string | null>(null);
   const { data: campaigns } = useQuery({ queryKey: ["campaigns"], queryFn: api.campaigns });
 
-  const query = { ...filters, hide_junk: hideJunk || undefined };
+  // The single "Hide failed & ≤3s" checkbox governs all junk-hiding. When unchecked we must
+  // also opt into 0–1s calls via include_short, otherwise the backend's separate short-call
+  // filter keeps hiding them and the checkbox appears to do nothing.
+  const query = { ...filters, hide_junk: hideJunk || undefined, include_short: hideJunk ? undefined : true };
   const { data } = useQuery({ queryKey: ["calls", query], queryFn: () => api.calls(query) });
   const set = (k: string, v: any) => setFilters((f: any) => ({ ...f, [k]: v, page: 1 }));
   const onRange = (r: Range | null) =>
