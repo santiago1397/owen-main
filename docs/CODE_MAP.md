@@ -117,7 +117,7 @@ owen-main-software/
 | `main.py` | Builds the `FastAPI` app; `lifespan` runs migrations at startup; adds CORS; includes all `api/*` + `webhooks/*` routers; `GET /health` (runs `SELECT 1`, gates the container healthcheck, no auth). |
 | `db.py` | `create_async_engine(database_url)` (asyncpg), `SessionLocal` (`async_sessionmaker`), `Base`, `get_db()` dependency. |
 | `migrate.py` | `run_migrations()` — swaps to a sync psycopg2 engine, takes `pg_advisory_lock(0x0CA11)` so only one container migrates, runs Alembic to head. Also re-enables loggers that Alembic's `fileConfig` would otherwise disable (see SignalWire doc infra-bug #1). |
-| `core/config.py` | `Settings` (pydantic-settings, reads `.env`). All tunables: DB creds, `SECRET_KEY`/JWT, `BUSINESS_TZ`, provider creds, `RECONCILE_WINDOW_HOURS`, recordings dir/retention, transcription + analysis engine selection + API keys, `GHL_INBOUND_WEBHOOK_URL` (inbound-SMS relay target). Singleton `settings`. |
+| `core/config.py` | `Settings` (pydantic-settings, reads `.env`). All tunables: DB creds, `SECRET_KEY`/JWT, `BUSINESS_TZ`, provider creds, `RECONCILE_WINDOW_HOURS`, recordings dir/retention, transcription + analysis engine selection + API keys, `GHL_INBOUND_WEBHOOK_URL` (inbound-SMS relay target), `GHL_CALL_WEBHOOK_URL` + `GHL_CALL_RELAY_DELAY_SECONDS`/`GHL_CALL_RELAY_MAX_WAIT_SECONDS` (completed-call relay target + timing). Singleton `settings`. |
 | `core/security.py` | argon2 password hashing; JWT create/decode (access / refresh / **playback** token types); webhook HMAC-SHA1 verifiers (`verify_twilio_signature`, `verify_signalwire_signature` — kept separate per provider). |
 
 ### Data model (`app/models/models.py`)
@@ -128,7 +128,7 @@ The whole schema in one file. Tables (PK type in parens):
 - **`campaigns`** (uuid) — `name`, `source`, `active`. An ad campaign.
 - **`numbers`** (uuid) — a tracking phone number. `provider_id`, `campaign_id` (nullable FK), `phone_number` (E.164), `friendly_name`, `forwards_to`, `active`. Unique `(provider_id, phone_number)`. **One number = one campaign, never recycled.**
 - **`callers`** (uuid) — a distinct caller phone. Global `first_seen_at`/`last_seen_at`/`total_calls`, `spam_score`, manual `label` override.
-- **`calls`** (uuid) — the projection everything reads. `provider_id`, `provider_call_sid`, `number_id`, `caller_id`, `campaign_id` (all stamped at ingest), `direction`, `status`, `status_rank`, timestamps, `duration_seconds`, `forwarded_to`, `is_new_for_campaign`, `raw_payload`. Unique `(provider_id, provider_call_sid)` = idempotency key. Composite indexes on `(number_id, started_at)` and `(campaign_id, started_at)`.
+- **`calls`** (uuid) — the projection everything reads. `provider_id`, `provider_call_sid`, `number_id`, `caller_id`, `campaign_id` (all stamped at ingest), `direction`, `status`, `status_rank`, timestamps, `duration_seconds`, `forwarded_to`, `is_new_for_campaign`, `raw_payload`, `relayed_to_ghl`/`relayed_at` (completed-call GHL relay-once guard). Unique `(provider_id, provider_call_sid)` = idempotency key. Composite indexes on `(number_id, started_at)` and `(campaign_id, started_at)`.
 - **`call_events`** (uuid) — append-only truth. `call_id`, `event_type`, `provider_sequence`, `payload`. Unique `(call_id, event_type, provider_sequence)` = dedup key.
 - **`recordings`** (uuid) — `call_id`, `provider_recording_sid` (unique = idempotency), `status`, `storage_path`, `provider_url`, `downloaded_at`, `transcribed` (gates retention deletion).
 - **`transcriptions`** (uuid) — `call_id`, `recording_id`, `engine`, `text`, `language`, `confidence`, `words`, `segments` (speaker-labeled `{speaker,start,end,text}` list from dual-channel recordings; NULL for mono).
@@ -137,9 +137,9 @@ The whole schema in one file. Tables (PK type in parens):
 - **`jobs`** (uuid) — durable queue. `type`, `payload`, `status`, `attempts`, `last_error`, `run_after`, `locked_at`.
 - **`users`** (uuid) — `email` unique, `password_hash` (argon2), `role`, `active`.
 
-Migrations live in `backend/alembic/versions/` as a 6-step linear chain (initial
+Migrations live in `backend/alembic/versions/` as a 7-step linear chain (initial
 schema → composite call indexes → recording-sid unique → transcriptions + analysis →
-messages → transcription segments).
+messages → transcription segments → call GHL-relay flags).
 
 ### Ingestion — the correctness core (`app/services/ingestion.py`)
 
@@ -167,7 +167,7 @@ attribution (reusing `_get_or_create_provider`/`_get_or_create_caller`), then up
 
 ### Webhooks (`app/webhooks/`) — real-time push ingestion
 
-- `common.py` — `build_router(adapter, provider, signature_headers)` factory. Reconstructs the public URL behind Traefik, verifies the signature (or SignalWire CFB HTTP Basic Auth via `SIGNALWIRE_CFB_WEBHOOK_SECRET`), parses body → adapter → `ingest_*`, returns 200 fast (slow work is enqueued). `POST /status`, `POST /recording`, and `POST /message` (inbound SMS → `ingest_message_event` → enqueue `message_relay_ghl`).
+- `common.py` — `build_router(adapter, provider, signature_headers)` factory. Reconstructs the public URL behind Traefik, verifies the signature (or SignalWire CFB HTTP Basic Auth via `SIGNALWIRE_CFB_WEBHOOK_SECRET`), parses body → adapter → `ingest_*`, returns 200 fast (slow work is enqueued). `POST /status` (on a terminal call, if `GHL_CALL_WEBHOOK_URL` is set, enqueues a delayed `call_relay_ghl`), `POST /recording`, and `POST /message` (inbound SMS → `ingest_message_event` → enqueue `message_relay_ghl`).
 - `twilio.py` / `signalwire.py` — one-liners that instantiate the router with the right adapter + signature header names.
 
 ### Providers (`app/providers/`) — per-provider translation
@@ -180,17 +180,17 @@ attribution (reusing `_get_or_create_provider`/`_get_or_create_caller`), then up
 | `signalwire.py` | `SignalWireAdapter(TwilioAdapter)` — adds a **native Relay/Calling** parser for CFB's `calling.call.state` events (single-quoted Python-repr `params`, `parent.call_id` leg correlation, `_tracking_number` override). |
 | `twilio_client.py` | REST reconciliation client: `fetch_recent_calls`, `delete_recording`. |
 | `signalwire_client.py` | REST client. **The modern Voice API path** (`fetch_recent_calls_voice_logs`, `fetch_recordings_via_voice_logs`) is what actually works for this account; classic Compatibility-API functions kept unused as fallback. |
-| `ghl_client.py` | GoHighLevel inbound-SMS relay: `post_inbound_message(payload)` POSTs to the `GHL_INBOUND_WEBHOOK_URL` Workflow trigger (plain JSON, no auth). No-op when unconfigured. Inbound-only — never sends outbound SMS. |
+| `ghl_client.py` | GoHighLevel inbound relays (shared `_post` helper): `post_inbound_message(payload)` → `GHL_INBOUND_WEBHOOK_URL` (inbound SMS); `post_call_summary(payload)` → `GHL_CALL_WEBHOOK_URL` (completed-call summary + AI analysis). Plain JSON Workflow triggers, no auth. No-op when the URL is unset. Inbound-only — never sends outbound SMS. |
 
 ### Background worker (`app/worker.py`, `app/workers/`, `app/services/queue.py`)
 
 - `worker.py` — the worker container's entrypoint. Runs two things in one asyncio process: a **drain loop** (`claim_one` → dispatch to handler → complete/fail) and an **APScheduler** with `reconcile_recent` (every 5 min) + `retention_sweep` (every 6 hrs).
 - `services/queue.py` — the Postgres-backed job queue. `enqueue`, `claim_one` (`UPDATE … WHERE id = (SELECT … FOR UPDATE SKIP LOCKED)` so concurrent drainers never collide), `complete`, `fail` (linear backoff `30s × attempts`, up to `MAX_ATTEMPTS=5` then dead).
-- `workers/handlers.py` — the pipeline. `HANDLERS = {recording_fetch, transcribe, analyze, message_relay_ghl}`. The recording pipeline enqueues the next stage on success; `message_relay_ghl` POSTs the message to GHL (`ghl_client`) and sets `relayed_to_ghl`/`relayed_at` (raises to retry on failure):
+- `workers/handlers.py` — the pipeline. `HANDLERS = {recording_fetch, transcribe, analyze, message_relay_ghl, call_relay_ghl}`. The recording pipeline enqueues the next stage on success; `message_relay_ghl` POSTs the message to GHL (`ghl_client`) and sets `relayed_to_ghl`/`relayed_at` (raises to retry on failure); `call_relay_ghl` POSTs a completed-call summary (attribution + new/returning + spam/category/summary via override precedence + transcript), re-deferring while a recording's analysis is still pending (bounded by `GHL_CALL_RELAY_MAX_WAIT_SECONDS`), and sets `calls.relayed_to_ghl`/`relayed_at`:
   - **`recording_fetch`** — streams the provider media to `/data/recordings/{sid}.mp3` (atomic `.part` → `os.replace`), optionally deletes the remote copy, enqueues `transcribe`.
   - **`transcribe`** — runs the configured `TranscriptionEngine`, writes a `Transcription`, sets `recording.transcribed=True` (now retention may delete the audio), enqueues `analyze`. **Dual-channel path:** if the recording is stereo (ffprobe) and `STEREO_TRANSCRIPTION_ENABLED`, ffmpeg splits it into two mono legs, each is transcribed with segment timestamps (whisper-1 → `transcribe_segmented`, hallucination-filtered), and `audio.merge_channels` interleaves them into a `[Caller]`/`[Operator]`-labeled transcript + `segments`. Probe/split failure degrades to the mono path; splits are temp files (cleaned in `finally`).
   - **`analyze`** — runs the configured `AnalysisEngine`, upserts `CallAnalysis`, updates the caller's `spam_score`.
-- `workers/reconciler.py` — `reconcile_recent(window_hours)` polls each provider's REST API (per-provider try/except isolation), feeds inbound legs through the same `ingest_*` code path, and enqueues `recording_fetch` for any recording not yet on disk.
+- `workers/reconciler.py` — `reconcile_recent(window_hours)` polls each provider's REST API (per-provider try/except isolation), feeds inbound legs through the same `ingest_*` code path, enqueues `recording_fetch` for any recording not yet on disk, and enqueues `call_relay_ghl` for backfilled terminal calls (so webhook-missed calls still reach GHL).
 
 ### Analysis engines (`app/analysis/`) — pluggable
 

@@ -104,6 +104,10 @@ class Call(Base):
     is_new_for_campaign: Mapped[bool | None] = mapped_column(Boolean)
     raw_payload: Mapped[dict | None] = mapped_column(JSONB)
 
+    # Completed-call relay to GHL (mirrors Message.relayed_to_ghl). Relay-once guard.
+    relayed_to_ghl: Mapped[bool] = mapped_column(Boolean, default=False)
+    relayed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
     events: Mapped[list["CallEvent"]] = relationship(back_populates="call")
 
 

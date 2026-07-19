@@ -51,7 +51,7 @@ async def _get_or_create_caller(db: AsyncSession, phone: str, seen_at: datetime)
 
 async def ingest_status_event(
     db: AsyncSession, provider_name: str, evt: NormalizedCallEvent
-) -> None:
+) -> Call:
     now = datetime.now(timezone.utc)
     seen_at = evt.started_at or now
 
@@ -220,3 +220,4 @@ async def ingest_status_event(
         call.id, evt.provider_call_sid, number.friendly_name if number else None,
         campaign_id, evt.status, bool(inserted),
     )
+    return call

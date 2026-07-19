@@ -94,6 +94,16 @@ class Settings(BaseSettings):
     # "Inbound Webhook" trigger URL (plain JSON, no auth/OAuth). Empty = relay disabled.
     GHL_INBOUND_WEBHOOK_URL: str = ""
 
+    # GoHighLevel — completed-call relay. Same "Inbound Webhook" trigger pattern (plain
+    # JSON, no auth), a *separate* URL so calls and texts can feed different GHL workflows.
+    # Empty = call relay disabled. When a call reaches a terminal status we enqueue a relay
+    # job; it waits GHL_CALL_RELAY_DELAY_SECONDS (so the recording→transcribe→analyze
+    # pipeline can finish and the payload carries the AI analysis), re-deferring while a
+    # recording exists but analysis is still pending, up to GHL_CALL_RELAY_MAX_WAIT_SECONDS.
+    GHL_CALL_WEBHOOK_URL: str = ""
+    GHL_CALL_RELAY_DELAY_SECONDS: int = 120
+    GHL_CALL_RELAY_MAX_WAIT_SECONDS: int = 1800
+
     @property
     def database_url(self) -> str:
         return (

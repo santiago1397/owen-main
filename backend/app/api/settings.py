@@ -49,5 +49,6 @@ async def get_settings(request: Request, _: User = Depends(current_user)) -> dic
         },
         "ghl": {
             "inbound_relay_configured": bool(settings.GHL_INBOUND_WEBHOOK_URL),
+            "call_relay_configured": bool(settings.GHL_CALL_WEBHOOK_URL),
         },
     }

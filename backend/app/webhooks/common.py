@@ -114,7 +114,25 @@ def build_router(adapter: ProviderAdapter, provider: str, signature_headers: lis
                     provider, evt.provider_call_sid, evt.status, evt.from_number,
                     evt.to_number, evt.direction)
         async with SessionLocal() as db:  # type: AsyncSession
-            await ingest_status_event(db, provider, evt)
+            call = await ingest_status_event(db, provider, evt)
+            # Terminal call (status_rank 4: completed/busy/no-answer/failed/canceled) →
+            # relay a summary to GHL. Delayed so the recording→transcribe→analyze pipeline
+            # can finish first and the payload carries the AI analysis. The relayed_to_ghl
+            # guard makes duplicate terminal webhooks idempotent; gated on the URL being
+            # configured so we don't enqueue no-op jobs when the call relay is disabled.
+            if (
+                settings.GHL_CALL_WEBHOOK_URL
+                and call.status_rank >= 4
+                and not call.relayed_to_ghl
+            ):
+                logger.info("%s status: terminal call %s → enqueue call_relay_ghl",
+                            provider, call.id)
+                await queue.enqueue(
+                    db,
+                    "call_relay_ghl",
+                    {"call_id": str(call.id)},
+                    delay_seconds=settings.GHL_CALL_RELAY_DELAY_SECONDS,
+                )
         return Response(status_code=200)
 
     @router.post("/recording")

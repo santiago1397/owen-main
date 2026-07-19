@@ -52,7 +52,21 @@ async def reconcile_recent(window_hours: int | None = None) -> int:
             if not evt.provider_call_sid or not _is_inbound(evt):
                 continue
             async with SessionLocal() as db:
-                await ingest_status_event(db, provider, evt)
+                call = await ingest_status_event(db, provider, evt)
+                # Relay backfilled terminal calls to GHL too, so webhook-missed calls
+                # aren't invisible in the CRM. Same delayed, relay-once path as the
+                # webhook route; the flag makes this idempotent across reconcile polls.
+                if (
+                    settings.GHL_CALL_WEBHOOK_URL
+                    and call.status_rank >= 4
+                    and not call.relayed_to_ghl
+                ):
+                    await queue.enqueue(
+                        db,
+                        "call_relay_ghl",
+                        {"call_id": str(call.id)},
+                        delay_seconds=settings.GHL_CALL_RELAY_DELAY_SECONDS,
+                    )
             kept += 1
         total += kept
         if events:

@@ -14,8 +14,13 @@ from app.models import Job
 MAX_ATTEMPTS = 5
 
 
-async def enqueue(db: AsyncSession, job_type: str, payload: dict) -> None:
-    db.add(Job(type=job_type, payload=payload))
+async def enqueue(
+    db: AsyncSession, job_type: str, payload: dict, delay_seconds: int = 0
+) -> None:
+    job = Job(type=job_type, payload=payload)
+    if delay_seconds > 0:
+        job.run_after = datetime.now(timezone.utc) + timedelta(seconds=delay_seconds)
+    db.add(job)
     await db.commit()
 
 

@@ -21,7 +21,17 @@ from app.analysis import audio
 from app.analysis.classification import get_analysis_engine
 from app.analysis.transcription import Transcript, get_transcription_engine
 from app.core.config import settings
-from app.models import Call, CallAnalysis, Caller, Message, Number, Recording, Transcription
+from app.models import (
+    Call,
+    CallAnalysis,
+    Caller,
+    Campaign,
+    Message,
+    Number,
+    Provider,
+    Recording,
+    Transcription,
+)
 from app.providers import ghl_client, signalwire_client, twilio_client
 from app.services import queue
 
@@ -237,9 +247,113 @@ async def handle_message_relay_ghl(db: AsyncSession, payload: dict) -> None:
     logger.info("message_relay_ghl: relayed %s to GHL", msg.provider_message_sid)
 
 
+_MISSED_STATUSES = {"no-answer", "busy", "failed", "canceled"}
+
+
+async def handle_call_relay_ghl(db: AsyncSession, payload: dict) -> None:
+    """Relay a completed call (attribution + AI analysis) to GoHighLevel.
+
+    Enqueued (delayed) when a call reaches a terminal status. Idempotent: the
+    relayed_to_ghl flag guards against re-sending. If the call has a recording but its
+    analysis pipeline hasn't finished yet, re-defer (so the payload carries spam/category/
+    summary) until GHL_CALL_RELAY_MAX_WAIT_SECONDS has elapsed since the call ended, after
+    which we relay what we have. Raises on POST failure so the queue retries (backoff)."""
+    call = await db.get(Call, uuid.UUID(payload["call_id"]))
+    if call is None:
+        logger.warning("call_relay_ghl: call %s not found", payload.get("call_id"))
+        return
+    if call.relayed_to_ghl:
+        logger.info("call_relay_ghl: call %s already relayed, skipping", call.id)
+        return
+
+    analysis = (
+        await db.execute(select(CallAnalysis).where(CallAnalysis.call_id == call.id))
+    ).scalar_one_or_none()
+    recording = (
+        await db.execute(select(Recording).where(Recording.call_id == call.id).limit(1))
+    ).scalar_one_or_none()
+
+    # Wait for the analysis pipeline if a recording exists but hasn't been analyzed yet,
+    # so answered calls carry spam/category/summary. Bounded so a stuck/failed pipeline
+    # (or a call that will never be analyzed) still relays eventually.
+    if recording is not None and analysis is None:
+        ended = call.ended_at or call.started_at
+        now = datetime.now(timezone.utc)
+        waited = (now - ended).total_seconds() if ended else float("inf")
+        if waited < settings.GHL_CALL_RELAY_MAX_WAIT_SECONDS:
+            logger.info("call_relay_ghl: call %s analysis pending, re-deferring", call.id)
+            await queue.enqueue(
+                db, "call_relay_ghl", {"call_id": str(call.id)},
+                delay_seconds=settings.GHL_CALL_RELAY_DELAY_SECONDS,
+            )
+            return
+        logger.info("call_relay_ghl: call %s waited %.0fs for analysis, relaying without it",
+                    call.id, waited)
+
+    caller = await db.get(Caller, call.caller_id) if call.caller_id else None
+    number = await db.get(Number, call.number_id) if call.number_id else None
+    campaign = await db.get(Campaign, call.campaign_id) if call.campaign_id else None
+    provider = await db.get(Provider, call.provider_id) if call.provider_id else None
+    transcript = (
+        await db.execute(
+            select(Transcription.text).where(Transcription.call_id == call.id)
+            .order_by(Transcription.created_at.desc()).limit(1)
+        )
+    ).scalar_one_or_none()
+
+    analysis_payload = None
+    if analysis is not None:
+        # Human overrides win over the model (ARCHITECTURE.md #5).
+        analysis_payload = {
+            "is_spam": analysis.is_spam_override if analysis.is_spam_override is not None
+            else analysis.is_spam,
+            "spam_confidence": float(analysis.spam_confidence)
+            if analysis.spam_confidence is not None else None,
+            "category": analysis.category_override or analysis.category,
+            "tags": analysis.tags,
+            "summary": analysis.summary,
+            "model": analysis.model,
+        }
+
+    await ghl_client.post_call_summary({
+        "call_sid": call.provider_call_sid,
+        "provider": provider.name if provider else None,
+        "direction": call.direction,
+        "status": call.status,
+        "missed": (call.status or "").lower() in _MISSED_STATUSES,
+        "answered": call.answered_at is not None or (call.status or "").lower() == "completed",
+        "duration_seconds": call.duration_seconds,
+        "started_at": call.started_at.isoformat() if call.started_at else None,
+        "answered_at": call.answered_at.isoformat() if call.answered_at else None,
+        "ended_at": call.ended_at.isoformat() if call.ended_at else None,
+        "from": caller.phone_number if caller else None,
+        "to": number.phone_number if number else None,
+        "number_label": number.friendly_name if number else None,
+        "campaign": campaign.name if campaign else None,
+        "campaign_source": campaign.source if campaign else None,
+        "is_new_for_campaign": call.is_new_for_campaign,
+        "caller": {
+            "phone": caller.phone_number,
+            "first_seen_at": caller.first_seen_at.isoformat() if caller.first_seen_at else None,
+            "total_calls": caller.total_calls,
+            "label": caller.label,
+            "spam_score": float(caller.spam_score) if caller.spam_score is not None else None,
+        } if caller else None,
+        "has_recording": recording is not None,
+        "analysis": analysis_payload,
+        "transcript": transcript,
+    })
+    call.relayed_to_ghl = True
+    call.relayed_at = datetime.now(timezone.utc)
+    await db.commit()
+    logger.info("call_relay_ghl: relayed call %s to GHL (analysis=%s)",
+                call.id, analysis_payload is not None)
+
+
 HANDLERS = {
     "recording_fetch": handle_recording_fetch,
     "transcribe": handle_transcribe,
     "analyze": handle_analyze,
     "message_relay_ghl": handle_message_relay_ghl,
+    "call_relay_ghl": handle_call_relay_ghl,
 }
