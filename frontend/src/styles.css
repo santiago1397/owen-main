@@ -31,6 +31,7 @@ button.primary { background: var(--accent); border-color: var(--accent); color: 
 .badge.spam { background: rgba(255,92,108,.15); color: var(--danger); border-color: var(--danger); }
 .badge.new { background: rgba(55,214,122,.15); color: var(--good); border-color: var(--good); }
 .badge.prov { background: var(--panel2); color: var(--muted); }
+.badge.job { background: rgba(55,214,122,.18); color: var(--good); border-color: var(--good); font-weight: 600; }
 .drawer { position: fixed; top: 0; right: 0; width: 460px; max-width: 92vw; height: 100vh;
   background: var(--panel); border-left: 1px solid var(--border); padding: 20px; overflow: auto; z-index: 20; }
 .overlay { position: fixed; inset: 0; background: rgba(0,0,0,.5); z-index: 10; }

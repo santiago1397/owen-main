@@ -93,7 +93,8 @@ function CallDrawer({ id, onClose }: { id: string; onClose: () => void }) {
             </div>
             {c.analysis.summary && <p className="muted">{c.analysis.summary}</p>}
             {c.analysis.tags?.length > 0 &&
-              <div>{c.analysis.tags.map((t: string) => <span key={t} className="badge" style={{ marginRight: 4 }}>{t}</span>)}</div>}
+              <div>{c.analysis.tags.map((t: string) =>
+                <span key={t} className={`badge${t === "job" ? " job" : ""}`} style={{ marginRight: 4 }}>{t}</span>)}</div>}
             <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
               <select defaultValue={c.category || ""} onChange={(e) => override({ category_override: e.target.value })}>
                 <option value="">override category…</option>
