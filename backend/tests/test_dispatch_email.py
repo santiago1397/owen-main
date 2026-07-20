@@ -130,6 +130,21 @@ def main():
     check("payment remaining", f["payment"]["remaining"] == "125")
     check("coverage notes captured", "SHIELDPLATINUM HOME WARRANTY" in f["coverage_notes"])
 
+    print("ghl_payload — flattened/derived fields for GHL:")
+    from types import SimpleNamespace
+    from app.services.emails import ghl_payload
+    em = SimpleNamespace(fields=f, source="dispatch", job_id=f["job_id"], subject=SUBJECT,
+                         from_addr="notifications@dispatch.me", message_id="<x@y>", received_at=None)
+    p = ghl_payload(em)
+    check("problem flattened", p["problem"] == "Leaking, OTHER")
+    check("payment_total flattened", p["payment_total"] == "125")
+    check("primary_contact_phone", p["primary_contact_phone"] == "+13059629757")
+    check("coverage_notes_text joined", "SHIELDPLATINUM HOME WARRANTY" in p["coverage_notes_text"])
+    check("job_description has customer", "Guillermo Escala" in p["job_description"])
+    check("job_description has address", "14436 SW 95TH LN" in p["job_description"])
+    check("job_description has job header", p["job_description"].startswith("Job 66450639 ROOF"))
+    check("nested fields still present", isinstance(p["items"], list) and isinstance(p["contacts"], list))
+
     print("mailbox._body_parts — quoted-printable decode path:")
     # A raw wire-format email with a QP soft line break (=\n) and an encoded '=' (=3D),
     # exactly as Dispatch sends it — _body_parts must decode both.

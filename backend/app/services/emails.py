@@ -21,11 +21,73 @@ from app.services.mailbox import FetchedEmail
 logger = logging.getLogger("ingestion")
 
 
+def _derived_fields(f: dict) -> dict:
+    """Flatten the nested extracted data into top-level scalars GHL's no-code webhook mapper
+    can bind directly (it can't reach into `items`/`payment`/`contacts` arrays), plus a
+    ready-to-use `job_description` for an Opportunity note. All defensive — absent inputs
+    just omit the derived key."""
+    d: dict = {}
+
+    items = f.get("items") or []
+    if items:
+        first = items[0] or {}
+        d["problem"] = first.get("problem") or first.get("title")
+        d["item_title"] = first.get("title")
+        d["item_status"] = first.get("status")
+
+    pay = f.get("payment") or {}
+    for k in ("total", "paid", "remaining"):
+        if pay.get(k) is not None:
+            d[f"payment_{k}"] = pay[k]
+
+    notes = f.get("coverage_notes") or []
+    if notes:
+        d["coverage_notes_text"] = "; ".join(notes)
+
+    if f.get("customer_phone"):
+        d["primary_contact_phone"] = f["customer_phone"]
+
+    # A human-readable one-glance summary to drop into a GHL Opportunity note / SMS.
+    lines = []
+    header = " ".join(x for x in [f.get("job_id"), f.get("service")] if x)
+    if header:
+        prio = f.get("priority")
+        lines.append(f"Job {header}" + (f" ({prio} priority)" if prio else ""))
+    if f.get("customer_name"):
+        lines.append(f"Customer: {f['customer_name']}")
+    contact_bits = [b for b in [f.get("customer_phone"), f.get("customer_email")] if b]
+    if contact_bits:
+        lines.append(" / ".join(contact_bits))
+    if f.get("service_address"):
+        lines.append(f"Address: {f['service_address']}")
+    if d.get("problem"):
+        prob = f"Problem: {d.get('item_title')} — {d['problem']}" if d.get("item_title") else f"Problem: {d['problem']}"
+        lines.append(prob)
+    if pay.get("total") is not None:
+        pay_line = f"Payment: total ${pay.get('total')}, paid ${pay.get('paid', '?')}, remaining ${pay.get('remaining', '?')}"
+        if f.get("brand"):
+            pay_line += f" ({f['brand']})"
+        lines.append(pay_line)
+    ids = [x for x in [
+        f.get("contract_id") and f"Contract {f['contract_id']}",
+        f.get("vendor_id") and f"Vendor {f['vendor_id']}",
+    ] if x]
+    if ids:
+        lines.append(" | ".join(ids))
+    if lines:
+        d["job_description"] = "\n".join(lines)
+
+    return d
+
+
 def ghl_payload(em: InboundEmail) -> dict:
-    """The exact JSON we POST to GHL for a parsed email — extracted fields plus email
-    metadata. Built here so the relay handler and the log API show identical shapes."""
+    """The exact JSON we POST to GHL for a parsed email — the raw extracted fields, plus
+    flattened/derived scalars for GHL's webhook mapper, plus email metadata. Built here so
+    the relay handler and the log API show identical shapes."""
+    fields = em.fields or {}
     return {
-        **(em.fields or {}),
+        **fields,
+        **_derived_fields(fields),
         "source": em.source,
         "job_id": em.job_id,
         "subject": em.subject,
