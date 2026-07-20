@@ -14,22 +14,34 @@ from app.services.recordings import ingest_recording_event
 
 logger = logging.getLogger("worker.reconciler")
 
-_SOURCES = {
-    "twilio": twilio_client.fetch_recent_calls,
-    # The classic Compatibility API (fetch_recent_calls) never reports calls routed
-    # through Call Flow Builder — confirmed dead for this account. The modern Voice
-    # API (GET /api/voice/logs) is what actually works; see SIGNALWIRE_CFB_INGESTION.md.
-    "signalwire": signalwire_client.fetch_recent_calls_voice_logs,
-}
+def _call_sources() -> dict:
+    """provider name -> async fetch(window_hours) for call reconciliation.
 
-# Providers whose recordings we discover by polling (webhooks still work too and are
-# idempotent). SignalWire's Call Flow Builder doesn't POST a recordingStatusCallback
-# reliably; Twilio's Studio "Connect Call To" widget exposes no callback field at all,
-# so Studio-recorded Twilio calls only reach us via this poll.
-_RECORDING_SOURCES = {
-    "signalwire": signalwire_client.fetch_recordings_via_voice_logs,
-    "twilio": twilio_client.fetch_recent_recordings,
-}
+    Each configured Twilio account is its own provider identity (its own name + creds),
+    so calls attribute to the right account and the `provider` name flows into ingestion.
+    The default-arg binding freezes each account into its own closure. SignalWire's classic
+    Compatibility API (fetch_recent_calls) never reports Call Flow Builder calls — confirmed
+    dead for this account; the modern Voice API (GET /api/voice/logs) is what actually works
+    (see SIGNALWIRE_CFB_INGESTION.md)."""
+    sources = {
+        acct.name: (lambda h, a=acct: twilio_client.fetch_recent_calls(a, h))
+        for acct in settings.twilio_accounts()
+    }
+    sources["signalwire"] = signalwire_client.fetch_recent_calls_voice_logs
+    return sources
+
+
+def _recording_sources() -> dict:
+    """provider name -> async fetch(window_hours) for recording discovery via polling
+    (webhooks still work too and are idempotent). SignalWire's Call Flow Builder doesn't
+    POST a recordingStatusCallback reliably; Twilio's Studio "Connect Call To" widget
+    exposes no callback field at all, so Studio-recorded Twilio calls only reach us here."""
+    sources = {
+        acct.name: (lambda h, a=acct: twilio_client.fetch_recent_recordings(a, h))
+        for acct in settings.twilio_accounts()
+    }
+    sources["signalwire"] = signalwire_client.fetch_recordings_via_voice_logs
+    return sources
 
 
 def _is_inbound(evt) -> bool:
@@ -44,7 +56,7 @@ def _is_inbound(evt) -> bool:
 async def reconcile_recent(window_hours: int | None = None) -> int:
     hours = window_hours or settings.RECONCILE_WINDOW_HOURS
     total = 0
-    for provider, fetch in _SOURCES.items():
+    for provider, fetch in _call_sources().items():
         try:
             events = await fetch(hours)
         except Exception as exc:  # noqa: BLE001 - one provider's outage must not block others
@@ -76,7 +88,7 @@ async def reconcile_recent(window_hours: int | None = None) -> int:
             logger.info("reconcile: %s processed %s/%s inbound calls (last %sh)",
                         provider, kept, len(events), hours)
 
-    for provider, fetch_recordings in _RECORDING_SOURCES.items():
+    for provider, fetch_recordings in _recording_sources().items():
         try:
             recs = await fetch_recordings(hours)
         except Exception as exc:  # noqa: BLE001 - one provider's outage must not block others

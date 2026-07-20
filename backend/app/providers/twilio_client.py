@@ -1,22 +1,24 @@
-"""Twilio REST client for reconciliation — read-only Calls pull (ARCHITECTURE.md #6)."""
+"""Twilio REST client for reconciliation — read-only Calls pull (ARCHITECTURE.md #6).
+
+Every call is scoped to a single `TwilioAccount` (credentials passed in, never read from
+globals) so the same client serves any number of Twilio accounts — each modelled as its
+own provider identity. See config.TwilioAccount / settings.twilio_accounts()."""
 
 from datetime import datetime, timedelta, timezone
 
 import httpx
 
-from app.core.config import settings
+from app.core.config import TwilioAccount
 from app.providers.base import NormalizedCallEvent, NormalizedRecordingEvent
 from app.providers.cxml import normalize_call, to_int
 
 API_ROOT = "https://api.twilio.com/2010-04-01"
 
 
-async def fetch_recent_calls(window_hours: int) -> list[NormalizedCallEvent]:
-    if not settings.TWILIO_ACCOUNT_SID or not settings.TWILIO_AUTH_TOKEN:
-        return []
+async def fetch_recent_calls(account: TwilioAccount, window_hours: int) -> list[NormalizedCallEvent]:
     since = (datetime.now(timezone.utc) - timedelta(hours=window_hours)).strftime("%Y-%m-%d")
-    url = f"{API_ROOT}/Accounts/{settings.TWILIO_ACCOUNT_SID}/Calls.json"
-    auth = (settings.TWILIO_ACCOUNT_SID, settings.TWILIO_AUTH_TOKEN)
+    url = f"{API_ROOT}/Accounts/{account.account_sid}/Calls.json"
+    auth = (account.account_sid, account.auth_token)
     events: list[NormalizedCallEvent] = []
     async with httpx.AsyncClient(timeout=30) as client:
         params = {"StartTime>": since, "PageSize": "1000"}
@@ -31,7 +33,7 @@ async def fetch_recent_calls(window_hours: int) -> list[NormalizedCallEvent]:
     return events
 
 
-async def fetch_recent_recordings(window_hours: int) -> list[NormalizedRecordingEvent]:
+async def fetch_recent_recordings(account: TwilioAccount, window_hours: int) -> list[NormalizedRecordingEvent]:
     """Pull recordings created in the window (Twilio Recordings resource).
 
     Twilio's Studio "Connect Call To" widget records via its "Start Recording" toggle,
@@ -40,12 +42,10 @@ async def fetch_recent_recordings(window_hours: int) -> list[NormalizedRecording
     instead, mirroring the SignalWire recording poll. Idempotent downstream: the reconciler
     only enqueues a fetch when we don't already hold the audio (ingest_recording_event
     upserts on the unique recording sid)."""
-    if not (settings.TWILIO_ACCOUNT_SID and settings.TWILIO_AUTH_TOKEN):
-        return []
     since = (datetime.now(timezone.utc) - timedelta(hours=window_hours)).strftime("%Y-%m-%d")
-    account = f"{API_ROOT}/Accounts/{settings.TWILIO_ACCOUNT_SID}"
-    url = f"{account}/Recordings.json"
-    auth = (settings.TWILIO_ACCOUNT_SID, settings.TWILIO_AUTH_TOKEN)
+    account_root = f"{API_ROOT}/Accounts/{account.account_sid}"
+    url = f"{account_root}/Recordings.json"
+    auth = (account.account_sid, account.auth_token)
     recordings: list[NormalizedRecordingEvent] = []
     async with httpx.AsyncClient(timeout=30) as client:
         params: dict | None = {"DateCreated>": since, "PageSize": "1000"}
@@ -63,7 +63,7 @@ async def fetch_recent_recordings(window_hours: int) -> list[NormalizedRecording
                         status=r.get("status") or "completed",
                         duration_seconds=to_int(r.get("duration")),
                         # handler appends ".mp3" to fetch the media
-                        provider_url=f"{account}/Recordings/{sid}",
+                        provider_url=f"{account_root}/Recordings/{sid}",
                         raw=r,
                     )
                 )
@@ -72,7 +72,7 @@ async def fetch_recent_recordings(window_hours: int) -> list[NormalizedRecording
     return recordings
 
 
-async def fetch_incoming_phone_numbers() -> list[dict]:
+async def fetch_incoming_phone_numbers(account: TwilioAccount) -> list[dict]:
     """List every phone number owned by the Twilio account.
 
     Twilio's IncomingPhoneNumbers resource is the same shape SignalWire copied, so
@@ -81,10 +81,8 @@ async def fetch_incoming_phone_numbers() -> list[dict]:
     numbers pointed at a TwiML app/flow, `voice_url` is that flow, not a forward
     target, so it can't tell us `forwards_to`.
     """
-    if not (settings.TWILIO_ACCOUNT_SID and settings.TWILIO_AUTH_TOKEN):
-        return []
-    url = f"{API_ROOT}/Accounts/{settings.TWILIO_ACCOUNT_SID}/IncomingPhoneNumbers.json"
-    auth = (settings.TWILIO_ACCOUNT_SID, settings.TWILIO_AUTH_TOKEN)
+    url = f"{API_ROOT}/Accounts/{account.account_sid}/IncomingPhoneNumbers.json"
+    auth = (account.account_sid, account.auth_token)
     numbers: list[dict] = []
     async with httpx.AsyncClient(timeout=30) as client:
         params: dict | None = {"PageSize": "1000"}
@@ -99,13 +97,13 @@ async def fetch_incoming_phone_numbers() -> list[dict]:
     return numbers
 
 
-async def delete_recording(recording_sid: str) -> None:
+async def delete_recording(account: TwilioAccount, recording_sid: str) -> None:
     """Delete the provider-side copy so Twilio never bills us for storage.
     Tolerant of 404 (already gone) — idempotent under retries."""
-    if not (settings.TWILIO_ACCOUNT_SID and settings.TWILIO_AUTH_TOKEN and recording_sid):
+    if not recording_sid:
         return
-    url = f"{API_ROOT}/Accounts/{settings.TWILIO_ACCOUNT_SID}/Recordings/{recording_sid}.json"
-    auth = (settings.TWILIO_ACCOUNT_SID, settings.TWILIO_AUTH_TOKEN)
+    url = f"{API_ROOT}/Accounts/{account.account_sid}/Recordings/{recording_sid}.json"
+    auth = (account.account_sid, account.auth_token)
     async with httpx.AsyncClient(timeout=30) as client:
         resp = await client.delete(url, auth=auth)
         if resp.status_code not in (200, 204, 404):

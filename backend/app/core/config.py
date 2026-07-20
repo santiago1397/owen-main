@@ -1,6 +1,19 @@
+import json
+from dataclasses import dataclass
 from functools import lru_cache
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+@dataclass(frozen=True)
+class TwilioAccount:
+    """One Twilio account's identity + credentials. Each account is treated as its own
+    provider identity (its own `Provider` row / provider name), so calls, numbers and
+    recordings attribute to the right account and downloads use the right token."""
+
+    name: str  # provider name, e.g. "twilio" | "twilio-b"
+    account_sid: str
+    auth_token: str
 
 
 class Settings(BaseSettings):
@@ -34,9 +47,19 @@ class Settings(BaseSettings):
     # Business timezone for all daily/weekly/monthly bucketing
     BUSINESS_TZ: str = "America/New_York"
 
-    # Twilio credentials (per SERVER_SETUP.md: secrets live in .env.prod)
+    # Twilio credentials (per SERVER_SETUP.md: secrets live in .env.prod).
+    # Single primary account; also the fallback when TWILIO_ACCOUNTS is unset.
     TWILIO_ACCOUNT_SID: str = ""
     TWILIO_AUTH_TOKEN: str = ""
+
+    # Additional Twilio accounts as a JSON list, each an object with keys
+    # name/sid/token, e.g.
+    #   TWILIO_ACCOUNTS=[{"name":"twilio","sid":"ACxxx","token":"t1"},
+    #                    {"name":"twilio-b","sid":"ACyyy","token":"t2"}]
+    # When set, it is the full list of Twilio accounts (include the primary explicitly).
+    # When empty, we synthesize a single account named "twilio" from the fields above,
+    # so existing single-account deployments keep working unchanged.
+    TWILIO_ACCOUNTS: str = ""
 
     # SignalWire (Compatibility/cXML API)
     SIGNALWIRE_PROJECT_ID: str = ""
@@ -103,6 +126,31 @@ class Settings(BaseSettings):
     GHL_CALL_WEBHOOK_URL: str = ""
     GHL_CALL_RELAY_DELAY_SECONDS: int = 120
     GHL_CALL_RELAY_MAX_WAIT_SECONDS: int = 1800
+
+    def twilio_accounts(self) -> list[TwilioAccount]:
+        """All configured Twilio accounts. Parses TWILIO_ACCOUNTS when set, otherwise
+        falls back to the legacy single-account globals (named "twilio"). Entries with a
+        blank sid/token are dropped so callers can rely on credentials being present."""
+        raw = self.TWILIO_ACCOUNTS.strip()
+        if raw:
+            entries = json.loads(raw)
+            accounts = [
+                TwilioAccount(
+                    name=str(e["name"]).strip(),
+                    account_sid=str(e.get("sid", "")).strip(),
+                    auth_token=str(e.get("token", "")).strip(),
+                )
+                for e in entries
+            ]
+        else:
+            accounts = [
+                TwilioAccount(
+                    name="twilio",
+                    account_sid=self.TWILIO_ACCOUNT_SID,
+                    auth_token=self.TWILIO_AUTH_TOKEN,
+                )
+            ]
+        return [a for a in accounts if a.name and a.account_sid and a.auth_token]
 
     @property
     def database_url(self) -> str:

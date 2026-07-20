@@ -13,6 +13,7 @@ import asyncio
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
+from app.core.config import settings
 from app.db import SessionLocal
 from app.models import Call, Campaign, Number, Provider
 from app.providers import signalwire_client, twilio_client
@@ -20,12 +21,17 @@ from app.services import queue
 from app.services.ingestion import ingest_status_event
 from app.services.recordings import ingest_recording_event
 
-# Each provider exposes an identical `fetch_incoming_phone_numbers()` returning
-# entries with `phone_number`/`friendly_name`/`sid`, so sync-numbers is provider-agnostic.
-_NUMBER_SOURCES = {
-    "signalwire": signalwire_client.fetch_incoming_phone_numbers,
-    "twilio": twilio_client.fetch_incoming_phone_numbers,
-}
+def _number_sources() -> dict:
+    """provider name -> async fetch() returning number inventory entries with
+    `phone_number`/`friendly_name`/`sid`. Every configured Twilio account is its own
+    provider name (bound to its own creds), so sync-numbers imports each account's
+    inventory under the matching provider identity. SignalWire stays a single provider."""
+    sources = {
+        acct.name: (lambda a=acct: twilio_client.fetch_incoming_phone_numbers(a))
+        for acct in settings.twilio_accounts()
+    }
+    sources["signalwire"] = signalwire_client.fetch_incoming_phone_numbers
+    return sources
 
 
 async def _provider(db, name: str) -> Provider:
@@ -74,9 +80,10 @@ async def sync_numbers(provider: str, dry_run: bool) -> None:
     assignments survive re-runs. Idempotent — safe to run repeatedly.
 
     With dry_run, prints the inventory the provider returns and writes nothing."""
-    fetch = _NUMBER_SOURCES.get(provider)
+    sources = _number_sources()
+    fetch = sources.get(provider)
     if fetch is None:
-        raise SystemExit(f"unknown provider: {provider!r} (expected one of {sorted(_NUMBER_SOURCES)})")
+        raise SystemExit(f"unknown provider: {provider!r} (expected one of {sorted(sources)})")
     inventory = await fetch()
     if dry_run:
         print(f"== {provider} numbers (dry-run): {len(inventory)} ==")
@@ -132,16 +139,6 @@ async def list_sw_calls(hours: int) -> None:
               f"dir={c.direction} status={c.status}")
 
 
-_CALL_SOURCES = {
-    "twilio": twilio_client.fetch_recent_calls,
-    "signalwire": signalwire_client.fetch_recent_calls_voice_logs,
-}
-_RECORDING_SOURCES = {
-    "twilio": twilio_client.fetch_recent_recordings,
-    "signalwire": signalwire_client.fetch_recordings_via_voice_logs,
-}
-
-
 async def backfill(provider: str, hours: int, transcribe: bool) -> None:
     """One-time historical mirror of a provider's calls + recordings into OWEN.
 
@@ -156,12 +153,13 @@ async def backfill(provider: str, hours: int, transcribe: bool) -> None:
     sweep only deletes transcribed audio). Pass --transcribe to run the full pipeline.
 
     `hours` is the look-back window; the default (~10y) captures the whole account."""
-    from app.workers.reconciler import _is_inbound
+    from app.workers.reconciler import _call_sources, _is_inbound, _recording_sources
 
-    call_fetch = _CALL_SOURCES.get(provider)
-    rec_fetch = _RECORDING_SOURCES.get(provider)
+    call_sources, rec_sources = _call_sources(), _recording_sources()
+    call_fetch = call_sources.get(provider)
+    rec_fetch = rec_sources.get(provider)
     if call_fetch is None or rec_fetch is None:
-        raise SystemExit(f"unknown provider: {provider!r} (expected one of {sorted(_CALL_SOURCES)})")
+        raise SystemExit(f"unknown provider: {provider!r} (expected one of {sorted(call_sources)})")
 
     events = await call_fetch(hours)
     ingested = 0
@@ -207,6 +205,11 @@ def main() -> None:
     p = argparse.ArgumentParser(prog="manage")
     sub = p.add_subparsers(dest="cmd", required=True)
 
+    # Valid provider names: every configured Twilio account (each its own provider
+    # identity) plus signalwire. Lets --provider target a specific Twilio account.
+    provider_choices = sorted({a.name for a in settings.twilio_accounts()} | {"signalwire"})
+    default_twilio = next((a.name for a in settings.twilio_accounts()), "twilio")
+
     lr = sub.add_parser("list-recordings", help="SignalWire Recordings API dump (read-only)")
     lr.add_argument("--hours", type=int, default=24)
 
@@ -218,13 +221,13 @@ def main() -> None:
 
     bf = sub.add_parser("backfill", help="One-time historical mirror of a provider's "
                         "calls + recordings into OWEN (non-destructive, no GHL relay)")
-    bf.add_argument("--provider", default="twilio", choices=["twilio", "signalwire"])
+    bf.add_argument("--provider", default=default_twilio, choices=provider_choices)
     bf.add_argument("--hours", type=int, default=87600, help="look-back window (default ~10y)")
     bf.add_argument("--transcribe", action="store_true",
                     help="also transcribe + analyze (default: raw audio only, no AI cost)")
 
     sn = sub.add_parser("sync-numbers", help="Import a provider's number inventory into the DB")
-    sn.add_argument("--provider", default="signalwire", choices=["signalwire", "twilio"])
+    sn.add_argument("--provider", default="signalwire", choices=provider_choices)
     sn.add_argument("--dry-run", action="store_true", help="Print the inventory, write nothing")
 
     c = sub.add_parser("add-campaign")

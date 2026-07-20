@@ -38,17 +38,28 @@ from app.services import queue
 logger = logging.getLogger("worker.handlers")
 
 # Per-provider media download auth (ARCHITECTURE.md #12 — never shared across providers).
-_PROVIDER_AUTH = {
-    "twilio": lambda: (settings.TWILIO_ACCOUNT_SID, settings.TWILIO_AUTH_TOKEN),
-    "signalwire": lambda: (settings.SIGNALWIRE_PROJECT_ID, settings.SIGNALWIRE_AUTH_TOKEN),
-}
+# Each Twilio account is its own provider name, so the `provider` in the job payload
+# resolves to that account's credentials (a recording is downloaded with the same
+# account that owns it — never account A's token against account B's media).
+def _provider_auth() -> dict:
+    auth = {
+        acct.name: (lambda a=acct: (a.account_sid, a.auth_token))
+        for acct in settings.twilio_accounts()
+    }
+    auth["signalwire"] = lambda: (settings.SIGNALWIRE_PROJECT_ID, settings.SIGNALWIRE_AUTH_TOKEN)
+    return auth
+
 
 # Per-provider remote-delete (ARCHITECTURE.md #12). Called only after the local copy is
 # safely on disk, so provider-side storage is never billed. Kept per-provider, never shared.
-_PROVIDER_DELETE = {
-    "twilio": twilio_client.delete_recording,
-    "signalwire": signalwire_client.delete_recording,
-}
+# Twilio delete is bound to the owning account's creds via the same provider-name lookup.
+def _provider_delete() -> dict:
+    deleters = {
+        acct.name: (lambda sid, a=acct: twilio_client.delete_recording(a, sid))
+        for acct in settings.twilio_accounts()
+    }
+    deleters["signalwire"] = signalwire_client.delete_recording
+    return deleters
 
 
 async def handle_recording_fetch(db: AsyncSession, payload: dict) -> None:
@@ -63,7 +74,7 @@ async def handle_recording_fetch(db: AsyncSession, payload: dict) -> None:
         if not url:
             raise ValueError(f"recording {recording_id} has no provider_url")
         media_url = url if url.endswith(".mp3") else f"{url}.mp3"
-        auth = _PROVIDER_AUTH.get(payload.get("provider", "twilio"), lambda: None)()
+        auth = _provider_auth().get(payload.get("provider", "twilio"), lambda: None)()
         os.makedirs(settings.RECORDINGS_DIR, exist_ok=True)
         dest = os.path.join(settings.RECORDINGS_DIR, f"{rec.provider_recording_sid}.mp3")
         tmp = f"{dest}.part"
@@ -84,7 +95,7 @@ async def handle_recording_fetch(db: AsyncSession, payload: dict) -> None:
         # billed for their storage (the cheap-storage strategy). Best-effort: a failed
         # delete must not fail the pipeline; the transcript/local audio are already kept.
         if settings.DELETE_REMOTE_RECORDING:
-            deleter = _PROVIDER_DELETE.get(payload.get("provider", "twilio"))
+            deleter = _provider_delete().get(payload.get("provider", "twilio"))
             if deleter and rec.provider_recording_sid:
                 try:
                     await deleter(rec.provider_recording_sid)
