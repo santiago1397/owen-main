@@ -31,6 +31,33 @@ async def fetch_recent_calls(window_hours: int) -> list[NormalizedCallEvent]:
     return events
 
 
+async def fetch_incoming_phone_numbers() -> list[dict]:
+    """List every phone number owned by the Twilio account.
+
+    Twilio's IncomingPhoneNumbers resource is the same shape SignalWire copied, so
+    each entry carries `sid`, `phone_number` (E.164), `friendly_name`, and `voice_url`.
+    Enumerates owned resources regardless of how each number is routed. Note: for
+    numbers pointed at a TwiML app/flow, `voice_url` is that flow, not a forward
+    target, so it can't tell us `forwards_to`.
+    """
+    if not (settings.TWILIO_ACCOUNT_SID and settings.TWILIO_AUTH_TOKEN):
+        return []
+    url = f"{API_ROOT}/Accounts/{settings.TWILIO_ACCOUNT_SID}/IncomingPhoneNumbers.json"
+    auth = (settings.TWILIO_ACCOUNT_SID, settings.TWILIO_AUTH_TOKEN)
+    numbers: list[dict] = []
+    async with httpx.AsyncClient(timeout=30) as client:
+        params: dict | None = {"PageSize": "1000"}
+        next_url: str | None = url
+        while next_url:
+            resp = await client.get(next_url, params=params if next_url == url else None, auth=auth)
+            resp.raise_for_status()
+            data = resp.json()
+            numbers.extend(data.get("incoming_phone_numbers", []))
+            nxt = data.get("next_page_uri")
+            next_url = f"https://api.twilio.com{nxt}" if nxt else None
+    return numbers
+
+
 async def delete_recording(recording_sid: str) -> None:
     """Delete the provider-side copy so Twilio never bills us for storage.
     Tolerant of 404 (already gone) — idempotent under retries."""

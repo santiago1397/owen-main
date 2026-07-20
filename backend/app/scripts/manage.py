@@ -15,7 +15,14 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app.db import SessionLocal
 from app.models import Call, Campaign, Number, Provider
-from app.providers import signalwire_client
+from app.providers import signalwire_client, twilio_client
+
+# Each provider exposes an identical `fetch_incoming_phone_numbers()` returning
+# entries with `phone_number`/`friendly_name`/`sid`, so sync-numbers is provider-agnostic.
+_NUMBER_SOURCES = {
+    "signalwire": signalwire_client.fetch_incoming_phone_numbers,
+    "twilio": twilio_client.fetch_incoming_phone_numbers,
+}
 
 
 async def _provider(db, name: str) -> Provider:
@@ -57,16 +64,19 @@ async def list_all() -> None:
 
 
 async def sync_numbers(provider: str, dry_run: bool) -> None:
-    """Pull the account's number inventory from SignalWire and upsert into `numbers`.
+    """Pull the account's number inventory from the provider and upsert into `numbers`.
 
-    Inserts numbers we don't have yet and refreshes `friendly_name` from SignalWire
+    Inserts numbers we don't have yet and refreshes `friendly_name` from the provider
     (the source of truth). Leaves `campaign_id` and `forwards_to` untouched so manual
     assignments survive re-runs. Idempotent — safe to run repeatedly.
 
-    With dry_run, prints the inventory SignalWire returns and writes nothing."""
-    inventory = await signalwire_client.fetch_incoming_phone_numbers()
+    With dry_run, prints the inventory the provider returns and writes nothing."""
+    fetch = _NUMBER_SOURCES.get(provider)
+    if fetch is None:
+        raise SystemExit(f"unknown provider: {provider!r} (expected one of {sorted(_NUMBER_SOURCES)})")
+    inventory = await fetch()
     if dry_run:
-        print(f"== signalwire numbers (dry-run): {len(inventory)} ==")
+        print(f"== {provider} numbers (dry-run): {len(inventory)} ==")
         for entry in inventory:
             print(f"  {entry.get('phone_number')}  friendly={entry.get('friendly_name')!r}  "
                   f"sid={entry.get('sid')}")
@@ -95,7 +105,7 @@ async def sync_numbers(provider: str, dry_run: bool) -> None:
                 existing.friendly_name = friendly
                 updated += 1
         await db.commit()
-        print(f"sync-numbers: {len(inventory)} from SignalWire, "
+        print(f"sync-numbers: {len(inventory)} from {provider}, "
               f"{inserted} inserted, {updated} updated (provider {provider})")
 
 
@@ -140,8 +150,8 @@ def main() -> None:
     rn = sub.add_parser("reconcile-now", help="Run the reconciler once immediately")
     rn.add_argument("--hours", type=int, default=None)
 
-    sn = sub.add_parser("sync-numbers", help="Import the SignalWire number inventory into the DB")
-    sn.add_argument("--provider", default="signalwire")
+    sn = sub.add_parser("sync-numbers", help="Import a provider's number inventory into the DB")
+    sn.add_argument("--provider", default="signalwire", choices=["signalwire", "twilio"])
     sn.add_argument("--dry-run", action="store_true", help="Print the inventory, write nothing")
 
     c = sub.add_parser("add-campaign")
