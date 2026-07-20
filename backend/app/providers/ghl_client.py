@@ -34,3 +34,8 @@ async def post_inbound_message(payload: dict) -> None:
 async def post_call_summary(payload: dict) -> None:
     """POST a completed-call summary (attribution + AI analysis) to the GHL call webhook."""
     await _post(settings.GHL_CALL_WEBHOOK_URL, payload)
+
+
+async def post_inbound_email(payload: dict) -> None:
+    """POST a parsed job-notification email (contact + job fields) to the GHL email webhook."""
+    await _post(settings.GHL_EMAIL_WEBHOOK_URL, payload)

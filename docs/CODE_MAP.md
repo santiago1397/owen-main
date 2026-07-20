@@ -134,6 +134,7 @@ The whole schema in one file. Tables (PK type in parens):
 - **`transcriptions`** (uuid) — `call_id`, `recording_id`, `engine`, `text`, `language`, `confidence`, `words`, `segments` (speaker-labeled `{speaker,start,end,text}` list from dual-channel recordings; NULL for mono).
 - **`call_analysis`** (uuid) — `call_id` (unique), `is_spam`, `spam_confidence`, `category`, `tags`, `summary`, `model`, plus human `category_override` / `is_spam_override` (human wins).
 - **`messages`** (uuid) — inbound SMS on a tracking number. `provider_id`, `provider_message_sid` (unique = idempotency), `number_id`/`caller_id`/`campaign_id` (attributed like a call), `direction`, `from_number`, `to_number`, `body`, `status`, `num_media`, `media_urls`, `relayed_to_ghl`/`relayed_at` (GHL relay-once guard), `raw_payload`, `received_at`. Composite indexes on `(number_id, received_at)` and `(campaign_id, received_at)`.
+- **`inbound_emails`** (uuid) — job-notification emails pulled over IMAP. `message_id` (unique = idempotency), `source`, `from/to/subject`, `job_id`, `parse_status` (`parsed`/`failed`) + `parse_error`, `fields` jsonb (extracted data), `raw` (full email, always kept), `relayed_to_ghl`/`relayed_at` (relay-once guard), `received_at`. Only `parsed` rows relay to GHL.
 - **`jobs`** (uuid) — durable queue. `type`, `payload`, `status`, `attempts`, `last_error`, `run_after`, `locked_at`.
 - **`users`** (uuid) — `email` unique, `password_hash` (argon2), `role`, `active`.
 
@@ -165,6 +166,35 @@ attribution (reusing `_get_or_create_provider`/`_get_or_create_caller`), then up
 `messages` `ON CONFLICT (provider_message_sid)`. The `/message` route enqueues a
 `message_relay_ghl` job to forward it to GoHighLevel.
 
+`ingest_email` (in `services/emails.py`) is the analogous idempotent upsert for inbound
+**job-notification emails** (Dispatch / American Home Shield). Unlike calls/SMS this is a
+**pull** path, not a webhook: the worker polls a Hostinger mailbox over IMAP. It upserts
+`inbound_emails` `ON CONFLICT (message_id) DO NOTHING` (the RFC Message-ID is the idempotency
+key), always stores the raw email, and returns `(row, created)` so the poller enqueues an
+`email_relay_ghl` job exactly once — and **only for successfully parsed emails**. Parse
+failures are stored with `parse_status='failed'` + `parse_error` and never relayed (the
+agreed store-raw-and-flag policy). See "Inbound email ingestion" below.
+
+### Inbound email ingestion (`app/services/mailbox.py`, `providers/dispatch_email.py`, `workers/mail_poller.py`)
+
+A separate, provider-agnostic-shaped feature that turns templated job-notification emails
+into GHL leads. All disabled (no-op) unless `INBOUND_MAIL_HOST`/`INBOUND_MAIL_USER` are set.
+
+- `services/mailbox.py` — stdlib-only (`imaplib` + `email`, no new deps) IMAP client. Blocking
+  calls run off the event loop via `asyncio.to_thread`. `fetch_from_sender` connects over SSL,
+  `UID SEARCH (UNSEEN FROM <sender>)` so **only the configured sender's mail is ever touched**,
+  `FETCH BODY.PEEK[]` (doesn't set `\Seen`), decodes QP/base64 + charset, and returns the plain
+  + HTML parts and the raw bytes. `mark_seen` sets `\Seen` on handled UIDs.
+- `providers/dispatch_email.py` — the parser. `matches(from_addr)` gates on `notifications@dispatch.me`;
+  `parse(subject, text, html)` extracts everything (job_id, service, brand, customer name/phone/email,
+  service address, contacts, vendor/contract IDs + dates, items+problem+status, payment, coverage
+  notes) with defensive regex over the `text/plain` alternative (HTML fallback). Missing any of
+  `REQUIRED` (job_id, customer_name, service_address) → `ok=False` (stored + flagged, not relayed).
+  **This is where a Dispatch template change will break — kept loud, never silent.**
+- `workers/mail_poller.py` — `poll_mailbox` (APScheduler, every `INBOUND_MAIL_POLL_SECONDS`≈90s):
+  fetch → parse → `ingest_email` → enqueue `email_relay_ghl` for newly-inserted parsed rows →
+  `mark_seen` handled UIDs (only after DB commit; a failed write leaves the mail UNSEEN to retry).
+
 ### Webhooks (`app/webhooks/`) — real-time push ingestion
 
 - `common.py` — `build_router(adapter, provider, signature_headers)` factory. Reconstructs the public URL behind Traefik, verifies the signature (or SignalWire CFB HTTP Basic Auth via `SIGNALWIRE_CFB_WEBHOOK_SECRET`), parses body → adapter → `ingest_*`, returns 200 fast (slow work is enqueued). `POST /status` (on a terminal call, if `GHL_CALL_WEBHOOK_URL` is set, enqueues a delayed `call_relay_ghl`), `POST /recording`, and `POST /message` (inbound SMS → `ingest_message_event` → enqueue `message_relay_ghl`).
@@ -180,13 +210,14 @@ attribution (reusing `_get_or_create_provider`/`_get_or_create_caller`), then up
 | `signalwire.py` | `SignalWireAdapter(TwilioAdapter)` — adds a **native Relay/Calling** parser for CFB's `calling.call.state` events (single-quoted Python-repr `params`, `parent.call_id` leg correlation, `_tracking_number` override). |
 | `twilio_client.py` | REST reconciliation client: `fetch_recent_calls`, `delete_recording`. |
 | `signalwire_client.py` | REST client. **The modern Voice API path** (`fetch_recent_calls_voice_logs`, `fetch_recordings_via_voice_logs`) is what actually works for this account; classic Compatibility-API functions kept unused as fallback. |
-| `ghl_client.py` | GoHighLevel inbound relays (shared `_post` helper): `post_inbound_message(payload)` → `GHL_INBOUND_WEBHOOK_URL` (inbound SMS); `post_call_summary(payload)` → `GHL_CALL_WEBHOOK_URL` (completed-call summary + AI analysis). Plain JSON Workflow triggers, no auth. No-op when the URL is unset. Inbound-only — never sends outbound SMS. |
+| `ghl_client.py` | GoHighLevel inbound relays (shared `_post` helper): `post_inbound_message(payload)` → `GHL_INBOUND_WEBHOOK_URL` (inbound SMS); `post_call_summary(payload)` → `GHL_CALL_WEBHOOK_URL` (completed-call summary + AI analysis); `post_inbound_email(payload)` → `GHL_EMAIL_WEBHOOK_URL` (parsed job email). Plain JSON Workflow triggers, no auth. No-op when the URL is unset. Inbound-only — never sends outbound SMS. |
+| `dispatch_email.py` | Parser for Dispatch/AHS job-notification emails (see "Inbound email ingestion"). Pure functions, no I/O. |
 
 ### Background worker (`app/worker.py`, `app/workers/`, `app/services/queue.py`)
 
-- `worker.py` — the worker container's entrypoint. Runs two things in one asyncio process: a **drain loop** (`claim_one` → dispatch to handler → complete/fail) and an **APScheduler** with `reconcile_recent` (every 5 min) + `retention_sweep` (every 6 hrs).
+- `worker.py` — the worker container's entrypoint. Runs two things in one asyncio process: a **drain loop** (`claim_one` → dispatch to handler → complete/fail) and an **APScheduler** with `reconcile_recent` (every 5 min) + `retention_sweep` (every 6 hrs) + `poll_mailbox` (every ~90s, **only when a mailbox is configured**).
 - `services/queue.py` — the Postgres-backed job queue. `enqueue`, `claim_one` (`UPDATE … WHERE id = (SELECT … FOR UPDATE SKIP LOCKED)` so concurrent drainers never collide), `complete`, `fail` (linear backoff `30s × attempts`, up to `MAX_ATTEMPTS=5` then dead).
-- `workers/handlers.py` — the pipeline. `HANDLERS = {recording_fetch, transcribe, analyze, message_relay_ghl, call_relay_ghl}`. The recording pipeline enqueues the next stage on success; `message_relay_ghl` POSTs the message to GHL (`ghl_client`) and sets `relayed_to_ghl`/`relayed_at` (raises to retry on failure); `call_relay_ghl` POSTs a completed-call summary (attribution + new/returning + spam/category/summary via override precedence + transcript), re-deferring while a recording's analysis is still pending (bounded by `GHL_CALL_RELAY_MAX_WAIT_SECONDS`), and sets `calls.relayed_to_ghl`/`relayed_at`:
+- `workers/handlers.py` — the pipeline. `HANDLERS = {recording_fetch, transcribe, analyze, message_relay_ghl, call_relay_ghl, email_relay_ghl}`. `email_relay_ghl` POSTs a parsed job email's extracted fields (+ metadata) to GHL (`ghl_client.post_inbound_email`) and sets `inbound_emails.relayed_to_ghl`/`relayed_at`; it no-ops on non-`parsed` rows and on the relay-once guard, and raises to retry on POST failure. The recording pipeline enqueues the next stage on success; `message_relay_ghl` POSTs the message to GHL (`ghl_client`) and sets `relayed_to_ghl`/`relayed_at` (raises to retry on failure); `call_relay_ghl` POSTs a completed-call summary (attribution + new/returning + spam/category/summary via override precedence + transcript), re-deferring while a recording's analysis is still pending (bounded by `GHL_CALL_RELAY_MAX_WAIT_SECONDS`), and sets `calls.relayed_to_ghl`/`relayed_at`:
   - **`recording_fetch`** — streams the provider media to `/data/recordings/{sid}.mp3` (atomic `.part` → `os.replace`), optionally deletes the remote copy, enqueues `transcribe`.
   - **`transcribe`** — runs the configured `TranscriptionEngine`, writes a `Transcription`, sets `recording.transcribed=True` (now retention may delete the audio), enqueues `analyze`. **Dual-channel path:** if the recording is stereo (ffprobe) and `STEREO_TRANSCRIPTION_ENABLED`, ffmpeg splits it into two mono legs, each is transcribed with segment timestamps (whisper-1 → `transcribe_segmented`, hallucination-filtered), and `audio.merge_channels` interleaves them into a `[Caller]`/`[Operator]`-labeled transcript + `segments`. Probe/split failure degrades to the mono path; splits are temp files (cleaned in `finally`).
   - **`analyze`** — runs the configured `AnalysisEngine`, upserts `CallAnalysis`, updates the caller's `spam_score`.
@@ -209,7 +240,8 @@ Selected at runtime by `settings.TRANSCRIPTION_ENGINE` / `settings.ANALYSIS_ENGI
 | `numbers.py` | `GET /api/numbers` (per-number volume + last call) |
 | `dashboard.py` | `GET /api/dashboard/summary?range=` (totals, new-vs-returning both flavors, avg duration, by-campaign/number, Eastern-time daily series, top callers) |
 | `recordings.py` | `GET /api/recordings/{id}/play` (JWT → short-lived playback token) · `GET /api/recordings/stream?token=` (**no JWT** — token-authed, streams the file so `<audio>` works) |
-| `settings.py` | `GET /api/settings` (masked creds, webhook URLs to paste into providers, active engines, categories) |
+| `emails.py` | `GET /api/emails` (inbound emails; filter `parse_status`/`relayed`, paginated) · `GET /api/emails/{id}` (full detail incl. extracted `fields` + raw). `parse_status=failed` is the human-inspect queue. |
+| `settings.py` | `GET /api/settings` (masked creds, webhook URLs to paste into providers, active engines, categories, inbound-email poller status) |
 | `deps.py` | `current_user` JWT dependency; `SHORT_CALL_MAX_DURATION_SECONDS=1` (≤1s misdials hidden by default). |
 
 `calls`/`dashboard` read `calls` left-joined to `call_analysis`, using
@@ -261,5 +293,7 @@ baked in) and serves it with nginx on `:3333`. `nginx.conf` does SPA fallback
 | Support a new telephony provider | new `providers/<x>.py` adapter + `<x>_client.py`, wire in `webhooks/` + `workers/reconciler.py` |
 | Swap the transcription or LLM engine | `analysis/transcription.py` / `analysis/classification.py` + `.env` engine setting |
 | Add a background job type | `services/queue.py` (enqueue) + `workers/handlers.py` (`HANDLERS`) |
+| Change what's parsed from Dispatch emails / relayed to GHL | `providers/dispatch_email.py` (extraction) + `workers/handlers.py` (`handle_email_relay_ghl` payload) |
+| Add another email sender/format | new parser in `providers/` + branch in `workers/mail_poller.py` (widen the IMAP sender filter) |
 | Change the DB schema | new Alembic migration in `backend/alembic/versions/` + `models/models.py` |
 | Register a tracking number | `make manage args='add-number …'` (see README) |

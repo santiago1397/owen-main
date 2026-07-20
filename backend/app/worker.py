@@ -18,6 +18,8 @@ from app.db import SessionLocal
 from app.migrate import run_migrations
 from app.services import queue
 from app.workers.handlers import HANDLERS
+from app.workers.mail_poller import enabled as mail_enabled
+from app.workers.mail_poller import poll_mailbox
 from app.workers.reconciler import reconcile_recent
 
 logging.basicConfig(level=logging.INFO)
@@ -84,6 +86,14 @@ def build_scheduler() -> AsyncIOScheduler:
     # webhooks), so keep it frequent — calls/recordings should surface within minutes.
     sched.add_job(reconcile_recent, "interval", minutes=5, id="reconcile")
     sched.add_job(retention_sweep, "interval", hours=6, id="retention")
+    # Inbound-email ingestion (Hostinger IMAP). Only scheduled when a mailbox is configured
+    # — otherwise it's a no-op and there's no point waking up for it.
+    if mail_enabled():
+        sched.add_job(
+            poll_mailbox, "interval",
+            seconds=settings.INBOUND_MAIL_POLL_SECONDS, id="mail_poll",
+        )
+        logger.info("mail poller scheduled every %ss", settings.INBOUND_MAIL_POLL_SECONDS)
     return sched
 
 

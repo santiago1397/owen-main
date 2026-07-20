@@ -26,6 +26,7 @@ from app.models import (
     CallAnalysis,
     Caller,
     Campaign,
+    InboundEmail,
     Message,
     Number,
     Provider,
@@ -364,10 +365,44 @@ async def handle_call_relay_ghl(db: AsyncSession, payload: dict) -> None:
                 call.id, analysis_payload is not None)
 
 
+async def handle_email_relay_ghl(db: AsyncSession, payload: dict) -> None:
+    """Relay a parsed inbound job-email to GoHighLevel via its inbound webhook. Idempotent:
+    the relayed_to_ghl flag guards against re-sending on retry. Only 'parsed' emails are
+    ever relayed — a 'failed' row is stored + flagged, never sent. Raises on POST failure so
+    the queue retries (backoff)."""
+    em = await db.get(InboundEmail, uuid.UUID(payload["email_id"]))
+    if em is None:
+        logger.warning("email_relay_ghl: email %s not found", payload.get("email_id"))
+        return
+    if em.relayed_to_ghl:
+        logger.info("email_relay_ghl: %s already relayed, skipping", em.message_id)
+        return
+    if em.parse_status != "parsed":
+        logger.info("email_relay_ghl: %s not parsed (%s), not relaying",
+                    em.message_id, em.parse_status)
+        return
+
+    # Relay everything extracted, plus email metadata for traceability in GHL.
+    await ghl_client.post_inbound_email({
+        **(em.fields or {}),
+        "source": em.source,
+        "job_id": em.job_id,
+        "subject": em.subject,
+        "from": em.from_addr,
+        "message_id": em.message_id,
+        "received_at": em.received_at.isoformat() if em.received_at else None,
+    })
+    em.relayed_to_ghl = True
+    em.relayed_at = datetime.now(timezone.utc)
+    await db.commit()
+    logger.info("email_relay_ghl: relayed %s (job_id=%s) to GHL", em.message_id, em.job_id)
+
+
 HANDLERS = {
     "recording_fetch": handle_recording_fetch,
     "transcribe": handle_transcribe,
     "analyze": handle_analyze,
     "message_relay_ghl": handle_message_relay_ghl,
     "call_relay_ghl": handle_call_relay_ghl,
+    "email_relay_ghl": handle_email_relay_ghl,
 }

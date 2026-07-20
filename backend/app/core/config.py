@@ -127,6 +127,33 @@ class Settings(BaseSettings):
     GHL_CALL_RELAY_DELAY_SECONDS: int = 120
     GHL_CALL_RELAY_MAX_WAIT_SECONDS: int = 1800
 
+    # GoHighLevel — inbound-email relay. Same "Inbound Webhook" trigger pattern (plain JSON,
+    # no auth), a *separate* URL so parsed job emails can feed their own GHL workflow. Empty
+    # = email relay disabled. Only *successfully parsed* emails are relayed (parse failures
+    # are stored + flagged, never sent — see INBOUND_MAIL below).
+    GHL_EMAIL_WEBHOOK_URL: str = ""
+
+    # Inbound email ingestion (Hostinger IMAP). The worker polls this mailbox for new mail
+    # from INBOUND_MAIL_SENDER, parses templated job-notification emails, stores them, and
+    # relays parsed ones to GHL. Empty INBOUND_MAIL_HOST/USER = poller disabled (no-op).
+    # We authenticate with the mailbox password directly (Hostinger has no OAuth/app-passwords)
+    # over TLS, and only ever fetch mail matching the sender filter — other mail is untouched.
+    INBOUND_MAIL_HOST: str = ""            # e.g. imap.hostinger.com
+    INBOUND_MAIL_PORT: int = 993           # IMAP over SSL/TLS
+    INBOUND_MAIL_USER: str = ""            # full mailbox address = IMAP username
+    INBOUND_MAIL_PASSWORD: str = ""
+    INBOUND_MAIL_FOLDER: str = "INBOX"
+    # Only mail from this address is fetched/parsed/marked-seen. Scoped to Dispatch for now.
+    INBOUND_MAIL_SENDER: str = "notifications@dispatch.me"
+    # Poll cadence. 90s meets the "within a minute or two" latency bar and is well within
+    # Hostinger's IMAP limits (one short-lived connection per poll).
+    INBOUND_MAIL_POLL_SECONDS: int = 90
+    # Max messages pulled per poll (backlog is drained across successive polls).
+    INBOUND_MAIL_BATCH: int = 25
+    # Mark handled messages \Seen so they aren't re-fetched next poll. DB dedupe on the
+    # RFC Message-ID is the real idempotency guard; this is only a fetch-efficiency measure.
+    INBOUND_MAIL_MARK_SEEN: bool = True
+
     def twilio_accounts(self) -> list[TwilioAccount]:
         """All configured Twilio accounts. Parses TWILIO_ACCOUNTS when set, otherwise
         falls back to the legacy single-account globals (named "twilio"). Entries with a

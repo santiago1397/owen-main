@@ -220,6 +220,40 @@ class Message(Base):
     received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
+class InboundEmail(Base):
+    """A job-notification email pulled from the Hostinger mailbox over IMAP (e.g. Dispatch /
+    American Home Shield). Idempotent on the RFC Message-ID (mirrors Message.provider_message_sid
+    / Recording.provider_recording_sid). The full raw email is ALWAYS stored; `fields` holds the
+    parsed structured data. `parse_status` gates the GHL relay — only 'parsed' rows are sent;
+    'failed' rows are kept + flagged for a human to inspect and are never relayed.
+    """
+
+    __tablename__ = "inbound_emails"
+    __table_args__ = (
+        Index("ix_inbound_emails_source_received", "source", "received_at"),
+        Index("ix_inbound_emails_parse_status", "parse_status"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_uuid)
+    message_id: Mapped[str] = mapped_column(String, unique=True)  # RFC Message-ID = idempotency key
+    source: Mapped[str | None] = mapped_column(String)  # matched sender key, e.g. 'dispatch'
+    from_addr: Mapped[str | None] = mapped_column(String)
+    to_addr: Mapped[str | None] = mapped_column(String)
+    subject: Mapped[str | None] = mapped_column(String)
+    job_id: Mapped[str | None] = mapped_column(String, index=True)  # extracted natural key (e.g. AHS work-order #)
+
+    parse_status: Mapped[str] = mapped_column(String, default="failed")  # 'parsed' | 'failed'
+    parse_error: Mapped[str | None] = mapped_column(Text)  # why parsing failed / which fields were missing
+    fields: Mapped[dict | None] = mapped_column(JSONB)  # extracted structured data (what we relay)
+    raw: Mapped[str | None] = mapped_column(Text)  # full raw RFC822 email, always kept
+
+    relayed_to_ghl: Mapped[bool] = mapped_column(Boolean, default=False)  # relay-once guard
+    relayed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
 class Job(Base):
     """Durable Postgres-backed queue. Drained with SELECT ... FOR UPDATE SKIP LOCKED."""
 

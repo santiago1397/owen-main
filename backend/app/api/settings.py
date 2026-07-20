@@ -50,5 +50,13 @@ async def get_settings(request: Request, _: User = Depends(current_user)) -> dic
         "ghl": {
             "inbound_relay_configured": bool(settings.GHL_INBOUND_WEBHOOK_URL),
             "call_relay_configured": bool(settings.GHL_CALL_WEBHOOK_URL),
+            "email_relay_configured": bool(settings.GHL_EMAIL_WEBHOOK_URL),
+        },
+        "inbound_email": {
+            "configured": bool(settings.INBOUND_MAIL_HOST and settings.INBOUND_MAIL_USER),
+            "host": settings.INBOUND_MAIL_HOST,
+            "user": _mask(settings.INBOUND_MAIL_USER),
+            "sender_filter": settings.INBOUND_MAIL_SENDER,
+            "poll_seconds": settings.INBOUND_MAIL_POLL_SECONDS,
         },
     }
