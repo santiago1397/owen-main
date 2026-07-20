@@ -22,10 +22,13 @@ _SOURCES = {
     "signalwire": signalwire_client.fetch_recent_calls_voice_logs,
 }
 
-# Providers whose recordings we discover by polling (Call Flow Builder does not POST
-# a recordingStatusCallback to us reliably; webhooks still work too and are idempotent).
+# Providers whose recordings we discover by polling (webhooks still work too and are
+# idempotent). SignalWire's Call Flow Builder doesn't POST a recordingStatusCallback
+# reliably; Twilio's Studio "Connect Call To" widget exposes no callback field at all,
+# so Studio-recorded Twilio calls only reach us via this poll.
 _RECORDING_SOURCES = {
     "signalwire": signalwire_client.fetch_recordings_via_voice_logs,
+    "twilio": twilio_client.fetch_recent_recordings,
 }
 
 

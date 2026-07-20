@@ -5,8 +5,8 @@ from datetime import datetime, timedelta, timezone
 import httpx
 
 from app.core.config import settings
-from app.providers.base import NormalizedCallEvent
-from app.providers.cxml import normalize_call
+from app.providers.base import NormalizedCallEvent, NormalizedRecordingEvent
+from app.providers.cxml import normalize_call, to_int
 
 API_ROOT = "https://api.twilio.com/2010-04-01"
 
@@ -29,6 +29,47 @@ async def fetch_recent_calls(window_hours: int) -> list[NormalizedCallEvent]:
             nxt = data.get("next_page_uri")
             next_url = f"https://api.twilio.com{nxt}" if nxt else None
     return events
+
+
+async def fetch_recent_recordings(window_hours: int) -> list[NormalizedRecordingEvent]:
+    """Pull recordings created in the window (Twilio Recordings resource).
+
+    Twilio's Studio "Connect Call To" widget records via its "Start Recording" toggle,
+    but that widget exposes no recordingStatusCallback field — so Twilio never POSTs us a
+    /recording webhook for Studio-recorded calls. We discover those recordings by polling
+    instead, mirroring the SignalWire recording poll. Idempotent downstream: the reconciler
+    only enqueues a fetch when we don't already hold the audio (ingest_recording_event
+    upserts on the unique recording sid)."""
+    if not (settings.TWILIO_ACCOUNT_SID and settings.TWILIO_AUTH_TOKEN):
+        return []
+    since = (datetime.now(timezone.utc) - timedelta(hours=window_hours)).strftime("%Y-%m-%d")
+    account = f"{API_ROOT}/Accounts/{settings.TWILIO_ACCOUNT_SID}"
+    url = f"{account}/Recordings.json"
+    auth = (settings.TWILIO_ACCOUNT_SID, settings.TWILIO_AUTH_TOKEN)
+    recordings: list[NormalizedRecordingEvent] = []
+    async with httpx.AsyncClient(timeout=30) as client:
+        params: dict | None = {"DateCreated>": since, "PageSize": "1000"}
+        next_url: str | None = url
+        while next_url:
+            resp = await client.get(next_url, params=params if next_url == url else None, auth=auth)
+            resp.raise_for_status()
+            data = resp.json()
+            for r in data.get("recordings", []):
+                sid = r.get("sid", "")
+                recordings.append(
+                    NormalizedRecordingEvent(
+                        provider_call_sid=r.get("call_sid", ""),
+                        provider_recording_sid=sid,
+                        status=r.get("status") or "completed",
+                        duration_seconds=to_int(r.get("duration")),
+                        # handler appends ".mp3" to fetch the media
+                        provider_url=f"{account}/Recordings/{sid}",
+                        raw=r,
+                    )
+                )
+            nxt = data.get("next_page_uri")
+            next_url = f"https://api.twilio.com{nxt}" if nxt else None
+    return recordings
 
 
 async def fetch_incoming_phone_numbers() -> list[dict]:
