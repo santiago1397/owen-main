@@ -21,6 +21,20 @@ from app.services.mailbox import FetchedEmail
 logger = logging.getLogger("ingestion")
 
 
+def ghl_payload(em: InboundEmail) -> dict:
+    """The exact JSON we POST to GHL for a parsed email — extracted fields plus email
+    metadata. Built here so the relay handler and the log API show identical shapes."""
+    return {
+        **(em.fields or {}),
+        "source": em.source,
+        "job_id": em.job_id,
+        "subject": em.subject,
+        "from": em.from_addr,
+        "message_id": em.message_id,
+        "received_at": em.received_at.isoformat() if em.received_at else None,
+    }
+
+
 async def ingest_email(
     db: AsyncSession, msg: FetchedEmail, parsed: ParsedEmail, source: str
 ) -> tuple[InboundEmail, bool]:

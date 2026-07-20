@@ -3,6 +3,7 @@ import { clearToken, getToken } from "./api";
 import Callers from "./pages/Callers";
 import Calls from "./pages/Calls";
 import Dashboard from "./pages/Dashboard";
+import Emails from "./pages/Emails";
 import Login from "./pages/Login";
 import Numbers from "./pages/Numbers";
 import Settings from "./pages/Settings";
@@ -18,6 +19,7 @@ function Layout({ children }: { children: any }) {
         <NavLink to="/calls" className={link}>Calls</NavLink>
         <NavLink to="/numbers" className={link}>Numbers</NavLink>
         <NavLink to="/callers" className={link}>Callers</NavLink>
+        <NavLink to="/emails" className={link}>Email Log</NavLink>
         <NavLink to="/settings" className={link}>Settings</NavLink>
         <div style={{ flex: 1 }} />
         <button onClick={() => { clearToken(); nav("/login"); }}>Log out</button>
@@ -39,6 +41,7 @@ export default function App() {
       <Route path="/calls" element={<Protected><Calls /></Protected>} />
       <Route path="/numbers" element={<Protected><Numbers /></Protected>} />
       <Route path="/callers" element={<Protected><Callers /></Protected>} />
+      <Route path="/emails" element={<Protected><Emails /></Protected>} />
       <Route path="/settings" element={<Protected><Settings /></Protected>} />
     </Routes>
   );

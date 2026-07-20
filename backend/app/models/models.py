@@ -247,8 +247,13 @@ class InboundEmail(Base):
     fields: Mapped[dict | None] = mapped_column(JSONB)  # extracted structured data (what we relay)
     raw: Mapped[str | None] = mapped_column(Text)  # full raw RFC822 email, always kept
 
-    relayed_to_ghl: Mapped[bool] = mapped_column(Boolean, default=False)  # relay-once guard
-    relayed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    relayed_to_ghl: Mapped[bool] = mapped_column(Boolean, default=False)  # relay-once guard (True only on actual send)
+    relayed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))  # last relay attempt time
+    # Truthful relay outcome for the log UI: NULL (parsed, not attempted yet) | 'sent' |
+    # 'skipped_not_configured' (parsed but GHL_EMAIL_WEBHOOK_URL unset) | 'skipped_not_parsed' |
+    # 'failed' (POST errored). 'sent' is the only status that sets relayed_to_ghl.
+    relay_status: Mapped[str | None] = mapped_column(String)
+    relay_error: Mapped[str | None] = mapped_column(Text)
 
     received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

@@ -34,7 +34,7 @@ from app.models import (
     Transcription,
 )
 from app.providers import ghl_client, signalwire_client, twilio_client
-from app.services import queue
+from app.services import emails, queue
 
 logger = logging.getLogger("worker.handlers")
 
@@ -366,10 +366,11 @@ async def handle_call_relay_ghl(db: AsyncSession, payload: dict) -> None:
 
 
 async def handle_email_relay_ghl(db: AsyncSession, payload: dict) -> None:
-    """Relay a parsed inbound job-email to GoHighLevel via its inbound webhook. Idempotent:
-    the relayed_to_ghl flag guards against re-sending on retry. Only 'parsed' emails are
-    ever relayed — a 'failed' row is stored + flagged, never sent. Raises on POST failure so
-    the queue retries (backoff)."""
+    """Relay a parsed inbound job-email to GoHighLevel via its inbound webhook, recording a
+    truthful `relay_status` for the log UI. Idempotent: `relayed_to_ghl` guards against
+    re-sending on retry. Only 'parsed' emails are ever sent. If GHL_EMAIL_WEBHOOK_URL is
+    unset the attempt is logged as 'skipped_not_configured' (NOT marked relayed) so it can be
+    re-relayed once GHL is configured. Raises on POST failure so the queue retries (backoff)."""
     em = await db.get(InboundEmail, uuid.UUID(payload["email_id"]))
     if em is None:
         logger.warning("email_relay_ghl: email %s not found", payload.get("email_id"))
@@ -377,23 +378,39 @@ async def handle_email_relay_ghl(db: AsyncSession, payload: dict) -> None:
     if em.relayed_to_ghl:
         logger.info("email_relay_ghl: %s already relayed, skipping", em.message_id)
         return
+    now = datetime.now(timezone.utc)
     if em.parse_status != "parsed":
+        em.relay_status = "skipped_not_parsed"
+        em.relayed_at = now
+        await db.commit()
         logger.info("email_relay_ghl: %s not parsed (%s), not relaying",
                     em.message_id, em.parse_status)
         return
 
+    # GHL not configured yet: log the attempt truthfully and leave it un-relayed so a later
+    # "relay now" (or re-enqueue after configuring the URL) actually sends it.
+    if not settings.GHL_EMAIL_WEBHOOK_URL:
+        em.relay_status = "skipped_not_configured"
+        em.relay_error = None
+        em.relayed_at = now
+        await db.commit()
+        logger.info("email_relay_ghl: %s parsed but GHL email webhook not configured — "
+                    "attempt logged, not sent", em.message_id)
+        return
+
     # Relay everything extracted, plus email metadata for traceability in GHL.
-    await ghl_client.post_inbound_email({
-        **(em.fields or {}),
-        "source": em.source,
-        "job_id": em.job_id,
-        "subject": em.subject,
-        "from": em.from_addr,
-        "message_id": em.message_id,
-        "received_at": em.received_at.isoformat() if em.received_at else None,
-    })
+    try:
+        await ghl_client.post_inbound_email(emails.ghl_payload(em))
+    except Exception as exc:  # noqa: BLE001 - record the failure, then re-raise for backoff retry
+        em.relay_status = "failed"
+        em.relay_error = str(exc)[:2000]
+        em.relayed_at = now
+        await db.commit()
+        raise
     em.relayed_to_ghl = True
-    em.relayed_at = datetime.now(timezone.utc)
+    em.relay_status = "sent"
+    em.relay_error = None
+    em.relayed_at = now
     await db.commit()
     logger.info("email_relay_ghl: relayed %s (job_id=%s) to GHL", em.message_id, em.job_id)
 

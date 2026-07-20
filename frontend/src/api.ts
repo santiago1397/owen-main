@@ -80,4 +80,7 @@ export const api = {
     }),
   settings: () => request("/api/settings"),
   playUrl: (recordingId: string) => request(`/api/recordings/${recordingId}/play`),
+  emails: (filters: Record<string, any>) => request(`/api/emails${qs(filters)}`),
+  email: (id: string) => request(`/api/emails/${id}`),
+  relayEmail: (id: string) => request(`/api/emails/${id}/relay`, { method: "POST" }),
 };
