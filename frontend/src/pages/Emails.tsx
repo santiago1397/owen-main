@@ -75,6 +75,18 @@ function EmailDrawer({ id, onClose }: { id: string; onClose: () => void }) {
           </div>
         )}
 
+        {e.relay_result && (
+          <div className="card" style={{ marginBottom: 12 }}>
+            <div className="l" style={{ marginBottom: 8 }}>Created in GHL</div>
+            <div className="kv">
+              <span className="muted">Mode</span><span>{e.relay_result.mode}</span>
+              {e.relay_result.contact_id && (<><span className="muted">Contact ID</span><span>{e.relay_result.contact_id}</span></>)}
+              {e.relay_result.opportunity_id && (<><span className="muted">Opportunity ID</span><span>{e.relay_result.opportunity_id}</span></>)}
+              {"note_added" in e.relay_result && (<><span className="muted">Note added</span><span>{e.relay_result.note_added ? "yes" : "no"}</span></>)}
+            </div>
+          </div>
+        )}
+
         {e.fields && (
           <div className="card" style={{ marginBottom: 12 }}>
             <div className="l" style={{ marginBottom: 8 }}>Extracted fields</div>

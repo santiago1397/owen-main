@@ -145,6 +145,26 @@ def main():
     check("job_description has job header", p["job_description"].startswith("Job 66450639 ROOF"))
     check("nested fields still present", isinstance(p["items"], list) and isinstance(p["contacts"], list))
 
+    print("GHL API builders — contact + opportunity bodies:")
+    from app.services.emails import build_contact_body, build_opportunity_body
+    cb = build_contact_body(f, "LOC123")
+    check("contact locationId", cb["locationId"] == "LOC123")
+    check("contact firstName", cb["firstName"] == "Guillermo")
+    check("contact lastName", cb["lastName"] == "Escala")
+    check("contact phone", cb["phone"] == "+13059629757")
+    check("contact email", cb["email"] == "scalas02@yahoo.com")
+    check("contact address1 = full", cb["address1"] == "14436 SW 95TH LN MIAMI, FL 33186")
+    check("contact state parsed", cb["state"] == "FL")
+    check("contact zip parsed", cb["postalCode"] == "33186")
+    check("contact has ahs-job tag", "ahs-job" in cb["tags"])
+    ob = build_opportunity_body(f, "CONTACT1", "PIPE1", "STAGE1", "LOC123")
+    check("opp pipeline", ob["pipelineId"] == "PIPE1")
+    check("opp stage", ob["pipelineStageId"] == "STAGE1")
+    check("opp contact", ob["contactId"] == "CONTACT1")
+    check("opp status open", ob["status"] == "open")
+    check("opp name has job+customer", "66450639" in ob["name"] and "Guillermo Escala" in ob["name"])
+    check("opp monetaryValue from payment", ob["monetaryValue"] == 125.0)
+
     print("mailbox._body_parts — quoted-printable decode path:")
     # A raw wire-format email with a QP soft line break (=\n) and an encoded '=' (=3D),
     # exactly as Dispatch sends it — _body_parts must decode both.

@@ -35,6 +35,7 @@ def _summary(e: InboundEmail) -> dict:
         "relayed_to_ghl": e.relayed_to_ghl,
         "relay_status": e.relay_status,
         "relay_error": e.relay_error,
+        "relay_result": e.relay_result,
         "relayed_at": e.relayed_at.isoformat() if e.relayed_at else None,
         "received_at": e.received_at.isoformat() if e.received_at else None,
     }
@@ -73,7 +74,8 @@ async def list_emails(
     return {
         "total": total,
         "items": [_summary(e) for e in rows],
-        "ghl_email_relay_configured": bool(settings.GHL_EMAIL_WEBHOOK_URL),
+        "ghl_email_relay_configured": bool(settings.ghl_api_enabled or settings.GHL_EMAIL_WEBHOOK_URL),
+        "ghl_relay_mode": "api" if settings.ghl_api_enabled else ("webhook" if settings.GHL_EMAIL_WEBHOOK_URL else None),
     }
 
 
@@ -92,7 +94,8 @@ async def get_email(
         "fields": e.fields,
         # The exact payload sent (or that would be sent) to GHL — only meaningful for parsed.
         "ghl_payload": emails.ghl_payload(e) if e.parse_status == "parsed" else None,
-        "ghl_email_relay_configured": bool(settings.GHL_EMAIL_WEBHOOK_URL),
+        "ghl_email_relay_configured": bool(settings.ghl_api_enabled or settings.GHL_EMAIL_WEBHOOK_URL),
+        "ghl_relay_mode": "api" if settings.ghl_api_enabled else ("webhook" if settings.GHL_EMAIL_WEBHOOK_URL else None),
         "raw": e.raw,
     }
 

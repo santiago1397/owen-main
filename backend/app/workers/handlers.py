@@ -33,7 +33,7 @@ from app.models import (
     Recording,
     Transcription,
 )
-from app.providers import ghl_client, signalwire_client, twilio_client
+from app.providers import ghl_api, ghl_client, signalwire_client, twilio_client
 from app.services import emails, queue
 
 logger = logging.getLogger("worker.handlers")
@@ -387,20 +387,24 @@ async def handle_email_relay_ghl(db: AsyncSession, payload: dict) -> None:
                     em.message_id, em.parse_status)
         return
 
-    # GHL not configured yet: log the attempt truthfully and leave it un-relayed so a later
-    # "relay now" (or re-enqueue after configuring the URL) actually sends it.
-    if not settings.GHL_EMAIL_WEBHOOK_URL:
+    # Neither relay path configured: log the attempt truthfully and leave it un-relayed so a
+    # later "relay now" (or re-enqueue after configuring GHL) actually sends it.
+    if not settings.ghl_api_enabled and not settings.GHL_EMAIL_WEBHOOK_URL:
         em.relay_status = "skipped_not_configured"
         em.relay_error = None
         em.relayed_at = now
         await db.commit()
-        logger.info("email_relay_ghl: %s parsed but GHL email webhook not configured — "
+        logger.info("email_relay_ghl: %s parsed but no GHL relay configured — "
                     "attempt logged, not sent", em.message_id)
         return
 
-    # Relay everything extracted, plus email metadata for traceability in GHL.
     try:
-        await ghl_client.post_inbound_email(emails.ghl_payload(em))
+        if settings.ghl_api_enabled:
+            result = await _relay_via_api(em)
+        else:
+            # Fallback: POST the flat payload to a GHL Inbound-Webhook trigger.
+            await ghl_client.post_inbound_email(emails.ghl_payload(em))
+            result = {"mode": "webhook"}
     except Exception as exc:  # noqa: BLE001 - record the failure, then re-raise for backoff retry
         em.relay_status = "failed"
         em.relay_error = str(exc)[:2000]
@@ -410,9 +414,47 @@ async def handle_email_relay_ghl(db: AsyncSession, payload: dict) -> None:
     em.relayed_to_ghl = True
     em.relay_status = "sent"
     em.relay_error = None
+    em.relay_result = result
     em.relayed_at = now
     await db.commit()
-    logger.info("email_relay_ghl: relayed %s (job_id=%s) to GHL", em.message_id, em.job_id)
+    logger.info("email_relay_ghl: relayed %s (job_id=%s) to GHL via %s",
+                em.message_id, em.job_id, result.get("mode"))
+
+
+async def _relay_via_api(em: InboundEmail) -> dict:
+    """Direct GHL v2 API relay: upsert a Contact, create an Opportunity in the pipeline, and
+    (best-effort) attach the job_description as a note. Returns a small result dict for the log."""
+    fields = em.fields or {}
+    loc = settings.GHL_LOCATION_ID
+
+    contact_resp = await ghl_api.upsert_contact(emails.build_contact_body(fields, loc))
+    contact_id = ghl_api._extract_id(contact_resp, "contact")
+    if not contact_id:
+        raise RuntimeError(f"GHL upsert_contact returned no id: {contact_resp}")
+
+    pipeline_id, stage_id = await ghl_api.resolve_stage_id()
+    opp_resp = await ghl_api.create_opportunity(
+        emails.build_opportunity_body(fields, contact_id, pipeline_id, stage_id, loc)
+    )
+    opportunity_id = ghl_api._extract_id(opp_resp, "opportunity")
+
+    note_added = False
+    description = emails.ghl_payload(em).get("job_description")
+    if description:
+        try:
+            await ghl_api.add_contact_note(contact_id, description)
+            note_added = True
+        except Exception as exc:  # noqa: BLE001 - note is non-critical; job card already exists
+            logger.warning("email_relay_ghl: note add failed for contact %s: %s", contact_id, exc)
+
+    return {
+        "mode": "api",
+        "contact_id": contact_id,
+        "opportunity_id": opportunity_id,
+        "pipeline_id": pipeline_id,
+        "stage_id": stage_id,
+        "note_added": note_added,
+    }
 
 
 HANDLERS = {

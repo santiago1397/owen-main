@@ -131,7 +131,25 @@ class Settings(BaseSettings):
     # no auth), a *separate* URL so parsed job emails can feed their own GHL workflow. Empty
     # = email relay disabled. Only *successfully parsed* emails are relayed (parse failures
     # are stored + flagged, never sent — see INBOUND_MAIL below).
+    #   NOTE: superseded by the direct-API relay below when GHL_API_TOKEN is set. The webhook
+    #   remains as a zero-code fallback for anyone who prefers GHL's Inbound-Webhook trigger.
     GHL_EMAIL_WEBHOOK_URL: str = ""
+
+    # GoHighLevel — direct API relay (preferred: no premium per-execution charge, and we get
+    # retries/dedup/logging). When GHL_API_TOKEN + GHL_LOCATION_ID are set, a parsed job email
+    # upserts a Contact and creates an Opportunity in the configured pipeline via the v2 API,
+    # instead of POSTing the webhook. Auth is a sub-account Private Integration Token (PIT).
+    #   Pipeline/stage IDs are resolved once and pasted here (a one-off lookup lists them).
+    GHL_API_TOKEN: str = ""                 # Private Integration Token (sub-account scope)
+    GHL_LOCATION_ID: str = ""               # sub-account / location id
+    GHL_PIPELINE_ID: str = ""               # target pipeline (e.g. "Dream Team Roofing AHS")
+    GHL_PIPELINE_STAGE_ID: str = ""         # stage new jobs land in (blank = first stage of the pipeline)
+    GHL_API_BASE: str = "https://services.leadconnectorhq.com"
+    GHL_API_VERSION: str = "2021-07-28"     # required Version header for v2 endpoints
+
+    @property
+    def ghl_api_enabled(self) -> bool:
+        return bool(self.GHL_API_TOKEN and self.GHL_LOCATION_ID)
 
     # Inbound email ingestion (Hostinger IMAP). The worker polls this mailbox for new mail
     # from INBOUND_MAIL_SENDER, parses templated job-notification emails, stores them, and

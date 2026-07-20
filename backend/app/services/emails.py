@@ -9,6 +9,7 @@ Returns (row, created) so the poller enqueues a relay job exactly once — on fi
 """
 
 import logging
+import re
 
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -95,6 +96,78 @@ def ghl_payload(em: InboundEmail) -> dict:
         "message_id": em.message_id,
         "received_at": em.received_at.isoformat() if em.received_at else None,
     }
+
+
+def _split_name(full: str | None) -> tuple[str | None, str | None]:
+    if not full:
+        return None, None
+    parts = full.split()
+    if len(parts) == 1:
+        return parts[0], None
+    return parts[0], " ".join(parts[1:])
+
+
+def _split_address(addr: str | None) -> dict:
+    """Best-effort US address split. Full string always goes to address1; we additionally
+    pull a trailing 2-letter state + ZIP when present. City/street stay in address1 (the
+    template glues them, so splitting further is unreliable)."""
+    out: dict = {}
+    if not addr:
+        return out
+    out["address1"] = addr
+    m = re.search(r",?\s*([A-Z]{2})\s+(\d{5})(?:-\d{4})?\s*$", addr)
+    if m:
+        out["state"] = m.group(1)
+        out["postalCode"] = m.group(2)
+    return out
+
+
+def build_contact_body(fields: dict, location_id: str) -> dict:
+    """GHL POST /contacts/upsert body from extracted fields. Upsert dedupes on phone/email
+    per the location's duplicate settings, so re-relaying the same customer won't fork."""
+    first, last = _split_name(fields.get("customer_name"))
+    body: dict = {
+        "locationId": location_id,
+        "source": "OWEN Email Ingest",
+        "tags": ["ahs-job", f"dispatch-service:{(fields.get('service') or '').lower()}".rstrip(":")],
+    }
+    if fields.get("customer_name"):
+        body["name"] = fields["customer_name"]
+    if first:
+        body["firstName"] = first
+    if last:
+        body["lastName"] = last
+    if fields.get("customer_phone"):
+        body["phone"] = fields["customer_phone"]
+    if fields.get("customer_email"):
+        body["email"] = fields["customer_email"]
+    body.update(_split_address(fields.get("service_address")))
+    return body
+
+
+def build_opportunity_body(
+    fields: dict, contact_id: str, pipeline_id: str, stage_id: str, location_id: str
+) -> dict:
+    """GHL POST /opportunities/ body — a job card in the pipeline."""
+    header = " ".join(x for x in [fields.get("job_id"), fields.get("service")] if x)
+    name = header or fields.get("job_id") or "Dispatch job"
+    if fields.get("customer_name"):
+        name = f"{name} - {fields['customer_name']}"
+    body: dict = {
+        "pipelineId": pipeline_id,
+        "locationId": location_id,
+        "pipelineStageId": stage_id,
+        "name": name,
+        "status": "open",
+        "contactId": contact_id,
+    }
+    total = (fields.get("payment") or {}).get("total")
+    if total is not None:
+        try:
+            body["monetaryValue"] = float(str(total).replace(",", ""))
+        except (TypeError, ValueError):
+            pass
+    return body
 
 
 async def ingest_email(
