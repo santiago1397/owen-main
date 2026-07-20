@@ -16,6 +16,9 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from app.db import SessionLocal
 from app.models import Call, Campaign, Number, Provider
 from app.providers import signalwire_client, twilio_client
+from app.services import queue
+from app.services.ingestion import ingest_status_event
+from app.services.recordings import ingest_recording_event
 
 # Each provider exposes an identical `fetch_incoming_phone_numbers()` returning
 # entries with `phone_number`/`friendly_name`/`sid`, so sync-numbers is provider-agnostic.
@@ -129,6 +132,69 @@ async def list_sw_calls(hours: int) -> None:
               f"dir={c.direction} status={c.status}")
 
 
+_CALL_SOURCES = {
+    "twilio": twilio_client.fetch_recent_calls,
+    "signalwire": signalwire_client.fetch_recent_calls_voice_logs,
+}
+_RECORDING_SOURCES = {
+    "twilio": twilio_client.fetch_recent_recordings,
+    "signalwire": signalwire_client.fetch_recordings_via_voice_logs,
+}
+
+
+async def backfill(provider: str, hours: int, transcribe: bool) -> None:
+    """One-time historical mirror of a provider's calls + recordings into OWEN.
+
+    Non-destructive: never touches the provider-side copy (remote deletion is gated
+    separately by DELETE_REMOTE_RECORDING and only runs inside recording_fetch). Unlike
+    reconcile-now this does NOT enqueue GHL relays, so backfilling months of history
+    won't flood the CRM with old calls.
+
+    Recordings are downloaded by the normal recording_fetch worker. By default it passes
+    skip_transcribe=True so this stays a pure audio+metadata copy with no OpenAI/LLM
+    cost; leaving recordings un-transcribed also means retention never prunes them (the
+    sweep only deletes transcribed audio). Pass --transcribe to run the full pipeline.
+
+    `hours` is the look-back window; the default (~10y) captures the whole account."""
+    from app.workers.reconciler import _is_inbound
+
+    call_fetch = _CALL_SOURCES.get(provider)
+    rec_fetch = _RECORDING_SOURCES.get(provider)
+    if call_fetch is None or rec_fetch is None:
+        raise SystemExit(f"unknown provider: {provider!r} (expected one of {sorted(_CALL_SOURCES)})")
+
+    events = await call_fetch(hours)
+    ingested = 0
+    for evt in events:
+        if not evt.provider_call_sid or not _is_inbound(evt):
+            continue
+        async with SessionLocal() as db:
+            await ingest_status_event(db, provider, evt)
+        ingested += 1
+    print(f"backfill: {provider} calls — {ingested}/{len(events)} inbound ingested (window {hours}h)")
+
+    recs = await rec_fetch(hours)
+    enqueued = already = 0
+    for rec in recs:
+        if not rec.provider_recording_sid:
+            continue
+        async with SessionLocal() as db:
+            row = await ingest_recording_event(db, provider, rec)
+            if row.storage_path is None:
+                await queue.enqueue(db, "recording_fetch", {
+                    "provider": provider,
+                    "recording_id": str(row.id),
+                    "recording_sid": rec.provider_recording_sid,
+                    "provider_url": rec.provider_url,
+                    "skip_transcribe": not transcribe,
+                })
+                enqueued += 1
+            else:
+                already += 1
+    print(f"backfill: {provider} recordings — {len(recs)} found, {enqueued} enqueued "
+          f"for download, {already} already local (transcribe={transcribe})")
+
+
 async def reconcile_now(hours: int | None) -> None:
     """Run the reconciler once, on demand — no need to wait for the 5-min schedule."""
     from app.workers.reconciler import reconcile_recent
@@ -149,6 +215,13 @@ def main() -> None:
 
     rn = sub.add_parser("reconcile-now", help="Run the reconciler once immediately")
     rn.add_argument("--hours", type=int, default=None)
+
+    bf = sub.add_parser("backfill", help="One-time historical mirror of a provider's "
+                        "calls + recordings into OWEN (non-destructive, no GHL relay)")
+    bf.add_argument("--provider", default="twilio", choices=["twilio", "signalwire"])
+    bf.add_argument("--hours", type=int, default=87600, help="look-back window (default ~10y)")
+    bf.add_argument("--transcribe", action="store_true",
+                    help="also transcribe + analyze (default: raw audio only, no AI cost)")
 
     sn = sub.add_parser("sync-numbers", help="Import a provider's number inventory into the DB")
     sn.add_argument("--provider", default="signalwire", choices=["signalwire", "twilio"])
@@ -180,6 +253,8 @@ def main() -> None:
         asyncio.run(list_sw_calls(args.hours))
     elif args.cmd == "reconcile-now":
         asyncio.run(reconcile_now(args.hours))
+    elif args.cmd == "backfill":
+        asyncio.run(backfill(args.provider, args.hours, args.transcribe))
     elif args.cmd == "sync-numbers":
         asyncio.run(sync_numbers(args.provider, args.dry_run))
 

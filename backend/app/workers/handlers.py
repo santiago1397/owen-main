@@ -93,8 +93,11 @@ async def handle_recording_fetch(db: AsyncSession, payload: dict) -> None:
                     logger.warning("recording_fetch: remote delete failed for %s: %s",
                                    rec.provider_recording_sid, exc)
 
-    # Next stage: transcribe (unless already done).
-    if not rec.transcribed:
+    # Next stage: transcribe (unless already done, or the caller asked to skip it —
+    # e.g. a raw historical backfill that only wants the audio mirrored locally, no
+    # transcription/analysis cost. Leaving transcribed=False also means retention never
+    # prunes the file, since the sweep only deletes transcribed recordings).
+    if not rec.transcribed and not payload.get("skip_transcribe"):
         await queue.enqueue(db, "transcribe", {"recording_id": str(rec.id)})
 
 
