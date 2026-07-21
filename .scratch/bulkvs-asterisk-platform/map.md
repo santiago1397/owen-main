@@ -37,6 +37,9 @@ Reaching the end = a **spec + locked decisions** ready to hand to implementation
 - **Tenancy** — single-org internal tool; no per-tenant isolation or billing. *(named while charting)*
 - **Call-flow authoring** — declarative rule forms now, persisted as a flow-graph from day one so a visual builder layers on later without rewrite; flow executes on ARI. *(named while charting)*
 - **Twilio** — coexist; Asterisk added as a third provider feeding the same event-sourced tables. *(named while charting)*
+- [Asterisk / ARI capabilities + trunk config](issues/02-asterisk-ari-capabilities.md) — ARI covers every needed primitive (answer/play/record/bridge-dial/DTMF/originate; external-media 16.6+, prefer `chan_websocket` 20.16+/AudioSocket 18+ for AI). BulkVS = IP-auth `chan_pjsip` endpoint+aor+identify, `direct_media=no`, ulaw; record the bridge; Docker→host ARI via `host.docker.internal`, bind localhost. **Verify installed Asterisk version early.**
+- [BulkVS platform + API capabilities](issues/01-bulkvs-platform-and-api.md) — REST `portal.bulkvs.com/api/v1.0` (Basic auth): `/tnRecord` list/route, `/orderTn`+`/exchanges` search/buy, `/trunkGroups`; **no inventory webhook (poll)**. Trunk = UDP/5060 IP-auth, ulaw/RFC2833, 11-digit RURI, **no TLS/SRTP**, IPs 162.249.171.198/76.8.29.198/69.12.88.198/199.255.157.198. SMS via `messageSend`+inbound webhook (src 52.206.134.245/192.9.236.42); **10DLC blocks outbound SMS**. **No CDR API → source calls from Asterisk.**
+- [AI voice-agent architecture options](issues/03-ai-voice-agent-architecture.md) — recommended default **OpenAI Realtime bridged over external-media** (on-box control/recording, native barge-in, ~$0.06–0.11/min); Vapi-over-SIP as fast-start pilot; DIY (OpenAI STT+LLM → MiniMax TTS) as escape hatch. **MiniMax = TTS-only.** Pluggable seam mirrors the existing `TranscriptionEngine` pattern.
 
 ## Not yet specified
 
@@ -44,7 +47,7 @@ Reaching the end = a **spec + locked decisions** ready to hand to implementation
 
 - Visual flow-builder canvas (the graph schema is ticketed; the builder UI is not).
 - Outbound AI dialing / campaign dialing (as opposed to a single AI agent answering).
-- Specific STT/TTS/LLM provider selection + tuning (Vapi vs OpenAI Realtime vs MiniMax), barge-in and latency budgets — downstream of the AI-architecture research.
+- STT/TTS/LLM provider *tuning* + barge-in/latency budgets — the architecture is chosen (ticket 03: OpenAI Realtime default, seam design); per-agent tuning is downstream of ticket 11.
 - Per-call recording-consent handling for Asterisk-controlled legs (FL all-party; noted in ARCHITECTURE.md decision 17).
 - Asterisk HA / failover / concurrency ceilings.
 - MMS specifics (vs SMS-only).
