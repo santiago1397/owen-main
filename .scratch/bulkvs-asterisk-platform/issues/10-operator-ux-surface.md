@@ -1,7 +1,8 @@
 # Operator UX/UI surface
 
 Type: prototype
-Status: open
+Status: in-progress
+Assignee: svillahermosa
 Blocked by: 06, 07
 
 ## Question
