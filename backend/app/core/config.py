@@ -202,6 +202,16 @@ class Settings(BaseSettings):
     def ari_base_url(self) -> str:
         return f"http://{self.ARI_HOST}:{self.ARI_PORT}"
 
+    @property
+    def ari_ws_url(self) -> str:
+        """ARI events WebSocket, subscribed to our Stasis app. Creds ride in the query
+        string (api_key=user:pass) since ARI's WS accepts no auth header — safe because
+        the endpoint is loopback/gateway-only and firewalled (never public)."""
+        return (
+            f"ws://{self.ARI_HOST}:{self.ARI_PORT}/ari/events"
+            f"?app={self.ARI_APP}&api_key={self.ARI_USERNAME}:{self.ARI_PASSWORD}"
+        )
+
     def twilio_accounts(self) -> list[TwilioAccount]:
         """All configured Twilio accounts. Parses TWILIO_ACCOUNTS when set, otherwise
         falls back to the legacy single-account globals (named "twilio"). Entries with a
