@@ -21,7 +21,7 @@ import logging
 
 from app.core.config import settings
 from app.db import SessionLocal
-from app.providers.asterisk import AsteriskEventRouter
+from app.providers.asterisk import AsteriskEventRouter, is_entry_channel
 from app.services.ingestion import ingest_status_event
 
 logger = logging.getLogger("worker.asterisk_consumer")
@@ -53,6 +53,24 @@ async def _handle(router: AsteriskEventRouter, raw: str | bytes) -> None:
         await ingest_status_event(db, PROVIDER_NAME, evt)
     logger.info("asterisk_consumer: ingested %s linkedid=%s status=%s",
                 event.get("type"), evt.provider_call_sid, evt.status)
+
+    # Ticket 07: on the entry channel's (freshly-routed) StasisStart, hand the call to the
+    # flow interpreter. Fire-and-forget so the WS read loop keeps draining events while the
+    # (possibly minutes-long) flow runs. Only reached with ASTERISK_ENABLED on.
+    if event.get("type") == "StasisStart" and is_entry_channel(event):
+        asyncio.create_task(_run_flow(event))
+
+
+async def _run_flow(event: dict) -> None:
+    """Best-effort flow-interpreter handoff; a failure here must never kill the consumer.
+    Imports are lazy so the interpreter's DB/httpx deps aren't pulled in at module load."""
+    try:
+        from app.flows.runtime import run_flow_for_stasis
+        from app.providers.asterisk_client import AsteriskAriClient
+
+        await run_flow_for_stasis(event, AsteriskAriClient())
+    except Exception:  # noqa: BLE001 - flow failures are isolated from ingestion
+        logger.exception("asterisk_consumer: flow interpreter failed")
 
 
 async def run_consumer() -> None:

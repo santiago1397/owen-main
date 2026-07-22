@@ -1,0 +1,148 @@
+"""DB-aware glue that runs the pure FlowInterpreter against a live ARI call (Ticket 07).
+
+Kept OUT of app/flows/interpreter.py so the interpreter core stays import-light (stdlib
+only) and unit-testable in the sandbox. This module needs sqlalchemy, so it is imported
+LAZILY from the consumer. Responsibilities on a StasisStart:
+  1. Resolve the dialed DID (+E.164) -> numbers.flow_id -> the flow's ACTIVE flow_version.
+     Numbers are keyed by phone_number + media_provider (BulkVS DIDs are owned by the
+     'bulkvs' provider row but carry their MEDIA on 'asterisk'), NOT by the call's
+     provider_id — mirrors the split-identity note on the Number model.
+  2. PIN that flow_version_id onto the call (pin-once, like campaign_id at ingest) so
+     downstream projection/analysis can attribute the version.
+  3. Run the interpreter with a DB-backed emit() that writes ONE call_event per node
+     transition (same event-sourced projection as ticket 04/05).
+
+Each emit() uses its own short-lived session + commit so the (possibly minutes-long) call
+never holds one transaction open.
+"""
+
+import logging
+import uuid
+from typing import Optional
+
+from sqlalchemy import select, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+
+from app.core.config import settings
+from app.db import SessionLocal
+from app.flows.interpreter import AriControl, FlowInterpreter
+from app.models import Call, CallEvent, Flow, FlowVersion, Number
+from app.providers.asterisk import linkedid as _linkedid
+from app.services.ingestion import _get_or_create_provider
+
+logger = logging.getLogger("flows.runtime")
+
+PROVIDER_NAME = "asterisk"  # matches asterisk_consumer.PROVIDER_NAME (call row / call_events)
+
+
+async def _resolve_active_flow_version(db, dialed_number: str) -> Optional[tuple[uuid.UUID, dict]]:
+    """(active flow_version_id, graph) for the DID's assigned flow, or None if unassigned."""
+    number = (
+        await db.execute(
+            select(Number).where(
+                Number.phone_number == dialed_number,
+                Number.media_provider == settings.BULKVS_MEDIA_PROVIDER,
+            ).limit(1)
+        )
+    ).scalar_one_or_none()
+    if number is None or number.flow_id is None:
+        return None
+
+    flow = (
+        await db.execute(select(Flow).where(Flow.id == number.flow_id))
+    ).scalar_one_or_none()
+    if flow is None or flow.active_version_id is None:
+        return None
+
+    fv = (
+        await db.execute(select(FlowVersion).where(FlowVersion.id == flow.active_version_id))
+    ).scalar_one_or_none()
+    if fv is None or not isinstance(fv.graph, dict):
+        return None
+    return fv.id, fv.graph
+
+
+async def _pin_flow_version(db, provider_id: int, provider_call_sid: str, fv_id: uuid.UUID) -> None:
+    """Pin-once: set calls.flow_version_id only while still NULL (never re-attribute)."""
+    await db.execute(
+        update(Call)
+        .where(
+            Call.provider_id == provider_id,
+            Call.provider_call_sid == provider_call_sid,
+            Call.flow_version_id.is_(None),
+        )
+        .values(flow_version_id=fv_id)
+    )
+
+
+async def _emit_node_event(
+    db, provider_id: int, provider_call_sid: str, event_type: str,
+    provider_sequence: str, payload: dict,
+) -> None:
+    """Append one call_event for a node transition (dedup on the natural key)."""
+    call = (
+        await db.execute(
+            select(Call).where(
+                Call.provider_id == provider_id,
+                Call.provider_call_sid == provider_call_sid,
+            )
+        )
+    ).scalar_one_or_none()
+    if call is None:
+        # The StasisStart status event creates the call row before we run; if it is somehow
+        # absent there is nothing to attach the transition to.
+        return
+    await db.execute(
+        pg_insert(CallEvent)
+        .values(
+            call_id=call.id,
+            event_type=event_type,
+            provider_sequence=provider_sequence,
+            payload=payload,
+        )
+        .on_conflict_do_nothing(index_elements=["call_id", "event_type", "provider_sequence"])
+    )
+
+
+async def run_flow_for_stasis(event: dict, ari: AriControl) -> None:
+    """Entry point the consumer calls on an entry-channel StasisStart. Best-effort: any
+    failure is logged, never raised into the WS loop (the consumer also guards this)."""
+    ch = event.get("channel") if isinstance(event.get("channel"), dict) else {}
+    channel_id = str(ch.get("id") or "")
+    lid = _linkedid(event)
+    dialed = (ch.get("dialplan") or {}).get("exten") if isinstance(ch.get("dialplan"), dict) else None
+    if not channel_id or not lid or not dialed:
+        return
+
+    async with SessionLocal() as db:
+        resolved = await _resolve_active_flow_version(db, str(dialed))
+        if resolved is None:
+            logger.info("flow runtime: no assigned flow for DID %s (linkedid=%s)", dialed, lid)
+            return
+        fv_id, graph = resolved
+        provider = await _get_or_create_provider(db, PROVIDER_NAME)
+        provider_id = provider.id
+        await db.commit()  # ensure the 'asterisk' provider row exists before the flow runs
+
+    async def pin() -> None:
+        # StasisStart pin (interpreter on_start hook): pin-once, own short session.
+        async with SessionLocal() as dbp:
+            await _pin_flow_version(dbp, provider_id, lid, fv_id)
+            await dbp.commit()
+
+    async def emit(event_type: str, provider_sequence: str, payload: dict) -> None:
+        async with SessionLocal() as db2:
+            await _emit_node_event(db2, provider_id, lid, event_type, provider_sequence, payload)
+            await db2.commit()
+
+    interpreter = FlowInterpreter(
+        graph=graph,
+        channel_id=channel_id,
+        ari=ari,
+        emit=emit,
+        linkedid=lid,
+        business_tz=settings.BUSINESS_TZ,
+        on_start=pin,
+    )
+    logger.info("flow runtime: running flow_version=%s on linkedid=%s DID=%s", fv_id, lid, dialed)
+    await interpreter.run()
