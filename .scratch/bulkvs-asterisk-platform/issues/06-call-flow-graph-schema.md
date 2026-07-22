@@ -141,3 +141,13 @@ Visual builder canvas as end-state authoring (Twilio-Studio-style); v1 rule-form
 `condition` node (branch on new-vs-returning / blocklist); blind-`transfer` distinct from `dial`;
 `queue`/hold; `goto`/subflow reuse; per-node recording-consent handling for FL all-party (partly
 addressed by the `play` consent node).
+
+### Post-close addendum — schema extension (surfaced by [ticket 13](13-in-platform-webrtc-calling.md), 2026-07-22)
+The `dial` node's **target vocabulary is extended to accept operator endpoints** — an individual operator
+(`operator:alice`) or an operator group (`operator:sales`) — alongside DIDs (`+1...`). This lets an inbound
+flow "ring the operator's browser" (the WebRTC softphone leg, ticket 13) with no new node type: `dial`'s
+existing single/ring-all/sequential strategies and `answered`/`no_answer`/`busy_failed` ports already cover
+ringing one or several operators, with all-unavailable/no-answer falling through to `default_fallback`.
+Presence is resolved at execution time (browser-registered AND app-level available toggle, ticket 13 Q6); an
+unavailable operator target is treated as `no_answer`. No change to ports, storage, versioning, or the
+interpreter — purely an additive `dial` target kind.

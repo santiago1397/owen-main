@@ -114,3 +114,22 @@ ARI `127.0.0.1:8088` user `owen`, RTP from `152.188.166.x`, SIP UFW-locked to th
 - New endpoint: **`/health/telephony`** (non-gating).
 - **Ticket 13 (WebRTC softphone leg)** must add its **own secured WebRTC transport** (wss + DTLS-SRTP) *separate*
   from this trunk-facing firewall — the browser leg can't ride the IP-locked SIP path; reconcile there.
+
+### Post-close addendum — WebRTC transport + coturn (added by [ticket 13](13-in-platform-webrtc-calling.md), 2026-07-22)
+Ticket 13 resolved the "own secured WebRTC transport" flagged above, adding these surfaces to this ticket's
+infra/deploy/security scope — all additive, flag-gated under the same `ASTERISK_ENABLED` module, reversible:
+- **coturn** — a **second native telephony service** (same native-host + rendered-secret + additive-UFW mold
+  as Asterisk), for WebRTC media relay so operators behind UDP-blocking firewalls still get audio. Ports:
+  **3478/udp+tcp** (STUN/TURN) and **5349/tcp (TLS)** — critically relays over **443/TLS** for near-universal
+  traversal — plus a **TURN relay port range** (own additive UFW rules). TURN creds are **minted short-lived
+  by the backend** (alongside the operator SIP creds). Managed by systemd like Asterisk; config/secrets follow
+  the `.env.prod` render convention.
+- **Asterisk WebSocket for SIP-over-`wss`** — bound **loopback/bridge only** (same treatment as ARI), fronted
+  by **Traefik** (the existing TLS edge): browser `wss` → Traefik TLS-terminates → plain `ws`/loopback to
+  Asterisk. One new public surface = a `wss` route on a Traefik-owned domain; **no new host cert lifecycle**.
+- **Media DTLS-SRTP cert** for the browser leg — generated on the host, rendered at deploy (same secret
+  convention). Browser media rides the **existing `10000–10200/udp` RTP range** (no new range); Asterisk
+  `icesupport=yes` advertises the VPS public IP as host ICE candidate.
+- **Per-operator PJSIP WebRTC endpoints** live in the in-repo `asterisk/pjsip.conf`; **`codec_opus`** added
+  for Opus↔ulaw transcoding on the operator leg. New env for the softphone (backend-side): operator SIP + TURN
+  credential minting (secrets rendered, not committed).
