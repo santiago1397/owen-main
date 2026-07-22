@@ -62,6 +62,27 @@ class Number(Base):
     forwards_to: Mapped[str | None] = mapped_column(String)
     active: Mapped[bool] = mapped_column(Boolean, default=True)
 
+    # --- BulkVS + Asterisk platform (Ticket 03, additive) ----------------------------
+    # Split identity: who OWNS the DID (the carrier the number is registered with, e.g.
+    # "bulkvs") vs which provider carries its MEDIA (e.g. "asterisk"). Legacy Twilio/
+    # SignalWire numbers leave both NULL and keep attributing by `provider_id` unchanged;
+    # BulkVS-synced DIDs stamp owner_provider="bulkvs" + media_provider="asterisk". A later
+    # ticket keys media attribution on (media_provider, to_number) — owner is number-only.
+    owner_provider: Mapped[str | None] = mapped_column(String)
+    media_provider: Mapped[str | None] = mapped_column(String)
+
+    # Soft-release marker for the add-only BulkVS sync: a DID that VANISHES from /tnRecord
+    # is soft-released (active=False + released_at set) — its history is frozen, the row is
+    # never deleted — and REACTIVATES the same row (released_at cleared, active=True) if it
+    # reappears. NULL means the number has never been released.
+    released_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    # Optional behaviour assignment: the call-flow this number routes to (assignment is a
+    # LATER ticket; the column exists now so derived lifecycle can key on it). NULL until
+    # a flow is assigned. Lifecycle (available / assigned / released) is DERIVED from
+    # active + released_at + whether campaign_id/flow_id is set — there is NO status column.
+    flow_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("flows.id"))
+
 
 class Caller(Base):
     __tablename__ = "callers"

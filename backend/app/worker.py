@@ -18,6 +18,8 @@ from app.db import SessionLocal
 from app.migrate import run_migrations
 from app.services import queue
 from app.workers.handlers import HANDLERS
+from app.workers.bulkvs_sync import enabled as bulkvs_sync_enabled
+from app.workers.bulkvs_sync import sync_numbers as bulkvs_sync_numbers
 from app.workers.mail_poller import enabled as mail_enabled
 from app.workers.mail_poller import poll_mailbox
 from app.workers.reconciler import reconcile_recent
@@ -94,6 +96,14 @@ def build_scheduler() -> AsyncIOScheduler:
             seconds=settings.INBOUND_MAIL_POLL_SECONDS, id="mail_poll",
         )
         logger.info("mail poller scheduled every %ss", settings.INBOUND_MAIL_POLL_SECONDS)
+    # BulkVS number-inventory sync (Ticket 03). Only when the platform flag + REST creds are
+    # set — otherwise a no-op, so there's no point waking up for it.
+    if bulkvs_sync_enabled():
+        sched.add_job(
+            bulkvs_sync_numbers, "interval",
+            seconds=settings.BULKVS_SYNC_POLL_SECONDS, id="bulkvs_sync",
+        )
+        logger.info("bulkvs number sync scheduled every %ss", settings.BULKVS_SYNC_POLL_SECONDS)
     return sched
 
 

@@ -6,6 +6,7 @@ from app.api.deps import current_user
 from app.db import get_db
 from app.models import Call, Campaign, Number, Provider, User
 from app.schemas.api import NumberStats
+from app.services.number_sync import derive_lifecycle
 
 router = APIRouter(prefix="/api/numbers", tags=["numbers"])
 
@@ -23,6 +24,13 @@ async def list_numbers(
                 Number.friendly_name,
                 Number.forwards_to,
                 Number.active,
+                # BulkVS+Asterisk split identity + soft-release marker (Ticket 03).
+                Number.owner_provider,
+                Number.media_provider,
+                Number.released_at,
+                # Selected only to DERIVE lifecycle below; popped before building the schema.
+                Number.campaign_id,
+                Number.flow_id,
                 Provider.name.label("provider"),
                 Campaign.name.label("campaign_name"),
                 func.count(Call.id).label("total_calls"),
@@ -35,4 +43,15 @@ async def list_numbers(
             .order_by(func.count(Call.id).desc())
         )
     ).mappings().all()
-    return [NumberStats(**dict(r)) for r in rows]
+
+    out: list[NumberStats] = []
+    for r in rows:
+        d = dict(r)
+        d["lifecycle"] = derive_lifecycle(
+            active=d["active"],
+            released_at=d["released_at"],
+            campaign_id=d.pop("campaign_id"),
+            flow_id=d.pop("flow_id"),
+        )
+        out.append(NumberStats(**d))
+    return out

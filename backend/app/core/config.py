@@ -198,6 +198,31 @@ class Settings(BaseSettings):
     BULKVS_SIP_PASSWORD: str = ""
     BULKVS_FROM_NUMBER: str = ""  # default outbound caller-ID (E.164)
 
+    # BulkVS REST API (number inventory sync — SEPARATE from the SIP trunk creds above).
+    # There is no inventory webhook, so DID inventory is POLLED from GET /tnRecord (HTTP
+    # Basic auth). /tnRecord lists owned TNs and carries `ReferenceID` (the operator's
+    # user-note/label) which we one-way mirror into Number.friendly_name. Buying/releasing
+    # DIDs happens in the BulkVS portal — OWEN only MIRRORS inventory (add-only + soft-
+    # release + reactivate). Empty creds OR ASTERISK_ENABLED off => the sync never runs.
+    BULKVS_API_BASE: str = "https://portal.bulkvs.com/api/v1.0"
+    BULKVS_API_USERNAME: str = ""
+    BULKVS_API_PASSWORD: str = ""
+    # Provider identity stamped onto synced DIDs (owner = carrier, media = who carries audio).
+    BULKVS_OWNER_PROVIDER: str = "bulkvs"
+    BULKVS_MEDIA_PROVIDER: str = "asterisk"
+    # Poll cadence for the inventory sync (well within a portal-mirrored latency need).
+    BULKVS_SYNC_POLL_SECONDS: int = 300
+
+    @property
+    def bulkvs_api_enabled(self) -> bool:
+        """The BulkVS inventory sync only runs when the platform flag is on AND REST creds
+        are configured — keeps the platform dark by default (nothing new runs)."""
+        return bool(
+            self.ASTERISK_ENABLED
+            and self.BULKVS_API_USERNAME
+            and self.BULKVS_API_PASSWORD
+        )
+
     @property
     def ari_base_url(self) -> str:
         return f"http://{self.ARI_HOST}:{self.ARI_PORT}"

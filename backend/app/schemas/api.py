@@ -89,6 +89,11 @@ class NumberStats(BaseModel):
     active: bool
     total_calls: int
     last_call_at: datetime | None = None
+    # BulkVS + Asterisk platform (Ticket 03, additive; NULL for legacy Twilio/SignalWire).
+    owner_provider: str | None = None   # who owns the DID, e.g. "bulkvs"
+    media_provider: str | None = None   # who carries the media, e.g. "asterisk"
+    released_at: datetime | None = None  # set when a synced DID vanished from BulkVS
+    lifecycle: str = "available"        # DERIVED: available | assigned | released
 
 
 class CampaignOut(BaseModel):
