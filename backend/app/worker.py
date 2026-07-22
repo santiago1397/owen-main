@@ -17,6 +17,7 @@ from app.core.config import settings
 from app.db import SessionLocal
 from app.migrate import run_migrations
 from app.services import queue
+from app.workers import asterisk_consumer
 from app.workers.handlers import HANDLERS
 from app.workers.bulkvs_sync import enabled as bulkvs_sync_enabled
 from app.workers.bulkvs_sync import sync_numbers as bulkvs_sync_numbers
@@ -111,6 +112,11 @@ async def main() -> None:
     run_migrations()
     scheduler = build_scheduler()
     scheduler.start()
+    # Asterisk ARI-WebSocket ingestion consumer (ticket 04) — flag-gated; with
+    # ASTERISK_ENABLED off no task starts and the worker behaves exactly as before.
+    if asterisk_consumer.enabled():
+        asyncio.create_task(asterisk_consumer.run_consumer())
+        logger.info("asterisk ARI consumer task started")
     logger.info("worker started")
     await drain_loop()
 

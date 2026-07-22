@@ -11,3 +11,6 @@ argon2-cffi==23.1.0
 httpx==0.28.1
 apscheduler==3.11.0
 python-multipart==0.0.20
+# ARI-WebSocket consumer (Asterisk ingestion, ticket 04). Also pulled in transitively by
+# uvicorn[standard]; pinned explicitly since app/workers/asterisk_consumer.py imports it.
+websockets==14.1
