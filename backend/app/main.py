@@ -11,6 +11,7 @@ from app.api import calls as calls_api
 from app.api import campaigns as campaigns_api
 from app.api import dashboard as dashboard_api
 from app.api import emails as emails_api
+from app.api import flows as flows_api
 from app.api import health as health_api
 from app.api import numbers as numbers_api
 from app.api import recordings as recordings_api
@@ -48,6 +49,7 @@ app.include_router(callers_api.router)
 app.include_router(campaigns_api.router)
 app.include_router(dashboard_api.router)
 app.include_router(emails_api.router)
+app.include_router(flows_api.router)
 app.include_router(recordings_api.router)
 app.include_router(settings_api.router)
 app.include_router(health_api.router)

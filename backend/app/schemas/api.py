@@ -107,6 +107,43 @@ class CallerOut(BaseModel):
     label: str | None = None
 
 
+class FlowCreate(BaseModel):
+    name: str
+
+
+class FlowVersionSave(BaseModel):
+    graph: dict  # nodes + per-node `next` port map (see app/flows/validator.py)
+
+
+class FlowVersionOut(BaseModel):
+    id: uuid.UUID
+    flow_id: uuid.UUID
+    version: int
+    graph: dict
+    created_at: datetime | None = None
+
+
+class FlowOut(BaseModel):
+    id: uuid.UUID
+    name: str
+    active_version_id: uuid.UUID | None = None
+    created_at: datetime | None = None
+
+
+class FlowDetail(FlowOut):
+    versions: list[FlowVersionOut] = []
+
+
+class ActivationResult(BaseModel):
+    """Returned on successful activation. Hard-error activations are refused with HTTP 400
+    whose detail carries the same {errors, warnings} shape."""
+
+    activated: bool
+    version_id: uuid.UUID
+    errors: list[str] = []
+    warnings: list[str] = []
+
+
 class DashboardSummary(BaseModel):
     range_from: datetime
     range_to: datetime
