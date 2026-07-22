@@ -1,7 +1,7 @@
 # Stand up BulkVS↔Asterisk and prove one real inbound call via ARI
 
 Type: task
-Status: open (driven as far as AFK-possible; blocked on account holder — see Answer)
+Status: resolved (2026-07-22 — inbound + outbound + ARI recording all proven on real infra)
 Blocked by: 01, 02
 Claimed by: wayfinder session 2026-07-22
 
@@ -56,6 +56,35 @@ Note: `192.9.236.42`/`52.206.134.245` are BulkVS **SMS-webhook** IPs (HTTPS), NO
    ring + confirmation that `144.126.138.157` is a registered BulkVS **Host** (Interconnection → Host; outbound-only
    requirement — BulkVS rejects termination from unregistered source IPs).
 3. Measure BulkVS RTP media-source IP during a test call, then tighten UFW `10000:20000/udp` to it.
+
+---
+
+## ✅ RESOLVED — 2026-07-22
+
+All three proofs landed on real infrastructure:
+
+- **Inbound (real PSTN):** call to `16452516222` → `INVITE +16452516222` from BulkVS `162.249.171.198`/`76.8.29.198`
+  → `100 Trying` → `200 OK` → answered → **demo audio heard by the caller**. (After fixing the `+E.164` dialplan match.)
+- **Outbound via ARI:** `POST /ari/channels endpoint=PJSIP/12178584185@bulkvs app=owen-test callerId=16452516222`
+  → BulkVS `200 OK` (no 403/407 → **outbound Host `144.126.138.157` already registered**) → far end answered
+  → INVITE sent as `sip:12178584185@sip.bulkvs.com` with ANI `16452516222`.
+- **ARI control + recording:** the answered channel entered Stasis app `owen-test`; the app issued ARI `answer` +
+  `record` (both HTTP 201) + `play`. Produced **`/var/spool/asterisk/recording/owen-test-1784733729.wav`**
+  (`RIFF WAVE, PCM 16-bit mono 8000Hz`, 369 KB) — a real recording made purely under ARI control, no external software.
+
+### Working config / facts later tickets inherit
+
+- **ARI:** built into Asterisk, HTTP server `127.0.0.1:8088` (localhost-only), user `owen`, password `/root/.owen-ari-pw`.
+  A reference Stasis client (websocket + REST, on-box venv) lives at `/opt/owen-ari-test/app.py` (service stopped).
+- **Trunk:** endpoint `bulkvs` (`identify_by=ip`, 4 BulkVS SBC match IPs, aor `sip:sip.bulkvs.com:5060`, ulaw, no NAT).
+  Contexts `from-bulkvs` (inbound; now has `_+X.` + `_X.`) and `to-bulkvs` (outbound `Dial PJSIP/${EXTEN}@bulkvs`).
+- **⚠ RURI is `+E.164`** (`+16452516222`), NOT 11-digit `1NXX…` — ticket 06 flow-matching must handle the `+`.
+- **⚠ Outbound RURI/ANI:** send as bare `1NXXNXXXXXX@sip.bulkvs.com`; ANI must be an owned DID (`16452516222` worked).
+- **🔒 Firewall:** UFW `5060:5069/udp` locked to the 4 BulkVS SBC IPs (killed live SIP brute-force). **RTP
+  `10000:20000/udp` LEFT OPEN on purpose:** BulkVS media originates from **`152.188.166.201` — a different range than
+  signaling** (measured live). Locking RTP to the signaling IPs would break audio. Determining BulkVS's full media
+  subnet before tightening RTP is a **ticket-09** item; `192.9.236.42`/`52.206.134.245` are SMS-webhook (HTTPS) IPs, not SIP.
+- **Logging:** added a `full` logfile to `logger.conf` (persists). Backups of all edited confs: `*.bak-20260722-*`.
 
 #### Server facts discovered (all read-only)
 
