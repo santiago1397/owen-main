@@ -172,6 +172,36 @@ class Settings(BaseSettings):
     # RFC Message-ID is the real idempotency guard; this is only a fetch-efficiency measure.
     INBOUND_MAIL_MARK_SEEN: bool = True
 
+    # --- Asterisk / BulkVS telephony (additive, DARK + flag-gated) --------------------
+    # Master switch for the native-Asterisk + BulkVS platform. OFF by default: with it
+    # off nothing about the existing app changes — no telephony consumers start and the
+    # Twilio/SignalWire/GHL paths are entirely untouched. Flip on only once the native
+    # Asterisk host is provisioned (see asterisk/README.md). /health/telephony is the
+    # non-gating probe that confirms it came alive.
+    ASTERISK_ENABLED: bool = False
+
+    # ARI (Asterisk REST Interface). The backend reaches Asterisk running natively on the
+    # host via the docker host-gateway; ARI is bound to loopback + the gateway and
+    # firewalled to the callmon-net subnet (never public — same pattern as Postgres).
+    # Creds come from env, never hardcoded into the asterisk/ config templates.
+    ARI_HOST: str = "host.docker.internal"
+    ARI_PORT: int = 8088
+    ARI_USERNAME: str = ""
+    ARI_PASSWORD: str = ""
+    ARI_APP: str = "owen"  # Stasis application name the dialplan hands calls to
+
+    # BulkVS SIP trunk. Secrets from env. Inbound auth is by SBC source IP (see
+    # asterisk/README.md), so the trunk name identifies the PJSIP endpoint/aor/identify
+    # rendered from the asterisk/ templates; username/password cover outbound REGISTER/auth.
+    BULKVS_TRUNK_NAME: str = "bulkvs"
+    BULKVS_SIP_USERNAME: str = ""
+    BULKVS_SIP_PASSWORD: str = ""
+    BULKVS_FROM_NUMBER: str = ""  # default outbound caller-ID (E.164)
+
+    @property
+    def ari_base_url(self) -> str:
+        return f"http://{self.ARI_HOST}:{self.ARI_PORT}"
+
     def twilio_accounts(self) -> list[TwilioAccount]:
         """All configured Twilio accounts. Parses TWILIO_ACCOUNTS when set, otherwise
         falls back to the legacy single-account globals (named "twilio"). Entries with a
