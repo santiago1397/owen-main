@@ -1,0 +1,315 @@
+<!doctype html>
+<!--
+  THROWAWAY PROTOTYPE — Wayfinder ticket 10 (Operator UX/UI surface).
+  Not production code. A clickable mockup to react to: proposed IA + per-number
+  rule form + SMS inbox + provider-segregated call log. Matches the existing
+  dark house style (styles.css vars) so it reads like the real app.
+  Open in a browser; click the sidebar to switch screens.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>OWEN — Operator UX prototype (ticket 10)</title>
+<style>
+  :root{
+    --bg:#0f1115; --panel:#171a21; --panel2:#1d212b; --border:#2a2f3a;
+    --accent:#4f8cff; --danger:#ff5c6c; --good:#37d67a; --warn:#ffb020;
+    --text:#e6e8ee; --muted:#8a92a6;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--text);font:14px/1.45 -apple-system,Segoe UI,Roboto,sans-serif}
+  .app{display:flex;min-height:100vh}
+  .sidebar{width:220px;flex:0 0 220px;background:#12141a;border-right:1px solid var(--border);padding:14px 10px;position:sticky;top:0;height:100vh}
+  .brand{font-weight:700;font-size:16px;padding:6px 8px 14px;letter-spacing:.5px}
+  .navgroup{color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.08em;margin:14px 8px 4px}
+  .navlink{display:flex;align-items:center;gap:9px;padding:8px 10px;border-radius:8px;color:var(--text);cursor:pointer;text-decoration:none;font-size:13.5px}
+  .navlink:hover{background:var(--panel)}
+  .navlink.active{background:#20283b;color:#cfe0ff}
+  .navlink .ic{width:18px;text-align:center}
+  .navlink .tag{margin-left:auto;font-size:10px;color:var(--muted);background:#232838;border:1px solid var(--border);border-radius:6px;padding:1px 6px}
+  .main{flex:1;padding:22px 26px;max-width:1180px}
+  h1{font-size:20px;margin:0 0 2px}
+  .sub{color:var(--muted);font-size:13px;margin-bottom:18px}
+  .card{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:16px}
+  .grid{display:grid;gap:14px}
+  .tabs{display:flex;gap:4px;border-bottom:1px solid var(--border);margin:6px 0 16px}
+  .tab{padding:9px 14px;cursor:pointer;color:var(--muted);border-bottom:2px solid transparent;font-size:13.5px}
+  .tab.active{color:var(--text);border-bottom-color:var(--accent)}
+  .toolbar{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:12px}
+  select,input,textarea,button{background:var(--panel2);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:7px 10px;font:inherit}
+  button{cursor:pointer}
+  button.primary{background:var(--accent);border-color:var(--accent);color:#06122b;font-weight:600}
+  button.ghost{background:transparent}
+  table{width:100%;border-collapse:collapse}
+  th,td{text-align:left;padding:9px 10px;border-bottom:1px solid var(--border);font-size:13px}
+  th{color:var(--muted);font-weight:600;font-size:11.5px;text-transform:uppercase;letter-spacing:.05em}
+  tr.clickable{cursor:pointer}
+  tr.clickable:hover td{background:#1b202b}
+  .badge{display:inline-block;font-size:11px;padding:2px 8px;border-radius:20px;border:1px solid var(--border);background:#232838;color:var(--muted)}
+  .badge.prov{color:#cfe0ff;border-color:#2f3b5a;background:#1a2135}
+  .badge.ast{color:#c7f6dd;border-color:#265; background:#12241b}
+  .badge.good{color:var(--good);border-color:#245;background:#10231a}
+  .badge.warn{color:var(--warn);border-color:#443318;background:#241d10}
+  .badge.job{color:#ffd9a8;border-color:#443318;background:#241d10}
+  .badge.off{color:var(--danger);border-color:#432028;background:#241016}
+  .kv{display:grid;grid-template-columns:150px 1fr;gap:8px 12px;font-size:13px}
+  .kv .l{color:var(--muted)}
+  .muted{color:var(--muted)}
+  .flag{color:var(--warn)}
+  .screen{display:none}
+  .screen.active{display:block}
+  .stat{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:14px 16px}
+  .stat .n{font-size:22px;font-weight:700}
+  .stat .l{color:var(--muted);font-size:12px}
+  .formsec{border:1px solid var(--border);border-radius:10px;padding:14px;margin-bottom:12px;background:var(--panel2)}
+  .formsec h3{margin:0 0 4px;font-size:14px}
+  .formsec .hint{color:var(--muted);font-size:12px;margin-bottom:10px}
+  .step{display:flex;gap:10px;align-items:flex-start;padding:10px;border:1px dashed var(--border);border-radius:8px;margin-bottom:8px;background:#141821}
+  .step .num{flex:0 0 24px;height:24px;border-radius:50%;background:#20283b;color:#cfe0ff;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700}
+  .step .body{flex:1}
+  .step select{margin-top:4px}
+  .rowflex{display:flex;gap:10px;align-items:center}
+  .switch{width:38px;height:22px;background:#333a49;border-radius:20px;position:relative;cursor:pointer;flex:0 0 38px}
+  .switch.on{background:var(--accent)}
+  .switch .k{position:absolute;top:2px;left:2px;width:18px;height:18px;background:#fff;border-radius:50%;transition:.15s}
+  .switch.on .k{left:18px}
+  /* SMS inbox */
+  .inbox{display:grid;grid-template-columns:300px 1fr;gap:0;border:1px solid var(--border);border-radius:12px;overflow:hidden;min-height:520px}
+  .threadlist{border-right:1px solid var(--border);background:var(--panel)}
+  .thread{padding:11px 13px;border-bottom:1px solid var(--border);cursor:pointer}
+  .thread:hover{background:#1b202b}
+  .thread.active{background:#20283b}
+  .thread .top{display:flex;justify-content:space-between;font-size:13px}
+  .thread .prev{color:var(--muted);font-size:12px;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .thread .unread{width:8px;height:8px;border-radius:50%;background:var(--accent);display:inline-block;margin-left:6px}
+  .convo{display:flex;flex-direction:column;background:var(--bg)}
+  .convo .head{padding:12px 16px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center}
+  .msgs{flex:1;padding:16px;display:flex;flex-direction:column;gap:8px;overflow:auto}
+  .bubble{max-width:70%;padding:8px 12px;border-radius:14px;font-size:13px}
+  .bubble.in{align-self:flex-start;background:var(--panel2);border:1px solid var(--border);border-bottom-left-radius:4px}
+  .bubble.out{align-self:flex-end;background:#20344f;border:1px solid #2f4a70;border-bottom-right-radius:4px}
+  .bubble .t{display:block;color:var(--muted);font-size:10.5px;margin-top:3px}
+  .composer{padding:12px 16px;border-top:1px solid var(--border);display:flex;gap:8px}
+  .composer input{flex:1}
+  .callbar{position:fixed;bottom:18px;right:26px;background:#131b2c;border:1px solid #2f4a70;border-radius:12px;padding:12px 16px;display:flex;gap:14px;align-items:center;box-shadow:0 8px 30px rgba(0,0,0,.5)}
+  .note{border-left:3px solid var(--accent);background:#131722;padding:10px 14px;border-radius:0 8px 8px 0;color:var(--muted);font-size:12.5px;margin:12px 0}
+  .pill{font-size:11px;color:var(--muted);border:1px solid var(--border);border-radius:20px;padding:2px 9px}
+</style>
+</head>
+<body>
+<div class="app">
+  <nav class="sidebar">
+    <div class="brand">📞 OWEN</div>
+
+    <div class="navgroup">Attribution</div>
+    <a class="navlink" onclick="go('dash')"><span class="ic">📊</span> Dashboard</a>
+    <a class="navlink active" onclick="go('calls')"><span class="ic">📁</span> Calls</a>
+    <a class="navlink" onclick="go('callers')"><span class="ic">👤</span> Callers</a>
+    <a class="navlink" onclick="go('emails')"><span class="ic">✉️</span> Email Log</a>
+
+    <div class="navgroup">Platform <span class="pill">new</span></div>
+    <a class="navlink" onclick="go('numbers')"><span class="ic">🔢</span> Numbers</a>
+    <a class="navlink" onclick="go('flows')"><span class="ic">🧭</span> Call Flows</a>
+    <a class="navlink" onclick="go('messages')"><span class="ic">💬</span> Messages <span class="tag">3</span></a>
+    <a class="navlink" onclick="go('agents')"><span class="ic">🤖</span> AI Agents</a>
+
+    <div class="navgroup">System</div>
+    <a class="navlink" onclick="go('settings')"><span class="ic">⚙️</span> Settings</a>
+  </nav>
+
+  <main class="main">
+
+    <!-- ===================== CALLS ===================== -->
+    <section id="calls" class="screen active">
+      <h1>Calls</h1>
+      <div class="sub">Segregated by provider family (user requirement, ticket 05). Same <code>calls</code> table, filtered by <code>provider_id</code>.</div>
+      <div class="tabs">
+        <div class="tab active">Attribution &nbsp;<span class="pill">Twilio · SignalWire</span></div>
+        <div class="tab">Platform calls &nbsp;<span class="pill">BulkVS / Asterisk</span></div>
+      </div>
+      <div class="toolbar">
+        <input placeholder="Caller number…" style="width:160px"/>
+        <select><option>All campaigns</option><option>Roofing – Spring</option></select>
+        <select><option>All statuses</option><option>completed</option></select>
+        <label class="rowflex muted" style="font-size:12.5px"><input type="checkbox" checked style="width:auto"/> Hide failed &amp; ≤3s</label>
+      </div>
+      <div class="card" style="padding:0">
+        <table>
+          <thead><tr><th>When</th><th>Caller</th><th>Number</th><th>Campaign</th><th>Status</th><th>Dur</th><th>Flags</th></tr></thead>
+          <tbody>
+            <tr class="clickable"><td>10:41a</td><td>+1 305 555 0142</td><td>Main line <span class="muted">(305) 555-0100</span></td><td>Roofing – Spring</td><td><span class="badge good">completed</span></td><td>4:12</td><td><span class="badge job">job</span></td></tr>
+            <tr class="clickable"><td>9:58a</td><td>+1 786 555 0198</td><td>Ads DID <span class="muted">(786) 555-0177</span></td><td>PPC – Google</td><td><span class="badge good">completed</span></td><td>1:03</td><td></td></tr>
+            <tr class="clickable"><td>9:12a</td><td>+1 954 555 0110</td><td>Main line</td><td>—</td><td><span class="badge">no-answer</span></td><td>0:00</td><td><span class="flag">missed</span></td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="note">Row click opens the existing <b>CallDrawer</b> (recording, AI analysis, transcript, event timeline) — unchanged. The <b>Platform calls</b> tab adds an in-call action row for live Asterisk calls (coordinated with ticket 13).</div>
+    </section>
+
+    <!-- ===================== NUMBERS (hub) ===================== -->
+    <section id="numbers" class="screen">
+      <h1>Numbers</h1>
+      <div class="sub">The operator hub. Each DID shows its assigned behavior at a glance; click to configure. Buying/releasing stays in the BulkVS portal (ticket 07).</div>
+      <div class="toolbar">
+        <input placeholder="Search numbers…" style="width:200px"/>
+        <select><option>All providers</option><option>BulkVS/Asterisk</option><option>Twilio</option></select>
+        <span style="margin-left:auto" class="muted">14 active · 1 released</span>
+      </div>
+      <div class="card" style="padding:0">
+        <table>
+          <thead><tr><th>Number</th><th>Label</th><th>Owner→Media</th><th>Call flow</th><th>Campaign</th><th>SMS</th><th>Last call</th></tr></thead>
+          <tbody>
+            <tr class="clickable" onclick="go('numdetail')"><td>(305) 555-0100</td><td>Main line</td><td><span class="badge prov">BulkVS</span>→<span class="badge ast">Asterisk</span></td><td><span class="badge good">Main IVR</span></td><td>Roofing – Spring</td><td><span class="badge good">10DLC on</span></td><td>10:41a</td></tr>
+            <tr class="clickable"><td>(786) 555-0177</td><td>Ads DID</td><td><span class="badge prov">BulkVS</span>→<span class="badge ast">Asterisk</span></td><td><span class="badge warn">forward only</span></td><td>PPC – Google</td><td><span class="badge off">not registered</span></td><td>9:58a</td></tr>
+            <tr class="clickable"><td>(954) 555-0111</td><td class="muted">—</td><td><span class="badge prov">Twilio</span></td><td><span class="muted">n/a (Twilio)</span></td><td>—</td><td><span class="badge">receive-only</span></td><td>2d ago</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="note">A DID's <b>lifecycle</b> (available / assigned / released) is derived, not a status column (ticket 07). Twilio rows are read-only mirrors — no flow authoring (that's Asterisk-only).</div>
+    </section>
+
+    <!-- ===================== NUMBER DETAIL + RULE FORM ===================== -->
+    <section id="numdetail" class="screen">
+      <h1>(305) 555-0100 · “Main line”</h1>
+      <div class="sub"><a class="navlink" style="display:inline-flex;padding:2px 6px" onclick="go('numbers')">← Numbers</a> &nbsp; <span class="badge prov">BulkVS</span>→<span class="badge ast">Asterisk</span></div>
+
+      <div class="grid" style="grid-template-columns:1fr 1fr;margin-bottom:14px">
+        <div class="card"><div class="kv">
+          <div class="l">Label (BulkVS ReferenceID)</div><div><input value="Main line" style="width:100%"/></div>
+          <div class="l">Campaign</div><div><select style="width:100%"><option>Roofing – Spring</option><option>— none —</option></select></div>
+          <div class="l">Lifecycle</div><div><span class="badge good">assigned</span></div>
+        </div></div>
+        <div class="card"><div class="kv">
+          <div class="l">SMS</div><div><span class="badge good">10DLC on</span> <span class="muted">campaign C-88213</span></div>
+          <div class="l">Inbound webhook</div><div class="muted">…/webhooks/bulkvs/message?tracking_number=+13055550100</div>
+          <div class="l">Fallback forward</div><div><input value="+1 305 555 0900" style="width:100%"/></div>
+        </div></div>
+      </div>
+
+      <div class="tabs">
+        <div class="tab active">Call flow (form)</div>
+        <div class="tab">Visual builder <span class="pill">later</span></div>
+        <div class="tab">History</div>
+      </div>
+
+      <div class="card">
+        <div class="toolbar"><b>Main IVR</b> <span class="badge good">active · v4</span> <span style="margin-left:auto"></span>
+          <button class="ghost">Validate</button><button class="primary">Save new version</button></div>
+        <div class="hint muted" style="margin-bottom:12px">The v1 <b>rule form</b> is one simplified emitter of the flow-graph (ticket 06). Same graph the visual builder will edit later — no rewrite. Every unwired exit falls to the flow's default fallback.</div>
+
+        <div class="formsec">
+          <h3>1 · Business hours</h3>
+          <div class="hint">Outside hours, jump straight to the after-hours step.</div>
+          <div class="rowflex"><div class="switch on"><div class="k"></div></div> Mon–Fri 8:00a–6:00p (America/New_York)</div>
+        </div>
+
+        <div class="formsec">
+          <h3>2 · Greeting</h3>
+          <div class="hint">Played on answer. Carries the Florida all-party recording consent notice.</div>
+          <select><option>“Thanks for calling… this call may be recorded.”</option><option>Upload / record new…</option></select>
+          <div class="rowflex" style="margin-top:10px"><div class="switch on"><div class="k"></div></div> Record this call</div>
+        </div>
+
+        <div class="formsec">
+          <h3>3 · Menu (IVR)</h3>
+          <div class="hint">Optional. Each key routes to a step below.</div>
+          <div class="step"><div class="num">1</div><div class="body">Sales → <select><option>Dial team</option></select></div></div>
+          <div class="step"><div class="num">2</div><div class="body">Talk to the assistant → <select><option>AI Agent: “Front-desk Fran”</option></select></div></div>
+          <div class="step"><div class="num">0</div><div class="body">Operator → <select><option>Ring my browser (WebRTC)</option></select></div></div>
+          <button class="ghost" style="margin-top:4px">+ Add key</button>
+        </div>
+
+        <div class="formsec">
+          <h3>4 · Default routing</h3>
+          <div class="hint">If no menu / no key pressed.</div>
+          <div class="step"><div class="num">→</div><div class="body">Route to <select><option>Dial: team ring group</option><option>AI Agent…</option><option>Voicemail</option><option>Forward to number…</option></select></div></div>
+        </div>
+
+        <div class="formsec">
+          <h3>5 · Fallback (no answer / error)</h3>
+          <div class="hint">Catch-all so no call hits dead air (ticket 06 default_fallback).</div>
+          <div class="step"><div class="num">⛑</div><div class="body">Send to <select><option>Voicemail → transcribe &amp; email</option></select></div></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===================== CALL FLOWS (library) ===================== -->
+    <section id="flows" class="screen">
+      <h1>Call Flows</h1>
+      <div class="sub">Reusable flows. One flow can be assigned to many numbers (ticket 07: number → one shared flow_id). Append-only versions.</div>
+      <div class="toolbar"><button class="primary">+ New flow</button><span style="margin-left:auto" class="muted">edit a flow via the number, or here</span></div>
+      <div class="card" style="padding:0"><table>
+        <thead><tr><th>Flow</th><th>Version</th><th>Nodes</th><th>Used by</th><th>Status</th></tr></thead>
+        <tbody>
+          <tr class="clickable" onclick="go('numdetail')"><td>Main IVR</td><td>v4</td><td>hours, play, menu, dial, ai_agent, voicemail</td><td>2 numbers</td><td><span class="badge good">active</span></td></tr>
+          <tr class="clickable"><td>Forward only</td><td>v1</td><td>play, dial</td><td>5 numbers</td><td><span class="badge good">active</span></td></tr>
+          <tr class="clickable"><td>After-hours voicemail</td><td>v2</td><td>play, voicemail</td><td>draft</td><td><span class="badge warn">draft</span></td></tr>
+        </tbody>
+      </table></div>
+      <div class="note">Editing opens the same <b>rule form</b> shown on the number detail. The visual <b>Twilio-Studio-style builder</b> is deferred (map fog) — the schema is built for it.</div>
+    </section>
+
+    <!-- ===================== MESSAGES (SMS inbox) ===================== -->
+    <section id="messages" class="screen">
+      <h1>Messages</h1>
+      <div class="sub">Threads derived by (number, contact) — ticket 08. Polling, no WebSockets. Reply goes out on the thread's number.</div>
+      <div class="inbox">
+        <div class="threadlist">
+          <div class="thread active"><div class="top"><b>+1 305 555 0142</b><span class="muted">10:39a</span></div><div class="prev">Yes 2pm works, see you then</div></div>
+          <div class="thread"><div class="top">Maria G. <span class="unread"></span></div><div class="prev">Can someone call me about the estimate?</div></div>
+          <div class="thread"><div class="top">+1 954 555 0110<span class="unread"></span></div><div class="prev">STOP</div></div>
+        </div>
+        <div class="convo">
+          <div class="head"><div><b>+1 305 555 0142</b> <span class="muted">via Main line (305) 555-0100</span></div><span class="badge good">10DLC on</span></div>
+          <div class="msgs">
+            <div class="bubble in">Hi, is someone available to look at my roof this week?<span class="t">9:58a · inbound</span></div>
+            <div class="bubble out">Absolutely — we have Tue 2pm or Wed 10am. Which works?<span class="t">10:05a · you · delivered</span></div>
+            <div class="bubble in">Yes 2pm works, see you then<span class="t">10:39a · inbound</span></div>
+          </div>
+          <div class="composer"><input placeholder="Type a reply…"/><button class="primary">Send</button></div>
+        </div>
+      </div>
+      <div class="note">Numbers without 10DLC show a disabled composer + “not registered” badge (ticket 08 gate, bridge from ticket 12). Opted-out contacts (STOP) hard-block sending. Both sides also relay to GHL.</div>
+    </section>
+
+    <!-- ===================== AI AGENTS (library) ===================== -->
+    <section id="agents" class="screen">
+      <h1>AI Agents</h1>
+      <div class="sub">A library of agents. An agent is <b>never bound to a number</b> — it's selected as a node inside a call flow (ticket 07/06). Deep config is ticket 11; this is the surface.</div>
+      <div class="toolbar"><button class="primary">+ New agent</button></div>
+      <div class="grid" style="grid-template-columns:1fr 1fr 1fr">
+        <div class="card"><b>Front-desk Fran</b><div class="muted" style="font-size:12px;margin:6px 0">Greets, books, escalates to operator.</div><div class="kv"><div class="l">Voice</div><div>OpenAI · “Shimmer”</div><div class="l">Used in</div><div>Main IVR (key 2)</div></div></div>
+        <div class="card"><b>After-hours intake</b><div class="muted" style="font-size:12px;margin:6px 0">Takes a message, creates a lead.</div><div class="kv"><div class="l">Voice</div><div>OpenAI · “Echo”</div><div class="l">Used in</div><div class="muted">— unused —</div></div></div>
+        <div class="card" style="border-style:dashed;color:var(--muted);display:flex;align-items:center;justify-content:center">+ New agent</div>
+      </div>
+      <div class="note">“Simple path” protection: agents live in their own section so the number/flow forms stay uncluttered — you just pick an agent from a dropdown in the menu step.</div>
+    </section>
+
+    <!-- ===================== stubs for existing pages ===================== -->
+    <section id="dash" class="screen"><h1>Dashboard</h1><div class="sub">Existing attribution analytics — unchanged.</div>
+      <div class="grid" style="grid-template-columns:repeat(4,1fr)"><div class="stat"><div class="n">128</div><div class="l">Calls (7d)</div></div><div class="stat"><div class="n">41</div><div class="l">Job leads</div></div><div class="stat"><div class="n">17</div><div class="l">Missed</div></div><div class="stat"><div class="n">9</div><div class="l">SMS threads</div></div></div>
+      <div class="note">Optional later: add BulkVS/Asterisk-provider breakdown + SMS tiles. Out of this ticket's decision — noted only.</div></section>
+    <section id="callers" class="screen"><h1>Callers</h1><div class="sub">Existing — unchanged.</div></section>
+    <section id="emails" class="screen"><h1>Email Log</h1><div class="sub">Existing — unchanged.</div></section>
+    <section id="settings" class="screen"><h1>Settings</h1><div class="sub">Existing webhook/status page. Add: BulkVS trunk + ARI health (non-gating /health/telephony, ticket 09), BulkVS message webhook URL.</div></section>
+
+  </main>
+</div>
+
+<div class="callbar">
+  <span class="badge good">● Live call</span> <span>+1 305 555 0142 → Main IVR</span>
+  <button class="ghost">Answer</button><button class="ghost">Transfer</button><button style="background:var(--danger);border-color:var(--danger);color:#2a0a0e;font-weight:600">Hang up</button>
+</div>
+
+<script>
+  function go(id){
+    document.querySelectorAll('.screen').forEach(s=>s.classList.remove('active'));
+    document.getElementById(id).classList.add('active');
+    document.querySelectorAll('.navlink').forEach(n=>n.classList.remove('active'));
+    if(event&&event.currentTarget&&event.currentTarget.classList.contains('navlink'))event.currentTarget.classList.add('active');
+    window.scrollTo(0,0);
+  }
+</script>
+</body>
+</html>
