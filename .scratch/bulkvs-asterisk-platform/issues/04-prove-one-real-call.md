@@ -20,6 +20,24 @@ allow-listed IPs, ARI user, dialplan hand-off, test-call steps).
 **Session 2026-07-22 — inspected the live server over `dispatch`; drove every AFK step. The remaining work is
 human-only (BulkVS account + buy a DID + place a real call), so the task stays open.**
 
+**UPDATE (same session): account holder confirmed BulkVS account + API credentials (portal API-Credentials
+page) + DID `16452516222` bought and routed to trunk group `vps-main-trunk`. Server-side config then APPLIED
+(no NAT — `144.126.138.157` is directly on eth0, so no `external_media_address` needed):**
+
+- `pjsip.conf` — placeholders replaced with the 4 real BulkVS core IPs (`match=` × 4) + `contact=sip:sip.bulkvs.com:5060`.
+  Endpoint `bulkvs` now loads; aor **qualifies Avail, RTT ~32ms** (SIP path to BulkVS reachable). Backup `.bak-20260722-163956`.
+- `http.conf` — `enabled=yes` + `bindport=8088`, bound **127.0.0.1 only**. `http show status` → "Server Enabled".
+- `ari.conf` — ARI user **`owen`** created; password at **`/root/.owen-ari-pw`** (root-only, 0600).
+  Verified: `curl -u owen:… http://127.0.0.1:8088/ari/asterisk/info` → 200 with version 22.10.1; unauth → 401.
+- `extensions.conf` — prior session already left `from-bulkvs` (Answer→Playback(demo-congrats)→Hangup, a valid
+  inbound-SIP proof) and `to-bulkvs` (Dial `PJSIP/${EXTEN}@bulkvs`). `demo-congrats.gsm` + recording spool present.
+
+**Still needs the account holder (can't be done from a background agent):**
+1. Confirm `vps-main-trunk`'s **destination host = `144.126.138.157:5060` UDP** (so the DID delivers inbound to us).
+2. Confirm `144.126.138.157` is a registered **Host** in BulkVS (Interconnection → Host) — required for **outbound**.
+3. **Dial `16452516222`** from any phone → validates the full inbound SIP path (demo playback + log/CDR).
+4. Provide a **cell number** to ring for the ARI-controlled outbound + recording proof (agent originates via ARI).
+
 #### Server facts discovered (all read-only)
 
 - **Host:** Ubuntu 24.04.4. Public **IPv4 = `144.126.138.157`** (this is the SBC IP BulkVS must send to and
