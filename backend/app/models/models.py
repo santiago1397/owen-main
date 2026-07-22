@@ -277,6 +277,46 @@ class Job(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
+class Flow(Base):
+    """Logical call-flow (name + pointer to its currently active version). Part of the
+    BulkVS+Asterisk platform effort. The row is an append-only ENVELOPE: only the
+    `active_version_id` pointer is ever mutated (on activation) — the graph itself lives
+    in immutable `flow_versions` rows. A later ticket's ARI interpreter pins a call to a
+    `flow_version_id` at StasisStart, exactly like `campaign_id` is pinned at ingest.
+    """
+
+    __tablename__ = "flows"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_uuid)
+    name: Mapped[str] = mapped_column(String)
+    # Pointer to the active version (nullable until first activation). use_alter breaks the
+    # flows <-> flow_versions circular FK at DDL time.
+    active_version_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("flow_versions.id", use_alter=True, name="fk_flows_active_version"),
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class FlowVersion(Base):
+    """An immutable snapshot of a flow's directed graph. APPEND-ONLY: every save inserts a
+    new row (version = prior max + 1); existing rows are never updated. `graph` holds the
+    whole graph — a `nodes` object map keyed by node id, with edges in each node's `next`
+    map keyed by port (see app/flows/validator.py). Validation gates ACTIVATION, not saving.
+    """
+
+    __tablename__ = "flow_versions"
+    __table_args__ = (
+        UniqueConstraint("flow_id", "version", name="uq_flow_version"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_uuid)
+    flow_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("flows.id"), index=True)
+    version: Mapped[int] = mapped_column(Integer)  # 1-based, monotonically increasing per flow
+    graph: Mapped[dict] = mapped_column(JSONB)  # nodes + edges (per-node `next` port map)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
 class User(Base):
     __tablename__ = "users"
 
