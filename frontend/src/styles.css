@@ -13,6 +13,16 @@ a { color: var(--accent); text-decoration: none; }
 .sidebar h1 { font-size: 15px; margin: 4px 8px 16px; }
 .navlink { padding: 9px 12px; border-radius: 8px; color: var(--muted); display: block; }
 .navlink.active, .navlink:hover { background: var(--panel2); color: var(--text); }
+.navsection { color: var(--muted); font-size: 10px; text-transform: uppercase;
+  letter-spacing: .08em; margin: 14px 12px 4px; opacity: .7; }
+.tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--border); margin-bottom: 14px; }
+.tab { background: none; border: none; border-bottom: 2px solid transparent; border-radius: 0;
+  color: var(--muted); padding: 8px 12px; }
+.tab.active { color: var(--text); border-bottom-color: var(--accent); }
+.badge.lc-available { background: rgba(154,164,178,.15); color: var(--muted); }
+.badge.lc-assigned { background: rgba(79,140,255,.15); color: var(--accent); border-color: var(--accent); }
+.badge.lc-released { background: rgba(255,176,32,.15); color: var(--warn); border-color: var(--warn); }
+.placeholder { text-align: center; color: var(--muted); padding: 48px 16px; }
 .main { flex: 1; padding: 24px 28px; overflow: auto; }
 .row { display: flex; gap: 16px; flex-wrap: wrap; }
 .card { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 16px; }

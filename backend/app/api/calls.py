@@ -32,11 +32,23 @@ from app.schemas.api import (
 
 router = APIRouter(prefix="/api/calls", tags=["calls"])
 
+# Operator platform UX (Ticket 06): let the Calls page split calls into "Attribution"
+# (legacy Twilio/SignalWire) vs "Platform" (BulkVS/Asterisk) via a single optional query
+# param. Additive — omitting provider_group preserves the pre-existing default behavior.
+PROVIDER_GROUPS: dict[str, tuple[str, ...]] = {
+    "attribution": ("twilio", "signalwire"),
+    "platform": ("bulkvs", "asterisk"),
+}
 
-def _apply_filters(stmt, provider, number_id, campaign_id, caller, status_, date_from, date_to,
-                   include_short, hide_junk):
+
+def _apply_filters(stmt, provider, provider_group, number_id, campaign_id, caller, status_,
+                   date_from, date_to, include_short, hide_junk):
     if provider:
         stmt = stmt.where(Provider.name == provider)
+    if provider_group:
+        names = PROVIDER_GROUPS.get(provider_group)
+        if names:
+            stmt = stmt.where(Provider.name.in_(names))
     if number_id:
         stmt = stmt.where(Call.number_id == number_id)
     if campaign_id:
@@ -68,6 +80,10 @@ def _apply_filters(stmt, provider, number_id, campaign_id, caller, status_, date
 @router.get("", response_model=Page)
 async def list_calls(
     provider: str | None = None,
+    provider_group: str | None = Query(
+        None,
+        description="Optional provider bucket: 'attribution' (twilio/signalwire) or 'platform' (bulkvs/asterisk)",
+    ),
     number_id: uuid.UUID | None = None,
     campaign_id: uuid.UUID | None = None,
     caller: str | None = None,
@@ -86,7 +102,7 @@ async def list_calls(
         .join(Provider, Call.provider_id == Provider.id, isouter=True)
         .join(Caller, Call.caller_id == Caller.id, isouter=True)
     )
-    base = _apply_filters(base, provider, number_id, campaign_id, caller, status, date_from, date_to, include_short, hide_junk)
+    base = _apply_filters(base, provider, provider_group, number_id, campaign_id, caller, status, date_from, date_to, include_short, hide_junk)
 
     total = (await db.execute(select(func.count()).select_from(base.subquery()))).scalar_one()
 
@@ -114,7 +130,7 @@ async def list_calls(
         .join(Campaign, Call.campaign_id == Campaign.id, isouter=True)
         .join(CallAnalysis, CallAnalysis.call_id == Call.id, isouter=True)
     )
-    rows_stmt = _apply_filters(rows_stmt, provider, number_id, campaign_id, caller, status, date_from, date_to, include_short, hide_junk)
+    rows_stmt = _apply_filters(rows_stmt, provider, provider_group, number_id, campaign_id, caller, status, date_from, date_to, include_short, hide_junk)
     rows_stmt = rows_stmt.order_by(Call.started_at.desc().nullslast()).offset((page - 1) * page_size).limit(page_size)
 
     rows = (await db.execute(rows_stmt)).mappings().all()

@@ -135,12 +135,20 @@ export default function Calls() {
   const [filters, setFilters] = useState<any>({ page: 1, page_size: 50 });
   const [hideJunk, setHideJunk] = useState(true);
   const [selected, setSelected] = useState<string | null>(null);
+  // Provider split (Ticket 06): "attribution" = Twilio/SignalWire, "platform" = BulkVS/Asterisk.
+  // Backed by the additive ?provider_group= param on /api/calls; the call drawer is reused as-is.
+  const [tab, setTab] = useState<"attribution" | "platform">("attribution");
   const { data: campaigns } = useQuery({ queryKey: ["campaigns"], queryFn: api.campaigns });
 
   // The single "Hide failed & ≤3s" checkbox governs all junk-hiding. When unchecked we must
   // also opt into 0–1s calls via include_short, otherwise the backend's separate short-call
   // filter keeps hiding them and the checkbox appears to do nothing.
-  const query = { ...filters, hide_junk: hideJunk || undefined, include_short: hideJunk ? undefined : true };
+  const query = {
+    ...filters,
+    provider_group: tab,
+    hide_junk: hideJunk || undefined,
+    include_short: hideJunk ? undefined : true,
+  };
   const { data } = useQuery({ queryKey: ["calls", query], queryFn: () => api.calls(query) });
   const set = (k: string, v: any) => setFilters((f: any) => ({ ...f, [k]: v, page: 1 }));
   const onRange = (r: Range | null) =>
@@ -156,16 +164,32 @@ export default function Calls() {
         <h2 style={{ marginTop: 0, marginBottom: 0, flex: 1 }}>Calls</h2>
         <DateRangeBar defaultPreset="7d" onChange={onRange} />
       </div>
+      <div className="tabs">
+        <button
+          className={"tab" + (tab === "attribution" ? " active" : "")}
+          onClick={() => { setTab("attribution"); set("provider", undefined); }}
+        >
+          Attribution
+        </button>
+        <button
+          className={"tab" + (tab === "platform" ? " active" : "")}
+          onClick={() => { setTab("platform"); set("provider", undefined); }}
+        >
+          Platform
+        </button>
+      </div>
       <div className="toolbar" style={{ flexWrap: "wrap", gap: 8, marginTop: 8 }}>
         <input placeholder="caller number…" onChange={(e) => set("caller", e.target.value)} />
         <select onChange={(e) => set("campaign_id", e.target.value || undefined)}>
           <option value="">all campaigns</option>
           {(campaigns || []).map((c: any) => <option key={c.id} value={c.id}>{c.name}</option>)}
         </select>
-        <select onChange={(e) => set("provider", e.target.value)}>
+        <select value={filters.provider || ""} onChange={(e) => set("provider", e.target.value || undefined)}>
           <option value="">all providers</option>
-          <option value="twilio">twilio</option>
-          <option value="signalwire">signalwire</option>
+          {(tab === "attribution"
+            ? ["twilio", "signalwire"]
+            : ["bulkvs", "asterisk"]
+          ).map((p) => <option key={p} value={p}>{p}</option>)}
         </select>
         <select onChange={(e) => set("status", e.target.value)}>
           <option value="">any status</option>
