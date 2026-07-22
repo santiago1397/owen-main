@@ -32,11 +32,30 @@ page) + DID `16452516222` bought and routed to trunk group `vps-main-trunk`. Ser
 - `extensions.conf` — prior session already left `from-bulkvs` (Answer→Playback(demo-congrats)→Hangup, a valid
   inbound-SIP proof) and `to-bulkvs` (Dial `PJSIP/${EXTEN}@bulkvs`). `demo-congrats.gsm` + recording spool present.
 
-**Still needs the account holder (can't be done from a background agent):**
-1. Confirm `vps-main-trunk`'s **destination host = `144.126.138.157:5060` UDP** (so the DID delivers inbound to us).
-2. Confirm `144.126.138.157` is a registered **Host** in BulkVS (Interconnection → Host) — required for **outbound**.
-3. **Dial `16452516222`** from any phone → validates the full inbound SIP path (demo playback + log/CDR).
-4. Provide a **cell number** to ring for the ARI-controlled outbound + recording proof (agent originates via ARI).
+**✅ INBOUND PROVEN (2026-07-22, real PSTN call):** A live call to `16452516222` completed end-to-end —
+`INVITE +16452516222` from BulkVS `162.249.171.198`/`76.8.29.198` → `100 Trying` → `200 OK` → `ACK`, answered
+by `from-bulkvs`, demo audio heard by the caller. Validates trunk IP-auth, ulaw codec, no-NAT, firewall, routing.
+
+**⚠ KEY CORRECTION to ticket 01's research:** BulkVS delivers the called number as **`+E.164` (`+16452516222`)**,
+NOT the 11-digit `1NXXNXXXXXX` the research predicted. The first inbound attempt got **404 "extension not found"**
+because the dialplan pattern `_X.` doesn't match a leading `+`. Fixed by adding an `_+X.` pattern to `from-bulkvs`.
+**Downstream impact:** ticket 06's flow-graph/dialplan matching must key on the `+E.164` form (or normalize the `+`).
+
+**🔒 SECURITY (partial ticket-09 work done now — live exposure):** `5060` was open to the whole internet and
+under active SIP brute-force (bots probing fake extensions from 51.68.34.143, 172.110.223.49, etc.). Locked UFW:
+`5060:5069/udp` now allowed **only from the 4 BulkVS SBC IPs** (162.249.171.198, 76.8.29.198, 69.12.88.198,
+199.255.157.198); broad v4+v6 5060 rule removed. **RTP `10000:20000/udp` left open pending measurement** of the
+actual BulkVS media-source IP (undocumented in BulkVS/Nerd-Vittles/community sources — must observe empirically).
+Note: `192.9.236.42`/`52.206.134.245` are BulkVS **SMS-webhook** IPs (HTTPS), NOT SIP — excluded from SIP rules.
+
+**Still to prove (remaining half of ticket 04):**
+1. **ARI/recording control** — route `from-bulkvs` → `Stasis(owen-test)` and have an on-box ARI client answer +
+   record a leg (proves the programmable control plane tickets 05/06/11 need). No external software: ARI is built
+   into Asterisk (enabled), driven by a small `python3`/`curl` script on the host.
+2. **Outbound** — originate a call out via ARI `POST /channels` (or `to-bulkvs` dialplan). Needs a cell number to
+   ring + confirmation that `144.126.138.157` is a registered BulkVS **Host** (Interconnection → Host; outbound-only
+   requirement — BulkVS rejects termination from unregistered source IPs).
+3. Measure BulkVS RTP media-source IP during a test call, then tighten UFW `10000:20000/udp` to it.
 
 #### Server facts discovered (all read-only)
 
