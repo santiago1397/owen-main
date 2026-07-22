@@ -18,6 +18,8 @@ from app.db import SessionLocal
 from app.migrate import run_migrations
 from app.services import queue
 from app.workers import asterisk_consumer
+from app.workers.asterisk_cdr import enabled as asterisk_cdr_enabled
+from app.workers.asterisk_cdr import reconcile_cdr
 from app.workers.handlers import HANDLERS
 from app.workers.bulkvs_sync import enabled as bulkvs_sync_enabled
 from app.workers.bulkvs_sync import sync_numbers as bulkvs_sync_numbers
@@ -105,6 +107,15 @@ def build_scheduler() -> AsyncIOScheduler:
             seconds=settings.BULKVS_SYNC_POLL_SECONDS, id="bulkvs_sync",
         )
         logger.info("bulkvs number sync scheduled every %ss", settings.BULKVS_SYNC_POLL_SECONDS)
+    # Asterisk CDR -> Postgres reconcile (Ticket 05). Only when the platform flag is on —
+    # otherwise a no-op, so there's no point waking up for it. Backfills/completes any call
+    # the live ARI-WS consumer missed (worker restart, StasisEnd terminal-status gap).
+    if asterisk_cdr_enabled():
+        sched.add_job(
+            reconcile_cdr, "interval",
+            seconds=settings.ASTERISK_CDR_POLL_SECONDS, id="asterisk_cdr",
+        )
+        logger.info("asterisk CDR reconcile scheduled every %ss", settings.ASTERISK_CDR_POLL_SECONDS)
     return sched
 
 

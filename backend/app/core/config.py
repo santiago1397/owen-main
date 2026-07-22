@@ -190,6 +190,17 @@ class Settings(BaseSettings):
     ARI_PASSWORD: str = ""
     ARI_APP: str = "owen"  # Stasis application name the dialplan hands calls to
 
+    # Where Asterisk writes flow-recorded WAVs on the HOST, bind-mounted into the app +
+    # worker containers (read-only is fine) so the recording "fetch" is a local file move
+    # rather than an HTTP download. Asterisk's res_stasis writes ARI recordings under its
+    # spool `recording/` subdir; mount that dir here. See asterisk/README.md.
+    #   host  /var/spool/asterisk/recording  ->  container  /data/asterisk-spool  (ro)
+    ASTERISK_SPOOL_DIR: str = "/data/asterisk-spool"
+
+    # Window (hours) the Asterisk CDR reconciler scans the cdr table for; and its cadence.
+    ASTERISK_CDR_WINDOW_HOURS: int = 4
+    ASTERISK_CDR_POLL_SECONDS: int = 300
+
     # BulkVS SIP trunk. Secrets from env. Inbound auth is by SBC source IP (see
     # asterisk/README.md), so the trunk name identifies the PJSIP endpoint/aor/identify
     # rendered from the asterisk/ templates; username/password cover outbound REGISTER/auth.

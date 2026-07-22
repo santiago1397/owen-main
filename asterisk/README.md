@@ -18,6 +18,8 @@ tells you whether it came alive.
 | `http.conf` | HTTP server hosting ARI + the ARI WebSocket (bind + port) |
 | `rtp.conf` | RTP media port range (10000-10200) |
 | `extensions.conf` | Minimal dialplan: inbound → Stasis(`${ARI_APP}`), outbound → trunk |
+| `cdr.conf` | CDR engine on, `unanswered=yes` so missed calls also get a CDR row |
+| `cdr_pgsql.conf` | Writes CDRs into OWEN's Postgres `cdr` table (read by the CDR reconciler) |
 
 All `*.conf` are **templates**: `${VAR}` tokens are filled from `.env.prod` at deploy
 time. Secrets (`BULKVS_SIP_PASSWORD`, `ARI_PASSWORD`) live only in `.env.prod`
@@ -39,10 +41,82 @@ BULKVS_TRUNK_NAME=bulkvs
 BULKVS_SIP_USERNAME=<from BulkVS portal>
 BULKVS_SIP_PASSWORD=<from BulkVS portal>
 BULKVS_FROM_NUMBER=+1XXXXXXXXXX
+ASTERISK_SPOOL_DIR=/data/asterisk-spool        # in-CONTAINER path (recordings bind-mount)
+ASTERISK_CDR_DB_USER=asterisk_cdr              # deploy-render only (cdr_pgsql.conf)
+ASTERISK_CDR_DB_PASSWORD=<generate: openssl rand -hex 24>  # deploy-render only
 ```
 
-The backend reads all of these except `ARI_BIND_ADDR` (that one is only used when
-rendering `http.conf` on the host).
+The backend reads `ASTERISK_SPOOL_DIR` (recordings fetch) but NOT `ARI_BIND_ADDR`,
+`ASTERISK_CDR_DB_USER`, or `ASTERISK_CDR_DB_PASSWORD` — those are only used when rendering
+`http.conf` / `cdr_pgsql.conf` on the host.
+
+## Recordings (Ticket 05) — one pipeline, local move not download
+
+Flow nodes with a `record` modifier drive ARI `record` (WAV). Asterisk writes those WAVs to
+its recording spool on the host; OWEN reuses the EXISTING recordings pipeline
+(recordings table → fetch → transcribe → analyze — the same path a Twilio recording takes),
+so there is exactly one recording system. Because the audio is already local, the "fetch"
+is a file **move**, not an HTTP download.
+
+Bind-mount the host spool dir into the **app + worker** containers (read-only is fine):
+
+```
+host  /var/spool/asterisk/recording   ->   container  /data/asterisk-spool   (ro)
+```
+
+`ASTERISK_SPOOL_DIR` must equal the in-container mount target (`/data/asterisk-spool`).
+The `RecordingFinished` ARI event carries the recording `name` (which the interpreter set to
+`{linkedid}-{tag}-{n}`); OWEN registers a recordings row keyed on that name and enqueues a
+`recording_fetch` that copies `${ASTERISK_SPOOL_DIR}/<name>.wav` into `RECORDINGS_DIR`, then
+the identical transcribe/analyze chain runs. (Asterisk's default recording dir is
+`/var/spool/asterisk/recording`; if yours differs, mount that dir instead.)
+
+## CDR reconcile (Ticket 05) — Asterisk CDR → Postgres
+
+The live ARI-WebSocket consumer can miss a call's terminal event (worker restart mid-call,
+or the entry channel leaving Stasis so its `ChannelDestroyed` never arrives). Asterisk's CDR
+engine records every call regardless, so `cdr_pgsql` writes CDR rows into a `cdr` table in
+**the same Postgres database** OWEN uses, and `app/workers/asterisk_cdr.py` (scheduled every
+`ASTERISK_CDR_POLL_SECONDS`, gated on `ASTERISK_ENABLED`) reads recent rows and projects them
+into the same `calls`/`call_events` projection. It is idempotent: each row is keyed
+`"{linkedid}:{status}"` — the same dedup key the live WS path uses — so re-scans and
+WS-vs-CDR overlap never double-count.
+
+Create the `cdr` table once (Asterisk owns it — there is NO Alembic migration for it) and a
+least-privilege role for Asterisk to write it:
+
+```sql
+CREATE ROLE asterisk_cdr LOGIN PASSWORD '<ASTERISK_CDR_DB_PASSWORD>';
+CREATE TABLE cdr (
+  id          bigserial PRIMARY KEY,
+  start       timestamptz,
+  answer      timestamptz,
+  "end"       timestamptz,
+  clid        text,
+  src         text,
+  dst         text,
+  dcontext    text,
+  channel     text,
+  dstchannel  text,
+  lastapp     text,
+  lastdata    text,
+  duration    integer,
+  billsec     integer,
+  disposition text,
+  amaflags    integer,
+  accountcode text,
+  uniqueid    text,
+  linkedid    text,
+  userfield   text
+);
+GRANT INSERT, SELECT ON cdr TO asterisk_cdr;
+GRANT USAGE, SELECT ON SEQUENCE cdr_id_seq TO asterisk_cdr;
+CREATE INDEX ix_cdr_start ON cdr (start);
+```
+
+`cdr_pgsql` is adaptive: it writes only columns that exist, so `linkedid`/`uniqueid`/
+`answer`/`end` MUST be present (the reconciler reads them). OWEN's `callmon` app role only
+needs `SELECT` on `cdr`.
 
 ## Deploy: render + rsync + targeted reload
 
@@ -55,10 +129,10 @@ rendering `http.conf` on the host).
 2. **Render** the templates from `.env.prod` and **rsync** into `/etc/asterisk/`:
    ```bash
    set -a; . /opt/santiagoproperties/owen-main/.env.prod; set +a
-   for f in pjsip ari http rtp extensions; do
+   for f in pjsip ari http rtp extensions cdr cdr_pgsql; do
      envsubst < asterisk/$f.conf > /tmp/$f.conf
    done
-   rsync -a /tmp/{pjsip,ari,http,rtp,extensions}.conf /etc/asterisk/
+   rsync -a /tmp/{pjsip,ari,http,rtp,extensions,cdr,cdr_pgsql}.conf /etc/asterisk/
    ```
 
 3. **Targeted reload — never restart** (a restart drops in-flight calls):
@@ -66,6 +140,8 @@ rendering `http.conf` on the host).
    asterisk -rx "pjsip reload"
    asterisk -rx "dialplan reload"
    asterisk -rx "module reload res_ari.so res_http_websocket.so"
+   asterisk -rx "module reload cdr_pgsql.so"
+   asterisk -rx "cdr reload"
    ```
 
 ## systemd unit

@@ -65,6 +65,42 @@ _CAUSE_TO_STATUS = {
 # Bound the in-memory dedup set so a very long-lived worker can't grow it without limit.
 _DEDUP_MAX = 50_000
 
+# ARI recording-lifecycle event types the consumer routes to `parse_recording_event`.
+# We only act on the *finished* signal (the WAV is fully written on the host by then);
+# RecordingStarted/RecordingFailed carry no completed audio to hand to the pipeline.
+RECORDING_EVENT_TYPES = frozenset({"RecordingFinished"})
+
+# ARI StoredRecording.state -> recordings-table status string. `done` is the success
+# terminal; anything else is stored as-is so the row reflects what Asterisk reported.
+# Mirrors the "completed" label a Twilio recording lands with.
+_REC_STATE_TO_STATUS = {
+    "done": "completed",
+    "failed": "failed",
+    "canceled": "canceled",
+}
+
+# Asterisk CDR `disposition` -> Twilio-CallStatus vocabulary (same ranks as _CAUSE_TO_STATUS
+# above). The CDR reconciler projects a missed call's terminal status from this. Unlisted /
+# blank dispositions fall back to "failed" (a safe rank-4 terminal). Values are upper-cased
+# before lookup because cdr_pgsql stores them upper-case ("ANSWERED", "NO ANSWER", ...).
+_DISPOSITION_TO_STATUS = {
+    "ANSWERED": "completed",
+    "NO ANSWER": "no-answer",
+    "NOANSWER": "no-answer",
+    "BUSY": "busy",
+    "FAILED": "failed",
+    "CONGESTION": "failed",
+}
+
+
+def recording_linkedid(name: str) -> str:
+    """The call's Linkedid the interpreter prefixed onto a recording name.
+
+    The flow interpreter names every recording `{linkedid}-{tag}-{counter}` (see
+    interpreter._rec_name). Asterisk uniqueids are `<epoch>.<seq>` — no dashes — so the
+    Linkedid is unambiguously the substring before the first '-'."""
+    return str(name or "").split("-", 1)[0]
+
 
 def _channel(event: dict) -> dict:
     ch = event.get("channel")
@@ -158,11 +194,33 @@ class AsteriskAdapter(ProviderAdapter):
             raw=dict(params),
         )
 
-    # Recordings + CDR reconciliation are a separate downstream ticket (05). Asterisk is
-    # not wired to the webhook router, so these are never called on the ingestion path;
-    # present only to satisfy the ProviderAdapter shape.
     def parse_recording_event(self, params: dict) -> NormalizedRecordingEvent:
-        raise NotImplementedError("asterisk recording ingestion is ticket 05")
+        """Normalize an ARI `RecordingFinished` event into the SAME NormalizedRecordingEvent
+        the existing pipeline consumes (services/recordings.ingest_recording_event).
+
+        The recording's `name` is our idempotency key (`provider_recording_sid`), and its
+        `{linkedid}-...` prefix is the `provider_call_sid` every leg collapses under — so the
+        recording attaches to the exact `calls` row the status projection built. There is no
+        HTTP `provider_url`: Asterisk wrote a WAV to a local spool dir (a bind-mount makes it
+        visible to the app container), so the "fetch" is a local file move, not a download —
+        `provider_url` is None and the fetch handler routes on provider name instead."""
+        rec = params.get("recording")
+        rec = rec if isinstance(rec, dict) else {}
+        name = str(rec.get("name") or "")
+        state = str(rec.get("state") or "").lower()
+        duration = rec.get("duration")
+        try:
+            duration = int(duration) if duration is not None else None
+        except (TypeError, ValueError):
+            duration = None
+        return NormalizedRecordingEvent(
+            provider_call_sid=recording_linkedid(name),
+            provider_recording_sid=name,
+            status=_REC_STATE_TO_STATUS.get(state, state or None),
+            duration_seconds=duration,
+            provider_url=None,  # local spool file; fetch is a move, not an HTTP GET
+            raw=dict(params),
+        )
 
     def parse_message_event(self, params: dict) -> NormalizedMessageEvent:
         raise NotImplementedError("asterisk SMS ingestion is a later ticket")
@@ -202,3 +260,80 @@ class AsteriskEventRouter:
             self._seen.clear()  # coarse but safe; dedup is a best-effort noise filter
         self._seen.add(key)
         return evt
+
+    def route_recording(self, event: dict) -> NormalizedRecordingEvent | None:
+        """Return a NormalizedRecordingEvent for a `RecordingFinished` event, else None.
+
+        Kept beside `route` (and equally dependency-free) so the consumer has one pure entry
+        point per event and recording normalization is unit-testable without a WS or DB.
+        Skips events that aren't recording-finished, or that carry no name/linkedid."""
+        if event.get("type") not in RECORDING_EVENT_TYPES:
+            return None
+        rec = self.adapter.parse_recording_event(event)
+        if not rec.provider_recording_sid or not rec.provider_call_sid:
+            return None
+        return rec
+
+
+def cdr_row_to_event(row: dict) -> NormalizedCallEvent | None:
+    """Project one Asterisk CDR row (from cdr_pgsql, read as a dict) into the SAME
+    NormalizedCallEvent the WS consumer produces, so a CDR-reconciled call is
+    indistinguishable in the projection from a live-ingested one.
+
+    Pure + dependency-free (no DB) so it is unit-testable in isolation.
+
+    Two invariants make the CDR reconcile idempotent AND non-double-counting against the
+    live WS path:
+      - ENTRY-LEG ONLY: keep the row whose `uniqueid == linkedid` (the inbound entry leg),
+        exactly the structural rule `is_entry_channel` applies to WS events. Secondary
+        (dialed/agent) legs share the linkedid and are dropped, so a forwarded call is one
+        `calls` row, never two.
+      - SAME DEDUP KEY: `provider_sequence = "{linkedid}:{status}"` — byte-identical to the
+        WS adapter's key — so a CDR terminal event and a WS terminal event of the same
+        status collapse onto ONE `call_events` row (call_events' natural key dedup), and
+        re-running the reconciler never inserts a duplicate.
+    Returns None to skip (no linkedid, or not the entry leg)."""
+    linkedid = str(row.get("linkedid") or "")
+    uniqueid = str(row.get("uniqueid") or "")
+    if not linkedid:
+        return None
+    # Entry-leg only. If uniqueid is absent (some CDR configs omit it) we can't prove this is
+    # a secondary leg, so we keep it rather than silently dropping a real call.
+    if uniqueid and uniqueid != linkedid:
+        return None
+
+    disposition = str(row.get("disposition") or "").strip().upper()
+    status = _DISPOSITION_TO_STATUS.get(disposition, "failed")
+
+    def _int(v):
+        try:
+            return int(v) if v is not None and str(v) != "" else None
+        except (TypeError, ValueError):
+            return None
+
+    def _dt(v):
+        if not v:
+            return None
+        if isinstance(v, datetime):
+            return v if v.tzinfo else v.replace(tzinfo=timezone.utc)
+        try:
+            dt = datetime.fromisoformat(str(v))
+            return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+        except (TypeError, ValueError):
+            return None
+
+    return NormalizedCallEvent(
+        provider_call_sid=linkedid,
+        event_type="cdr",
+        status=status,
+        from_number=(row.get("src") or None),
+        to_number=(row.get("dst") or None),
+        direction="inbound",
+        started_at=_dt(row.get("start")),
+        answered_at=_dt(row.get("answer")),
+        ended_at=_dt(row.get("end")),
+        # billsec is the answered-duration; fall back to total duration.
+        duration_seconds=_int(row.get("billsec")) or _int(row.get("duration")),
+        provider_sequence=f"{linkedid}:{status}",
+        raw=dict(row),
+    )

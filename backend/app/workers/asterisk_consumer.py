@@ -22,7 +22,9 @@ import logging
 from app.core.config import settings
 from app.db import SessionLocal
 from app.providers.asterisk import AsteriskEventRouter, is_entry_channel
+from app.services import queue
 from app.services.ingestion import ingest_status_event
+from app.services.recordings import ingest_recording_event
 
 logger = logging.getLogger("worker.asterisk_consumer")
 
@@ -46,6 +48,25 @@ async def _handle(router: AsteriskEventRouter, raw: str | bytes) -> None:
         return
     if not isinstance(event, dict):
         return
+
+    # Ticket 05: a RecordingFinished routes into the EXISTING recordings pipeline — register
+    # the row (idempotent on the recording SID) and enqueue a fetch (a local spool move for
+    # Asterisk) which chains into transcribe -> analyze, exactly like a Twilio recording.
+    rec = router.route_recording(event)
+    if rec is not None:
+        async with SessionLocal() as db:
+            row = await ingest_recording_event(db, PROVIDER_NAME, rec)
+            if row.storage_path is None:
+                await queue.enqueue(db, "recording_fetch", {
+                    "provider": PROVIDER_NAME,
+                    "recording_id": str(row.id),
+                    "recording_sid": rec.provider_recording_sid,
+                    "provider_url": rec.provider_url,
+                })
+        logger.info("asterisk_consumer: recording %s linkedid=%s status=%s",
+                    rec.provider_recording_sid, rec.provider_call_sid, rec.status)
+        return
+
     evt = router.route(event)
     if evt is None:
         return

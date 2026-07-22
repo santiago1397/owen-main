@@ -63,6 +63,25 @@ def _provider_delete() -> dict:
     return deleters
 
 
+async def _fetch_asterisk_local(rec: Recording) -> None:
+    """Asterisk 'fetch' = a local file move, not an HTTP download. Asterisk wrote the WAV to
+    its spool dir on the HOST, bind-mounted into this container at ASTERISK_SPOOL_DIR, so we
+    just copy it into our own RECORDINGS_DIR (same on-disk shape a Twilio download lands in)
+    and let the identical transcribe/analyze chain take over. Raises if the WAV isn't visible
+    yet so the queue retries (the RecordingFinished event can beat the flush to the mount)."""
+    src = os.path.join(settings.ASTERISK_SPOOL_DIR, f"{rec.provider_recording_sid}.wav")
+    if not os.path.exists(src):
+        raise RuntimeError(f"asterisk recording {rec.provider_recording_sid} not yet on spool mount ({src})")
+    os.makedirs(settings.RECORDINGS_DIR, exist_ok=True)
+    dest = os.path.join(settings.RECORDINGS_DIR, f"{rec.provider_recording_sid}.wav")
+    tmp = f"{dest}.part"
+    shutil.copyfile(src, tmp)
+    os.replace(tmp, dest)  # atomic within RECORDINGS_DIR
+    rec.storage_path = dest
+    rec.status = "completed"
+    rec.downloaded_at = datetime.now(timezone.utc)
+
+
 async def handle_recording_fetch(db: AsyncSession, payload: dict) -> None:
     """Download the provider's recording into our own storage (local disk). Idempotent."""
     recording_id = payload.get("recording_id")
@@ -70,6 +89,17 @@ async def handle_recording_fetch(db: AsyncSession, payload: dict) -> None:
     if rec is None:
         logger.warning("recording_fetch: recording %s not found", recording_id)
         return
+
+    # Asterisk recordings are already local (spool bind-mount) — move, don't download.
+    if payload.get("provider") == "asterisk":
+        if not (rec.storage_path and os.path.exists(rec.storage_path)):
+            await _fetch_asterisk_local(rec)
+            await db.commit()
+            logger.info("recording_fetch: registered asterisk %s", rec.provider_recording_sid)
+        if not rec.transcribed and not payload.get("skip_transcribe"):
+            await queue.enqueue(db, "transcribe", {"recording_id": str(rec.id)})
+        return
+
     if not (rec.storage_path and os.path.exists(rec.storage_path)):
         url = payload.get("provider_url") or rec.provider_url
         if not url:
