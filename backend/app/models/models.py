@@ -112,6 +112,13 @@ class Call(Base):
     number_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("numbers.id"), index=True)
     caller_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("callers.id"), index=True)
     campaign_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("campaigns.id"), index=True)
+    # Flow version the ARI interpreter ran for this call (Ticket 07), pinned once at
+    # StasisStart exactly like campaign_id is pinned at ingest, so downstream projection /
+    # analysis can attribute which graph version handled the call. NULL for calls that ran
+    # no assigned flow (all legacy Twilio/SignalWire calls, and unassigned Asterisk DIDs).
+    flow_version_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("flow_versions.id"), index=True
+    )
 
     direction: Mapped[str | None] = mapped_column(String)
     status: Mapped[str | None] = mapped_column(String)  # projection of highest-rank event seen
