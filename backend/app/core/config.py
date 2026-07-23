@@ -114,6 +114,15 @@ class Settings(BaseSettings):
     # `openai_realtime` runtime is a later ticket (12) and is a registered-but-stubbed engine.
     VOICE_AGENT_ENGINE: str = ""  # "" = per-agent | dummy | openai_realtime | vapi | diy
 
+    # OpenAI Realtime voice-agent runtime (Ticket 12). Only active when an agent's engine (or
+    # the kill-switch above) selects "openai_realtime"; `dummy` stays the offline default. Reuses
+    # OPENAI_API_KEY (declared above for transcription). The per-agent `model` overrides this.
+    OPENAI_REALTIME_MODEL: str = "gpt-4o-realtime-preview"
+    OPENAI_REALTIME_VOICE: str = "alloy"  # default TTS voice when the agent config sets none
+    # WS-reconnect retries before the session gives up and returns the `failed` port (→ the
+    # flow's default_fallback/voicemail). Design decision is exactly ONE retry.
+    VOICE_AGENT_WS_RECONNECTS: int = 1
+
     ANALYSIS_ENGINE: str = "dummy"  # dummy | claude | minimax
     ANTHROPIC_API_KEY: str = ""
     ANALYSIS_MODEL: str = "claude-haiku-4-5-20251001"

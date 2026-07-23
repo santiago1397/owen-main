@@ -126,10 +126,23 @@ def _make_stub(engine_name: str):
     return factory
 
 
-# name -> zero-arg factory. `dummy` is live; the rest are stubbed until Ticket 12.
+def _make_openai_realtime():
+    """Factory for the real openai_realtime engine (Ticket 12). Imported LAZILY so this seam
+    stays import-light (stdlib only) — app.agents.openai_realtime pulls in nothing heavy at
+    module top either, but the lazy import also breaks the session<->openai_realtime cycle."""
+
+    def factory() -> VoiceAgentSession:
+        from app.agents.openai_realtime import OpenAIRealtimeSession
+
+        return OpenAIRealtimeSession()
+
+    return factory
+
+
+# name -> zero-arg factory. `dummy` + `openai_realtime` (Ticket 12) are live; vapi/diy stubbed.
 _ENGINES: dict[str, object] = {
     "dummy": DummyVoiceAgentSession,
-    "openai_realtime": _make_stub("openai_realtime"),
+    "openai_realtime": _make_openai_realtime(),
     "vapi": _make_stub("vapi"),
     "diy": _make_stub("diy"),
 }

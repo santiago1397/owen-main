@@ -49,12 +49,21 @@ def _run_dummy(config):
 
 
 def test_registry_and_stubs():
-    print("registry — dummy is live, openai_realtime/vapi/diy are registered-but-stubbed:")
+    print("registry — dummy + openai_realtime are live; vapi/diy are registered-but-stubbed:")
     dummy = get_voice_agent_session("dummy")
     check("dummy engine name", dummy.name == "dummy")
     res = asyncio.run(dummy.run(build_spec("A1", "v1", {"engine": "dummy"}), CTX))
     check("dummy.run returns an AgentResult", isinstance(res, AgentResult))
-    for name in ("openai_realtime", "vapi", "diy"):
+    # Ticket 12 filled in openai_realtime: it is now LIVE (no longer a NotImplementedError stub).
+    # In the sandbox it can't reach OpenAI/audio, so its never-dead-air contract returns `failed`
+    # rather than raising — the point is that it is a real engine now (see test_openai_realtime_agent).
+    oai = get_voice_agent_session("openai_realtime")
+    check("openai_realtime constructs (live engine)", oai.name == "openai_realtime")
+    oai_res = asyncio.run(oai.run(build_spec("A1", "v1", {"engine": "openai_realtime"}), CTX))
+    check("openai_realtime.run never raises — returns an AgentResult", isinstance(oai_res, AgentResult))
+    check("openai_realtime.run degrades to `failed` when unreachable (no dead air)",
+          oai_res.port == "failed")
+    for name in ("vapi", "diy"):
         eng = get_voice_agent_session(name)
         check(f"{name} constructs (registered)", eng.name == name)
         raised = False
@@ -62,7 +71,7 @@ def test_registry_and_stubs():
             asyncio.run(eng.run(build_spec("A1", "v1", {"engine": name}), CTX))
         except NotImplementedError:
             raised = True
-        check(f"{name}.run raises NotImplementedError (Ticket 12 fills it in)", raised)
+        check(f"{name}.run raises NotImplementedError (registered-but-stubbed)", raised)
     check("unknown engine falls back to dummy (safe/offline)",
           get_voice_agent_session("nope").name == "dummy")
 
