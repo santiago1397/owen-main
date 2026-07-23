@@ -24,6 +24,10 @@ class ThreadSummary:
     last_direction: str | None
     last_at: datetime | None
     message_count: int
+    # Per-number outbound-SMS gate (Ticket 10): whether the thread's DID may send. Duck-typed
+    # off the row (defaults False) so pre-Ticket-10 callers/tests keep working unchanged.
+    sms_enabled: bool = False
+    sms_campaign_id: str | None = None
 
 
 def group_threads(rows) -> list[ThreadSummary]:
@@ -50,6 +54,8 @@ def group_threads(rows) -> list[ThreadSummary]:
                 last_direction=getattr(r, "direction", None),
                 last_at=getattr(r, "received_at", None),
                 message_count=1,
+                sms_enabled=bool(getattr(r, "sms_enabled", False)),
+                sms_campaign_id=getattr(r, "sms_campaign_id", None),
             )
             order.append(key)
         else:

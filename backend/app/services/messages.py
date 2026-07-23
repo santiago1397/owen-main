@@ -7,14 +7,16 @@ durable queue job.
 """
 
 import logging
+import uuid
 from datetime import datetime, timezone
 
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import Message, Number
+from app.models import Message, Number, SmsOptOut
 from app.providers.base import NormalizedMessageEvent
+from app.services import sms
 from app.services.ingestion import _get_or_create_caller, _get_or_create_provider
 
 logger = logging.getLogger("ingestion")
@@ -86,3 +88,78 @@ async def ingest_message_event(
         number.friendly_name if number else None, campaign_id, evt.from_number,
     )
     return row
+
+
+# --- Opt-out maintenance + outbound send (Ticket 10) --------------------------------------
+
+
+async def get_optout_state(db: AsyncSession, number_id, contact: str) -> str | None:
+    """Current opt-out state for a (number_id, contact) pair, or None if no row exists."""
+    row = (
+        await db.execute(
+            select(SmsOptOut).where(
+                SmsOptOut.number_id == number_id, SmsOptOut.contact == contact
+            )
+        )
+    ).scalar_one_or_none()
+    return row.state if row else None
+
+
+async def apply_inbound_keyword(
+    db: AsyncSession, number_id, contact: str, body: str | None
+) -> str | None:
+    """Maintain opt-out state from an inbound message body. Returns the classified keyword
+    ('stop' | 'start' | 'help') or None. STOP/START upsert the row; HELP and non-keywords do
+    NOT change state. No-op when number_id or contact is missing (unattributed inbound)."""
+    keyword = sms.classify_keyword(body)
+    if keyword is None or keyword == "help" or number_id is None or not contact:
+        return keyword
+
+    new_state = sms.next_optout_state(None, keyword)  # 'stop'->opted_out, 'start'->opted_in
+    now = datetime.now(timezone.utc)
+    await db.execute(
+        pg_insert(SmsOptOut)
+        .values(
+            number_id=number_id, contact=contact, state=new_state,
+            last_keyword=keyword, created_at=now, updated_at=now,
+        )
+        .on_conflict_do_update(
+            constraint="uq_optout_number_contact",
+            set_={"state": new_state, "last_keyword": keyword, "updated_at": now},
+        )
+    )
+    await db.commit()
+    logger.info("sms opt-out: number=%s contact=%s -> %s (%s)",
+                number_id, contact, new_state, keyword)
+    return keyword
+
+
+async def enqueue_outbound_message(
+    db: AsyncSession, number: Number, contact: str, body: str, user_id
+) -> Message:
+    """Write an outbound `messages` row (direction='outbound', sent_by_user_id) with a
+    synthesized SID and return it. Does NOT send — the caller enqueues a `message_send` job.
+    Gate + opt-out checks are the caller's responsibility (see api/messages.send)."""
+    now = datetime.now(timezone.utc)
+    caller = await _get_or_create_caller(db, contact, now)
+    sid = f"owenout-{uuid.uuid4().hex}"  # replaced with the BulkVS RefId once actually sent
+    msg = Message(
+        provider_id=number.provider_id,
+        provider_message_sid=sid,
+        number_id=number.id,
+        caller_id=caller.id,
+        campaign_id=number.campaign_id,
+        direction="outbound",
+        from_number=number.phone_number,
+        to_number=contact,
+        body=body,
+        status="queued",
+        num_media=0,
+        sent_by_user_id=user_id,
+    )
+    db.add(msg)
+    await db.commit()
+    await db.refresh(msg)
+    logger.info("enqueue_outbound_message: id=%s number=%s to=%s by=%s",
+                msg.id, number.phone_number, contact, user_id)
+    return msg

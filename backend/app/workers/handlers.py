@@ -33,8 +33,8 @@ from app.models import (
     Recording,
     Transcription,
 )
-from app.providers import ghl_api, ghl_client, signalwire_client, twilio_client
-from app.services import emails, queue
+from app.providers import bulkvs_client, ghl_api, ghl_client, signalwire_client, twilio_client
+from app.services import emails, messages as messages_svc, queue, sms
 
 logger = logging.getLogger("worker.handlers")
 
@@ -292,6 +292,46 @@ async def handle_message_relay_ghl(db: AsyncSession, payload: dict) -> None:
     logger.info("message_relay_ghl: relayed %s to GHL", msg.provider_message_sid)
 
 
+async def handle_message_send(db: AsyncSession, payload: dict) -> None:
+    """Send a queued OUTBOUND message via BulkVS messageSend, then enqueue its GHL relay.
+
+    Idempotent: only a row still at 'queued' is sent (a retry after a successful send finds it
+    at 'sent'+ and no-ops). Re-checks the per-contact opt-out defensively — if the contact
+    opted out between enqueue and drain, the row is marked 'blocked' and never sent. On a
+    successful send the row's provider_message_sid is rewritten to the BulkVS RefId (prefixed)
+    so the message-status webhook can match it. Raises on send failure so the queue retries."""
+    msg = await db.get(Message, uuid.UUID(payload["message_id"]))
+    if msg is None:
+        logger.warning("message_send: message %s not found", payload.get("message_id"))
+        return
+    if (msg.status or "").lower() != "queued":
+        logger.info("message_send: %s not queued (status=%s), skipping", msg.id, msg.status)
+        return
+
+    # Defensive opt-out re-check at drain time (the API already refused an opted-out contact).
+    if msg.number_id and msg.to_number:
+        state = await messages_svc.get_optout_state(db, msg.number_id, msg.to_number)
+        if sms.is_opted_out(state):
+            msg.status = "blocked"
+            await db.commit()
+            logger.info("message_send: %s blocked — contact %s opted out", msg.id, msg.to_number)
+            return
+
+    ref_id = await bulkvs_client.send_message(
+        from_number=msg.from_number, to_number=msg.to_number, body=msg.body or "",
+        media_urls=(msg.media_urls or None),
+    )
+    if ref_id:
+        msg.provider_message_sid = f"bulkvs-{ref_id}"
+    msg.status = "sent"
+    await db.commit()
+    logger.info("message_send: sent %s (ref=%s)", msg.id, ref_id)
+
+    # Outbound relays to GHL too (reuse the inbound-message relay path; payload carries
+    # direction='outbound'). Relayed as its own durable job.
+    await queue.enqueue(db, "message_relay_ghl", {"message_id": str(msg.id)})
+
+
 _MISSED_STATUSES = {"no-answer", "busy", "failed", "canceled"}
 
 
@@ -492,6 +532,7 @@ HANDLERS = {
     "transcribe": handle_transcribe,
     "analyze": handle_analyze,
     "message_relay_ghl": handle_message_relay_ghl,
+    "message_send": handle_message_send,
     "call_relay_ghl": handle_call_relay_ghl,
     "email_relay_ghl": handle_email_relay_ghl,
 }

@@ -78,3 +78,41 @@ async def fetch_tn_records() -> list[BulkvsTn]:
         resp = await client.get(url, auth=auth)
         resp.raise_for_status()
         return parse_tn_records(resp.json())
+
+
+def _extract_ref_id(data) -> str | None:
+    """Pull the BulkVS message reference id out of a /messageSend response. BulkVS returns the
+    ref under one of a few casings depending on the endpoint version — match them all."""
+    if not isinstance(data, dict):
+        return None
+    for k in ("RefId", "RefID", "refId", "MessageRef", "MessageId", "MessageID", "Id"):
+        v = data.get(k)
+        if v:
+            return str(v)
+    return None
+
+
+async def send_message(
+    from_number: str, to_number: str, body: str, media_urls: list[str] | None = None
+) -> str | None:
+    """POST /messageSend to originate an outbound SMS/MMS from a 10DLC-registered DID and
+    return the BulkVS message RefId (the delivery-status webhook keys on it). Raises on non-2xx
+    so the worker retries with backoff.
+
+    ASSUMPTION / UNRUN: BulkVS outbound messaging requires 10DLC brand+campaign registration
+    (a pending HITL step), so this path is GATED (Number.sms_enabled) and has NOT been
+    exercised against the live API. The request shape below follows the BulkVS messageSend
+    docs (From = bare/E.164 DID, To = array of recipients, Message = body); confirm against a
+    live send once 10DLC is approved. HTTP Basic auth reuses the REST creds like /tnRecord."""
+    url = f"{settings.BULKVS_API_BASE.rstrip('/')}/messageSend"
+    auth = (settings.BULKVS_API_USERNAME, settings.BULKVS_API_PASSWORD)
+    payload: dict = {"From": from_number, "To": [to_number], "Message": body}
+    if media_urls:
+        payload["MediaURLs"] = list(media_urls)
+    async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+        resp = await client.post(url, json=payload, auth=auth)
+        resp.raise_for_status()
+        try:
+            return _extract_ref_id(resp.json())
+        except Exception:  # noqa: BLE001 - a 2xx with a non-JSON body still counts as sent
+            return None

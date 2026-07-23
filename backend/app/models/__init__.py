@@ -15,6 +15,7 @@ from app.models.models import (
     Number,
     Provider,
     Recording,
+    SmsOptOut,
     Transcription,
     User,
 )
@@ -36,6 +37,7 @@ __all__ = [
     "Number",
     "Provider",
     "Recording",
+    "SmsOptOut",
     "Transcription",
     "User",
 ]

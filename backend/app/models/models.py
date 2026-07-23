@@ -20,6 +20,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    false,
     func,
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID
@@ -82,6 +83,14 @@ class Number(Base):
     # a flow is assigned. Lifecycle (available / assigned / released) is DERIVED from
     # active + released_at + whether campaign_id/flow_id is set — there is NO status column.
     flow_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("flows.id"))
+
+    # --- Manual outbound SMS gate (Ticket 10, additive) ------------------------------
+    # BulkVS outbound SMS requires 10DLC brand+campaign registration (a manual HITL step).
+    # Sending is REFUSED unless a number is `sms_enabled` AND has an `sms_campaign_id`
+    # (the 10DLC campaign id, entered manually once the carrier approves it). Both stay
+    # unset by default so no number can send until an operator explicitly enables it.
+    sms_enabled: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false())
+    sms_campaign_id: Mapped[str | None] = mapped_column(String)
 
 
 class Caller(Base):
@@ -240,7 +249,7 @@ class Message(Base):
     caller_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("callers.id"), index=True)
     campaign_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("campaigns.id"), index=True)
 
-    direction: Mapped[str | None] = mapped_column(String)  # 'inbound'
+    direction: Mapped[str | None] = mapped_column(String)  # 'inbound' | 'outbound' (Ticket 10)
     from_number: Mapped[str | None] = mapped_column(String)
     to_number: Mapped[str | None] = mapped_column(String)
     body: Mapped[str | None] = mapped_column(Text)
@@ -248,10 +257,38 @@ class Message(Base):
     num_media: Mapped[int] = mapped_column(Integer, default=0)
     media_urls: Mapped[dict | None] = mapped_column(JSONB)  # list of MMS media URLs
 
+    # Manual outbound audit (Ticket 10): the operator who sent an outbound reply. NULL for all
+    # inbound rows (which carry no operator).
+    sent_by_user_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"), index=True)
+
     relayed_to_ghl: Mapped[bool] = mapped_column(Boolean, default=False)  # relay-once guard
     relayed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     raw_payload: Mapped[dict | None] = mapped_column(JSONB)
     received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class SmsOptOut(Base):
+    """App-level SMS opt-out state per (number_id, contact) — Ticket 10.
+
+    STOP/START/HELP keywords on the INBOUND path maintain a row here; an outbound send to an
+    `opted_out` contact is BLOCKED. Absence of a row means the contact never sent a control
+    keyword and is allowed. State is the single source of truth for the send gate — HELP does
+    not change state. `contact` is the external party's E.164 number (NOT our DID)."""
+
+    __tablename__ = "sms_opt_outs"
+    __table_args__ = (
+        UniqueConstraint("number_id", "contact", name="uq_optout_number_contact"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_uuid)
+    number_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("numbers.id"), index=True)
+    contact: Mapped[str] = mapped_column(String)  # external party's E.164 number
+    state: Mapped[str] = mapped_column(String)  # 'opted_out' | 'opted_in'
+    last_keyword: Mapped[str | None] = mapped_column(String)  # 'stop' | 'start' (audit)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
 
 
 class InboundEmail(Base):

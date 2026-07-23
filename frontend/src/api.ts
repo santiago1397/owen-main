@@ -118,6 +118,14 @@ export const api = {
   messageThreads: (params: Record<string, any> = {}) => request(`/api/messages/threads${qs(params)}`),
   messageThread: (params: { number_id?: string; caller_id?: string }) =>
     request(`/api/messages/thread${qs(params)}`),
+  // Manual outbound reply (Ticket 10). Gated server-side on the number's 10DLC status + the
+  // contact's opt-out; refused with 409 otherwise.
+  sendMessage: (body: { number_id: string; contact: string; body: string }) =>
+    request("/api/messages/send", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }),
 
   // --- Operator WebRTC softphone (Ticket 13) ---
   // Mint short-lived SIP + TURN creds for this operator's browser softphone (app-login gate).

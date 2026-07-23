@@ -9,14 +9,17 @@ table, no stored read-state. Additive alongside the existing /api/calls surface.
 import uuid
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import current_user
 from app.db import get_db
 from app.models import Caller, Campaign, Message, Number, Provider, User
+from app.services import queue, sms
 from app.services.message_threads import group_threads
+from app.services.messages import enqueue_outbound_message, get_optout_state
 
 router = APIRouter(prefix="/api/messages", tags=["messages"])
 
@@ -43,6 +46,8 @@ def _msg_columns():
         Caller.phone_number.label("caller_number"),
         Number.phone_number.label("number_phone"),
         Number.friendly_name.label("number_label"),
+        Number.sms_enabled.label("sms_enabled"),
+        Number.sms_campaign_id.label("sms_campaign_id"),
         Campaign.name.label("campaign_name"),
     )
 
@@ -86,6 +91,9 @@ async def list_threads(
             "last_direction": t.last_direction,
             "last_at": t.last_at,
             "message_count": t.message_count,
+            "sms_enabled": t.sms_enabled,
+            # Why the composer is disabled (None when the number may send) — Ticket 10.
+            "sms_disabled_reason": sms.outbound_block_reason(t.sms_enabled, t.sms_campaign_id),
         }
         for t in threads
     ]
@@ -127,6 +135,47 @@ async def get_thread(
     ]
 
 
+class SendBody(BaseModel):
+    number_id: uuid.UUID
+    contact: str  # external party's E.164 number (the thread's caller)
+    body: str
+
+
+@router.post("/send")
+async def send_message(
+    payload: SendBody,
+    user: User = Depends(current_user),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Operator replies to a thread from a 10DLC-enabled BulkVS DID (Ticket 10). Writes an
+    outbound `messages` row (direction='outbound', sent_by_user_id) and enqueues a
+    `message_send` job. REFUSES (409) when the number isn't sms_enabled / has no campaign, or
+    the contact has opted out. The actual BulkVS send + GHL relay happen in the worker."""
+    body = (payload.body or "").strip()
+    if not body:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "message body is required")
+
+    number = await db.get(Number, payload.number_id)
+    if number is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "number not found")
+
+    # Per-number 10DLC gate.
+    reason = sms.outbound_block_reason(number.sms_enabled, number.sms_campaign_id)
+    if reason:
+        raise HTTPException(status.HTTP_409_CONFLICT, reason)
+
+    # Per-contact opt-out.
+    state = await get_optout_state(db, number.id, payload.contact)
+    if sms.is_opted_out(state):
+        raise HTTPException(
+            status.HTTP_409_CONFLICT, "recipient has opted out of SMS from this number"
+        )
+
+    msg = await enqueue_outbound_message(db, number, payload.contact, body, user.id)
+    await queue.enqueue(db, "message_send", {"message_id": str(msg.id)})
+    return {"id": str(msg.id), "status": msg.status, "direction": msg.direction}
+
+
 class _Row:
     """Adapt a SQLAlchemy mappings() row to the attribute access group_threads expects."""
 
@@ -141,3 +190,5 @@ class _Row:
         self.number_label = m["number_label"]
         self.campaign_name = m["campaign_name"]
         self.provider = m["provider"]
+        self.sms_enabled = m["sms_enabled"]
+        self.sms_campaign_id = m["sms_campaign_id"]

@@ -1,10 +1,10 @@
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
-import { api } from "../api";
+import { api, ApiError } from "../api";
 
 // Two-pane SMS inbox (Ticket 09): threads (grouped by number+caller) on the left, the
-// selected conversation on the right. Polls every 5s (no websocket). Inbound-only for now —
-// the composer is present but DISABLED; per-number outbound send arrives in Ticket 10.
+// selected conversation on the right. Polls every 5s (no websocket). The composer is ENABLED
+// for sms_enabled numbers (Ticket 10); otherwise it stays disabled with a per-number reason.
 const POLL_MS = 5000;
 
 type Thread = {
@@ -19,6 +19,8 @@ type Thread = {
   last_direction: string | null;
   last_at: string | null;
   message_count: number;
+  sms_enabled: boolean;
+  sms_disabled_reason: string | null;
 };
 
 type Msg = {
@@ -39,11 +41,33 @@ function Conversation({ thread }: { thread: Thread }) {
     number_id: thread.number_id ?? undefined,
     caller_id: thread.caller_id ?? undefined,
   };
+  const queryClient = useQueryClient();
+  const [draft, setDraft] = useState("");
   const { data: messages } = useQuery<Msg[]>({
     queryKey: ["messageThread", threadKey(thread)],
     queryFn: () => api.messageThread(params),
     refetchInterval: POLL_MS,
   });
+
+  const canSend = thread.sms_enabled && !!thread.number_id && !!thread.caller_number;
+  const send = useMutation({
+    mutationFn: () =>
+      api.sendMessage({
+        number_id: thread.number_id as string,
+        contact: thread.caller_number as string,
+        body: draft.trim(),
+      }),
+    onSuccess: () => {
+      setDraft("");
+      queryClient.invalidateQueries({ queryKey: ["messageThread", threadKey(thread)] });
+      queryClient.invalidateQueries({ queryKey: ["messageThreads"] });
+    },
+  });
+  const sendError =
+    send.error instanceof ApiError ? send.error.message : send.error ? String(send.error) : null;
+  const submit = () => {
+    if (canSend && draft.trim() && !send.isPending) send.mutate();
+  };
 
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%" }}>
@@ -93,11 +117,31 @@ function Conversation({ thread }: { thread: Thread }) {
         <div style={{ display: "flex", gap: 8 }}>
           <input
             style={{ flex: 1 }}
-            placeholder="Sending is enabled per-number in a later release…"
-            disabled
+            placeholder={canSend ? "Type a reply…" : (thread.sms_disabled_reason || "Sending is disabled for this number.")}
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && !e.shiftKey) {
+                e.preventDefault();
+                submit();
+              }
+            }}
+            disabled={!canSend || send.isPending}
           />
-          <button disabled title="Outbound send arrives in a later ticket">Send</button>
+          <button
+            onClick={submit}
+            disabled={!canSend || !draft.trim() || send.isPending}
+            title={canSend ? "Send SMS" : (thread.sms_disabled_reason || "Sending disabled")}
+          >
+            {send.isPending ? "Sending…" : "Send"}
+          </button>
         </div>
+        {!canSend && thread.sms_disabled_reason && (
+          <div className="muted" style={{ fontSize: 11, marginTop: 4 }}>{thread.sms_disabled_reason}</div>
+        )}
+        {sendError && (
+          <div style={{ fontSize: 11, marginTop: 4, color: "var(--danger, #e06c75)" }}>{sendError}</div>
+        )}
       </div>
     </div>
   );
