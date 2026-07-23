@@ -20,10 +20,11 @@ DESIGN (mirrors app/flows/validator.py — dependency-light, unit-testable in is
   voicemail) so a call never hits dead air. If `default_fallback` is itself missing, the
   interpreter hangs up cleanly rather than leaving dead air.
 
-SCOPE: `ai_agent` runtime, operator-target dialing, and the recordings pipeline are LATER
-tickets. Here `ai_agent` is a stub that routes to its `default` port (falling through to the
-fallback), `dial` supports a NUMBER target only, and `record` merely drives ARI record —
-the WAV fetch/transcribe reuse is ticket 05's job.
+SCOPE: operator-target dialing and the recordings pipeline are LATER tickets. `ai_agent`
+runs a VoiceAgentSession through the injected `run_agent` seam (Ticket 11) and exits by the
+returned port; with no seam injected it keeps its legacy stub (routes to `default`). `dial`
+supports a NUMBER target only, and `record` merely drives ARI record — the WAV
+fetch/transcribe reuse is ticket 05's job.
 """
 
 from __future__ import annotations
@@ -77,6 +78,12 @@ ClockFn = Callable[[], datetime]
 # on_start() -> awaitable. Runs ONCE at StasisStart before the first node — the seam where
 # runtime pins the flow_version_id onto the call. Injectable so pinning is unit-testable.
 StartFn = Callable[[], Awaitable[None]]
+# run_agent(node) -> awaitable (port, data). The seam for the `ai_agent` node (Ticket 11):
+# runtime resolves+pins the node's agent_version, runs a VoiceAgentSession, and returns the
+# exit PORT ("transfer"|"end_call"|"default"|"failed") + any tool data. The interpreter drives
+# the graph edge for that port — the agent NEVER bridges. Injectable so the node is unit-
+# testable with a fake; when None the node keeps its legacy stub (routes to `default`).
+RunAgentFn = Callable[[dict], Awaitable[tuple[str, dict]]]
 
 
 def _default_now() -> datetime:
@@ -143,6 +150,7 @@ class FlowInterpreter:
     business_tz: str = "America/New_York"
     max_steps: int = 100
     on_start: Optional[StartFn] = None
+    run_agent: Optional[RunAgentFn] = None
     _rec_counter: int = field(default=0, init=False)
 
     async def run(self) -> None:
@@ -294,10 +302,20 @@ class FlowInterpreter:
         return None  # terminal
 
     async def _h_ai_agent(self, node: dict) -> Optional[str]:
-        # ai_agent RUNTIME is a later ticket. Stub: route to 'default' (falls through to the
-        # fallback if 'default' is unwired) so an assigned flow with an agent node never
-        # dead-airs in the meantime.
-        return "default"
+        # Run a VoiceAgentSession via the injected `run_agent` seam (Ticket 11): it resolves +
+        # PINS the node's agent_version, runs the session (dummy engine for now), and returns
+        # the exit PORT + any tool data. The agent NEVER bridges — we just route by the port
+        # ("transfer"|"end_call"|"default"|"failed"), which _resolve wires to the node's `next`
+        # (unwired/`failed` falls through to default_fallback). Any failure -> `failed`.
+        # When no seam is injected the node keeps its legacy stub (route to `default`).
+        if self.run_agent is None:
+            return "default"
+        try:
+            port, _data = await self.run_agent(node)
+        except Exception:  # noqa: BLE001 - an agent failure must take the `failed` port, not dead-air
+            logger.exception("interpreter %s: ai_agent session failed", self.linkedid)
+            return "failed"
+        return port or "failed"
 
     _HANDLERS: ClassVar[dict[str, Callable[["FlowInterpreter", dict], Awaitable[Optional[str]]]]] = {
         "entry": _h_entry,

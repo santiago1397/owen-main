@@ -86,6 +86,22 @@ export const api = {
     }),
   activateFlowVersion: (flowId: string, versionId: string) =>
     request(`/api/flows/${flowId}/versions/${versionId}/activate`, { method: "POST" }),
+  agents: () => request("/api/agents"),
+  agent: (id: string) => request(`/api/agents/${id}`),
+  createAgent: (name: string) =>
+    request("/api/agents", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name }),
+    }),
+  saveAgentVersion: (agentId: string, config: any) =>
+    request(`/api/agents/${agentId}/versions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ config }),
+    }),
+  activateAgentVersion: (agentId: string, versionId: string) =>
+    request(`/api/agents/${agentId}/versions/${versionId}/activate`, { method: "POST" }),
   campaigns: () => request("/api/campaigns"),
   callers: (filters: Record<string, any>) => request(`/api/callers${qs(filters)}`),
   updateCaller: (id: string, body: any) =>

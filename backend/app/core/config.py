@@ -105,6 +105,15 @@ class Settings(BaseSettings):
     STEREO_MAX_NO_SPEECH_PROB: float = 0.6   # drop segment if no_speech_prob above this
     STEREO_MIN_AVG_LOGPROB: float = -1.2     # drop segment if avg_logprob below this
 
+    # Voice AI agents (Ticket 11) — pluggable VoiceAgentSession engines, mirroring the
+    # transcription seam. Per-agent `engine` selects the runtime; this GLOBAL kill-switch,
+    # when set to a non-empty engine name, FORCES every agent onto that engine regardless of
+    # its per-agent setting (e.g. flip to "dummy" to instantly stop all real audio sessions).
+    # Empty (default) = honour each agent's own `engine`. `dummy` is the offline default so
+    # the node + interpreter + version-pinning are testable without real audio; the real
+    # `openai_realtime` runtime is a later ticket (12) and is a registered-but-stubbed engine.
+    VOICE_AGENT_ENGINE: str = ""  # "" = per-agent | dummy | openai_realtime | vapi | diy
+
     ANALYSIS_ENGINE: str = "dummy"  # dummy | claude | minimax
     ANTHROPIC_API_KEY: str = ""
     ANALYSIS_MODEL: str = "claude-haiku-4-5-20251001"

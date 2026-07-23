@@ -23,10 +23,12 @@ from typing import Optional
 from sqlalchemy import select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
+from app.agents.service import build_spec
+from app.agents.session import AgentCallContext, get_session_for_agent
 from app.core.config import settings
 from app.db import SessionLocal
 from app.flows.interpreter import AriControl, FlowInterpreter
-from app.models import Call, CallEvent, Flow, FlowVersion, Number
+from app.models import Agent, AgentVersion, Call, CallEvent, Flow, FlowVersion, Number
 from app.providers.asterisk import linkedid as _linkedid
 from app.services.ingestion import _get_or_create_provider
 
@@ -72,6 +74,33 @@ async def _pin_flow_version(db, provider_id: int, provider_call_sid: str, fv_id:
             Call.flow_version_id.is_(None),
         )
         .values(flow_version_id=fv_id)
+    )
+
+
+async def _resolve_active_agent_version(db, agent_id) -> Optional[AgentVersion]:
+    """The agent's ACTIVE version row, or None if the agent/version is missing (Ticket 11).
+    The `ai_agent` node references an agent by id; the specific version is resolved (and
+    pinned) at node entry — mirroring how a flow's active version is resolved at StasisStart."""
+    agent = (
+        await db.execute(select(Agent).where(Agent.id == agent_id))
+    ).scalar_one_or_none()
+    if agent is None or agent.active_version_id is None:
+        return None
+    return (
+        await db.execute(select(AgentVersion).where(AgentVersion.id == agent.active_version_id))
+    ).scalar_one_or_none()
+
+
+async def _pin_agent_version(db, provider_id: int, provider_call_sid: str, av_id: uuid.UUID) -> None:
+    """Pin-once: set calls.agent_version_id only while still NULL (like the flow_version pin)."""
+    await db.execute(
+        update(Call)
+        .where(
+            Call.provider_id == provider_id,
+            Call.provider_call_sid == provider_call_sid,
+            Call.agent_version_id.is_(None),
+        )
+        .values(agent_version_id=av_id)
     )
 
 
@@ -135,6 +164,32 @@ async def run_flow_for_stasis(event: dict, ari: AriControl) -> None:
             await _emit_node_event(db2, provider_id, lid, event_type, provider_sequence, payload)
             await db2.commit()
 
+    async def run_agent(node: dict) -> tuple[str, dict]:
+        # ai_agent node entry (Ticket 11): resolve + PIN the node's agent version, run a
+        # VoiceAgentSession (dummy by default; kill-switch/per-agent engine), return its exit
+        # PORT + tool data. The agent never bridges — the interpreter routes by the port.
+        # Any failure -> ("failed", {}) so the node takes its `failed` port (then fallback).
+        agent_id = node.get("agent_id") or node.get("agent")
+        if not agent_id:
+            logger.warning("flow runtime: ai_agent node has no agent_id (linkedid=%s)", lid)
+            return ("failed", {})
+        try:
+            async with SessionLocal() as dba:
+                version = await _resolve_active_agent_version(dba, agent_id)
+                if version is None:
+                    logger.info("flow runtime: agent %s has no active version (linkedid=%s)", agent_id, lid)
+                    return ("failed", {})
+                await _pin_agent_version(dba, provider_id, lid, version.id)
+                await dba.commit()
+                spec = build_spec(str(version.agent_id), str(version.id), version.config)
+            session = get_session_for_agent(spec)
+            ctx = AgentCallContext(channel_id=channel_id, linkedid=lid, ari=ari)
+            result = await session.run(spec, ctx)
+            return (result.port, result.data)
+        except Exception:  # noqa: BLE001 - never dead-air; the node takes `failed`/fallback
+            logger.exception("flow runtime: ai_agent run failed (linkedid=%s)", lid)
+            return ("failed", {})
+
     interpreter = FlowInterpreter(
         graph=graph,
         channel_id=channel_id,
@@ -143,6 +198,7 @@ async def run_flow_for_stasis(event: dict, ari: AriControl) -> None:
         linkedid=lid,
         business_tz=settings.BUSINESS_TZ,
         on_start=pin,
+        run_agent=run_agent,
     )
     logger.info("flow runtime: running flow_version=%s on linkedid=%s DID=%s", fv_id, lid, dialed)
     await interpreter.run()

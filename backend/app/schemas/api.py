@@ -149,6 +149,43 @@ class ActivationResult(BaseModel):
     warnings: list[str] = []
 
 
+# --- AI voice agents (Ticket 11) — mirrors the flow versioned-object schemas above ---
+
+class AgentCreate(BaseModel):
+    name: str
+
+
+class AgentVersionSave(BaseModel):
+    # persona/voice/greeting/model/engine/tools{name:bool}/knowledge/guardrails + extras.
+    config: dict
+
+
+class AgentVersionOut(BaseModel):
+    id: uuid.UUID
+    agent_id: uuid.UUID
+    version: int
+    config: dict
+    created_at: datetime | None = None
+
+
+class AgentOut(BaseModel):
+    id: uuid.UUID
+    name: str
+    active_version_id: uuid.UUID | None = None
+    created_at: datetime | None = None
+
+
+class AgentDetail(AgentOut):
+    versions: list[AgentVersionOut] = []
+
+
+class AgentActivationResult(BaseModel):
+    activated: bool
+    version_id: uuid.UUID
+    errors: list[str] = []
+    warnings: list[str] = []
+
+
 class DashboardSummary(BaseModel):
     range_from: datetime
     range_to: datetime
