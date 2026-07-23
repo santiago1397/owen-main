@@ -21,7 +21,7 @@ export default function Login() {
 
   return (
     <div className="loginwrap">
-      <form className="card" style={{ width: 320 }} onSubmit={submit}>
+      <form className="card logincard" onSubmit={submit}>
         <h1 style={{ marginTop: 0 }}>📞 Call Monitor</h1>
         <div style={{ display: "grid", gap: 10 }}>
           <input placeholder="email" value={email} onChange={(e) => setEmail(e.target.value)} />

@@ -1,4 +1,13 @@
-import { NavLink, Navigate, Route, Routes, useNavigate } from "react-router-dom";
+import { useEffect, useState } from "react";
+import {
+  Inbox as InboxIcon,
+  LayoutDashboard,
+  Menu,
+  MessageSquare,
+  MoreHorizontal,
+  Phone,
+} from "lucide-react";
+import { NavLink, Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import { clearToken, getToken } from "./api";
 import IncomingCallModal from "./components/IncomingCallModal";
 import { SoftphoneProvider } from "./lib/softphoneContext";
@@ -18,10 +27,41 @@ import Settings from "./pages/Settings";
 
 function Layout({ children }: { children: any }) {
   const nav = useNavigate();
+  const loc = useLocation();
+  // Below 900px the sidebar is an off-canvas drawer (see styles.css "RESPONSIVE"). On desktop
+  // the .open class is inert — the transform that hides the sidebar only exists inside the
+  // media query — so this state has no effect on the desktop layout.
+  const [navOpen, setNavOpen] = useState(false);
+
+  // Close on navigation, otherwise the drawer stays over the page you just moved to.
+  useEffect(() => setNavOpen(false), [loc.pathname]);
+
+  // Escape closes it, and the page behind must not scroll while it's over the top.
+  useEffect(() => {
+    if (!navOpen) return;
+    const onKey = (e: KeyboardEvent) => e.key === "Escape" && setNavOpen(false);
+    window.addEventListener("keydown", onKey);
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      document.body.style.overflow = prev;
+    };
+  }, [navOpen]);
+
   const link = ({ isActive }: { isActive: boolean }) => "navlink" + (isActive ? " active" : "");
+  const tab = ({ isActive }: { isActive: boolean }) => "tabitem" + (isActive ? " active" : "");
   return (
     <div className="layout">
-      <aside className="sidebar">
+      <header className="topbar">
+        <button className="navtoggle" onClick={() => setNavOpen((v) => !v)}
+                aria-label="Menu" aria-expanded={navOpen}>
+          <Menu size={20} />
+        </button>
+        <h1>📞 Call Monitor</h1>
+      </header>
+      {navOpen && <div className="navscrim" onClick={() => setNavOpen(false)} />}
+      <aside className={"sidebar" + (navOpen ? " open" : "")}>
         <h1>📞 Call Monitor</h1>
 
         <div className="navsection">Attribution</div>
@@ -44,6 +84,23 @@ function Layout({ children }: { children: any }) {
         <button onClick={() => { clearToken(); nav("/login"); }}>Log out</button>
       </aside>
       <main className="main">{children}</main>
+
+      {/* Bottom tab bar: the four routes this app is actually opened for, within thumb reach.
+          Hidden above 560px, where the sidebar (or the drawer) is already the nav. The other
+          seven routes stay in the drawer, which "More" opens — see docs/RESPONSIVE_SPEC.md §5. */}
+      <nav className="tabbar" aria-label="Primary">
+        <NavLink to="/" end className={tab}><LayoutDashboard size={20} /><span>Dashboard</span></NavLink>
+        <NavLink to="/calls" className={tab}><Phone size={20} /><span>Calls</span></NavLink>
+        <NavLink to="/inbox" className={tab}><InboxIcon size={20} /><span>Inbox</span></NavLink>
+        <NavLink to="/messages" className={tab}><MessageSquare size={20} /><span>Messages</span></NavLink>
+        <button
+          className={"tabitem" + (navOpen ? " active" : "")}
+          onClick={() => setNavOpen((v) => !v)}
+          aria-expanded={navOpen}
+        >
+          <MoreHorizontal size={20} /><span>More</span>
+        </button>
+      </nav>
     </div>
   );
 }

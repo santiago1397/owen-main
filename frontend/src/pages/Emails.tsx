@@ -181,7 +181,7 @@ export default function Emails() {
       </div>
 
       <div className="card">
-        <table>
+        <div className="tablewrap"><table>
           <thead>
             <tr><th>Received</th><th>From</th><th>Subject</th><th>Job ID</th><th>Parse</th><th>Relay</th></tr>
           </thead>
@@ -204,7 +204,7 @@ export default function Emails() {
               </td></tr>
             )}
           </tbody>
-        </table>
+        </table></div>
         <div className="toolbar" style={{ marginTop: 12 }}>
           <span className="muted">{data?.total ?? 0} emails</span>
           <div style={{ flex: 1 }} />

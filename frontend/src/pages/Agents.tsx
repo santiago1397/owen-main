@@ -154,7 +154,7 @@ function AgentEditor({ agentId, onClose }: { agentId: string; onClose: () => voi
         </button>
       </div>
 
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginTop: 12 }}>
+      <div className="formgrid" style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginTop: 12 }}>
         <label>Persona
           <textarea rows={3} value={config.persona} onChange={(e) => set("persona", e.target.value)}
             placeholder="How the agent behaves / who it is" style={{ width: "100%" }} />
@@ -193,7 +193,7 @@ function AgentEditor({ agentId, onClose }: { agentId: string; onClose: () => voi
       </div>
 
       <div className="navsection" style={{ marginTop: 16 }}>Guardrails</div>
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12 }}>
+      <div className="formgrid" style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12 }}>
         <label>Max call seconds
           <input type="number" value={config.guardrails?.max_call_seconds ?? ""}
             onChange={(e) => setGuard("max_call_seconds", Number(e.target.value))} style={{ width: "100%" }} />

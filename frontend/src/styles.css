@@ -7,7 +7,10 @@
 body { margin: 0; background: var(--bg); color: var(--text);
   font: 14px/1.5 system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
 a { color: var(--accent); text-decoration: none; }
-.layout { display: flex; min-height: 100vh; }
+/* dvh (not vh) throughout: on iOS Safari 100vh counts the URL bar, so content lands below the
+   fold. The vh line stays first as a fallback for browsers without dvh. On desktop the two are
+   identical, so this is a no-op there. */
+.layout { display: flex; min-height: 100vh; min-height: 100dvh; }
 .sidebar { width: 210px; background: var(--panel); border-right: 1px solid var(--border);
   padding: 18px 12px; display: flex; flex-direction: column; gap: 4px; }
 .sidebar h1 { font-size: 15px; margin: 4px 8px 16px; }
@@ -43,12 +46,12 @@ button.primary { background: var(--accent); border-color: var(--accent); color: 
 .badge.new { background: rgba(55,214,122,.15); color: var(--good); border-color: var(--good); }
 .badge.prov { background: var(--panel2); color: var(--muted); }
 .badge.job { background: rgba(55,214,122,.18); color: var(--good); border-color: var(--good); font-weight: 600; }
-.drawer { position: fixed; top: 0; right: 0; width: 460px; max-width: 92vw; height: 100vh;
+.drawer { position: fixed; top: 0; right: 0; width: 460px; max-width: 92vw; height: 100vh; height: 100dvh;
   background: var(--panel); border-left: 1px solid var(--border); padding: 20px; overflow: auto; z-index: 20; }
 .overlay { position: fixed; inset: 0; background: rgba(0,0,0,.5); z-index: 10; }
 .muted { color: var(--muted); }
 .toolbar { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 14px; align-items: center; }
-.loginwrap { display: grid; place-items: center; min-height: 100vh; }
+.loginwrap { display: grid; place-items: center; min-height: 100vh; min-height: 100dvh; padding: 16px; }
 .timeline li { margin-bottom: 4px; }
 .kv { display: grid; grid-template-columns: 120px 1fr; gap: 6px 12px; margin: 10px 0; }
 .kv .muted { align-self: center; }
@@ -61,8 +64,10 @@ code.mono { background: var(--panel2); padding: 2px 6px; border-radius: 6px; fon
   padding: 8px 10px; margin-bottom: 8px; cursor: grab; }
 .palettenode:hover { border-color: var(--accent); }
 .palettehint { display: block; font-size: 11px; margin-top: 2px; }
-.flowcanvas { flex: 1; min-width: 0; height: calc(100vh - 210px); min-height: 420px; padding: 0; overflow: hidden; }
-.flowside { width: 300px; min-width: 300px; padding: 14px; overflow-y: auto; max-height: calc(100vh - 210px); }
+.flowcanvas { flex: 1; min-width: 0; height: calc(100vh - 210px); height: calc(100dvh - 210px);
+  min-height: 420px; padding: 0; overflow: hidden; }
+.flowside { width: 300px; min-width: 300px; padding: 14px; overflow-y: auto;
+  max-height: calc(100vh - 210px); max-height: calc(100dvh - 210px); }
 .ro-banner { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; padding: 10px 14px;
   border-color: var(--warn); }
 .flownode { background: var(--panel2); border: 1px solid var(--border); border-radius: 10px;
@@ -113,7 +118,8 @@ code.mono { background: var(--panel2); padding: 2px 6px; border-radius: 6px; fon
 /* ---- Quo-style Inbox (/inbox) — self-contained dark look for this page only ---- */
 .quo { --q-bg: #0b0b0e; --q-panel: #111114; --q-panel2: #1a1a20; --q-border: #232329;
   --q-text: #ececf1; --q-muted: #8b8b95; --q-blue: #2f6cf6; --q-bubble: #232329;
-  display: flex; height: calc(100vh - 48px); margin: -24px -28px; background: var(--q-bg);
+  display: flex; height: calc(100vh - 48px); height: calc(100dvh - 48px);
+  margin: -24px -28px; background: var(--q-bg);
   color: var(--q-text); overflow: hidden; }
 .quo * { box-sizing: border-box; }
 .quo input, .quo select, .quo textarea, .quo button { background: var(--q-panel2);
@@ -194,3 +200,269 @@ code.mono { background: var(--panel2); padding: 2px 6px; border-radius: 6px; fon
 .quo-callrow { display: flex; align-items: center; gap: 10px; padding: 10px 14px;
   border-bottom: 1px solid var(--q-border); font-size: 13px; }
 .quo-callrow:hover { background: var(--q-panel2); }
+
+/* =======================================================================
+   RESPONSIVE — iPhone support. See docs/RESPONSIVE_SPEC.md.
+
+   Contract: every rule below lives inside a max-width query, so above
+   900px the app renders EXACTLY as it did before this work. If you add
+   something here, keep it inside a query.
+
+   Breakpoints: 900px = structure (drawer, single-pane, table scroll),
+                560px = phone density (single-column grids, card rows).
+   ======================================================================= */
+
+/* Mobile-only chrome: inert on desktop. */
+.topbar { display: none; }
+.navscrim { display: none; }
+.tabbar { display: none; }
+/* Mobile-only Inbox/Messages controls. Declared BEFORE the media queries so the show-rules
+   inside them win on source order — putting this after would silently kill the back button. */
+.quo-back, .quo-contacttoggle, .quo-sideclose, .msgback { display: none; }
+/* FlowEditor's mobile view-only banner: hidden on desktop, where editing is available. */
+.flowmobilenote { display: none; }
+/* Login card keeps its 320px on desktop but may now shrink below it. */
+.logincard { width: 320px; max-width: 100%; }
+
+@media (max-width: 900px) {
+  /* ---- shell: the fixed 210px sidebar becomes an off-canvas drawer ---- */
+  .layout { flex-direction: column; }
+
+  .topbar {
+    display: flex; align-items: center; gap: 10px;
+    position: sticky; top: 0; z-index: 30;
+    background: var(--panel); border-bottom: 1px solid var(--border);
+    padding: 8px 12px;
+    /* keep clear of the notch / Dynamic Island */
+    padding-top: calc(8px + env(safe-area-inset-top));
+    padding-left: calc(12px + env(safe-area-inset-left));
+    padding-right: calc(12px + env(safe-area-inset-right));
+  }
+  .topbar h1 { font-size: 15px; margin: 0; font-weight: 700; }
+  .navtoggle {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 44px; height: 44px; min-height: 44px; padding: 0; font-size: 17px; line-height: 1;
+  }
+
+  .sidebar {
+    position: fixed; top: 0; bottom: 0; left: 0; z-index: 50;
+    width: 264px; max-width: 82vw; overflow-y: auto;
+    padding-top: calc(18px + env(safe-area-inset-top));
+    padding-bottom: calc(18px + env(safe-area-inset-bottom));
+    padding-left: calc(12px + env(safe-area-inset-left));
+    transform: translateX(-100%);
+    transition: transform .22s ease;
+  }
+  .sidebar.open { transform: none; }
+  @media (prefers-reduced-motion: reduce) { .sidebar { transition: none; } }
+
+  .navscrim { display: block; position: fixed; inset: 0; background: rgba(0,0,0,.5); z-index: 40; }
+
+  .main {
+    padding: 16px 14px;
+    padding-left: calc(14px + env(safe-area-inset-left));
+    padding-right: calc(14px + env(safe-area-inset-right));
+    padding-bottom: calc(16px + env(safe-area-inset-bottom));
+  }
+
+  /* ---- iOS: anything under 16px makes Safari zoom the page on field focus ---- */
+  input, select, textarea, button { font-size: 16px; }
+  .quo input, .quo select, .quo textarea, .quo button { font-size: 16px; }
+
+  /* iOS Safari draws its own light chrome for <select> and ignores our dark background —
+     the control comes out white on a dark page. appearance:none opts out, which also removes
+     the native arrow, so we draw one back in. Desktop already renders these correctly, which
+     is why this is scoped to the mobile query. */
+  select {
+    -webkit-appearance: none; appearance: none;
+    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%239aa4b2' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><path d='M6 9l6 6 6-6'/></svg>");
+    background-repeat: no-repeat; background-position: right 10px center; background-size: 14px;
+    padding-right: 34px;
+  }
+  /* Same treatment inside the Inbox, which has its own colour scope. */
+  .quo select { background-position: right 10px center; }
+  /* Date/time inputs get the same native-chrome treatment on iOS. */
+  input[type="date"], input[type="time"] { -webkit-appearance: none; appearance: none; }
+
+  /* ---- 44px minimum tap targets (Apple HIG) ---- */
+  button { min-height: 44px; padding: 10px 14px; }
+  .navlink { min-height: 44px; display: flex; align-items: center; }
+  .tab { min-height: 44px; }
+  .quo-iconbtn { min-width: 44px; min-height: 44px; }
+  /* 44px, not the 38px this started at: the Inbox filter pills were the only interactive
+     control left under the HIG minimum once everything else was raised. */
+  .quo-pill { min-height: 44px; padding: 10px 14px; font-size: 13px; }
+  .hoursrange button, .hoursadd { min-height: 38px; }
+
+  /* ---- wide tables scroll inside their own box, never the whole page ---- */
+  .tablewrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  .tablewrap table { min-width: 620px; }
+
+  /* Long unbroken strings (phone numbers, SIDs, URLs) must not widen the page. */
+  .main { overflow-x: hidden; }
+
+  /* ---- Inbox: three panes become one screen at a time ----
+     list  ->  conversation  ->  (contact as a slide-over)
+     Selection is in the URL, so Back / iOS edge-swipe move between these. */
+  .quo { margin: -16px -14px; height: calc(100dvh - 61px); }
+  .quo-list { width: 100%; min-width: 0; border-right: none; }
+  .quo.has-active .quo-list { display: none; }
+  .quo:not(.has-active) .quo-convo { display: none; }
+  .quo-convo { width: 100%; min-width: 0; }
+
+  /* Contact rail slides over the conversation instead of sitting beside it. */
+  .quo-side {
+    position: fixed; top: 0; right: 0; bottom: 0; z-index: 60;
+    width: 320px; max-width: 88vw; border-left: 1px solid var(--q-border);
+    transform: translateX(100%); transition: transform .22s ease;
+    padding-top: calc(20px + env(safe-area-inset-top));
+    padding-bottom: calc(20px + env(safe-area-inset-bottom));
+  }
+  .quo-side.open { transform: none; }
+  .quo-sidescrim { position: fixed; inset: 0; background: rgba(0,0,0,.5); z-index: 55; }
+  .quo-sideclose { display: inline-flex; position: absolute; top: 8px; right: 8px; }
+  @media (prefers-reduced-motion: reduce) { .quo-side { transition: none; } }
+
+  /* Header: keep it one row. The name and the "· via <did>" caption both wrapped, turning the
+     header into a three-line block that ate the top of the conversation. */
+  .quo-chead { gap: 6px; padding: 8px 10px; }
+  .quo-chead > div > div { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+  /* Composer must clear the home indicator. */
+  .quo-composer { padding-bottom: calc(14px + env(safe-area-inset-bottom)); }
+  /* Bubbles can use more of a narrow screen than the desktop 68%. */
+  .quo-msgrow { max-width: 86%; }
+
+  /* ---- Messages: same single-pane switch, simpler layout ---- */
+  .msgsplit { height: calc(100dvh - 200px) !important; }
+  .msglist { width: 100% !important; border-right: none !important; }
+  .msgsplit.has-active .msglist { display: none; }
+  .msgsplit:not(.has-active) .msgconvo { display: none; }
+  .msgback { display: inline-block; margin-bottom: 10px; }
+  .quo-back, .quo-contacttoggle { display: inline-flex; }
+
+  /* ---- FlowEditor: view-only canvas (docs/RESPONSIVE_SPEC.md §8) ----
+     The 190px palette and 300px node panel can't coexist with a canvas on a 375px screen, and
+     a node graph isn't thumb-editable. The canvas keeps xyflow's touch pan/zoom so you can
+     still answer "why did this call route that way?" from a phone. */
+  .flowpalette, .flowside, .floweditonly { display: none !important; }
+  .flowmobilenote { display: flex; }
+  .flowgrid { display: block; }
+  .flowcanvas {
+    width: 100%; height: calc(100dvh - 260px); min-height: 320px;
+  }
+}
+
+@media (max-width: 560px) {
+  /* Total height the bottom tab bar occupies, home indicator included. Everything that sizes
+     itself against the viewport (Inbox, Messages, the flow canvas) subtracts this, so the tab
+     bar covers nothing. Declared as a var because four separate rules need the same number. */
+  :root { --tabbar-h: calc(54px + env(safe-area-inset-bottom)); }
+
+  /* ---- iOS-style bottom tab bar (docs/RESPONSIVE_SPEC.md §5) ----
+     Rejected an icon-only rail for all 11 routes: at 390px they'd be unlabelled guesses. These
+     are the four routes the app is opened for; "More" opens the drawer holding the other seven. */
+  .tabbar {
+    display: flex; position: fixed; left: 0; right: 0; bottom: 0;
+    /* Under the drawer (50) and its scrim (40), so opening the drawer covers the tabs. */
+    z-index: 35;
+    background: var(--panel); border-top: 1px solid var(--border);
+    padding-bottom: env(safe-area-inset-bottom);
+    padding-left: env(safe-area-inset-left);
+    padding-right: env(safe-area-inset-right);
+  }
+  .tabitem {
+    flex: 1 1 0; min-width: 0;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 2px; height: 54px;
+    /* These are <button>/<a>, so the mobile button rules above have to be undone explicitly. */
+    min-height: 0; padding: 0; border: none; border-radius: 0; background: none;
+    color: var(--muted); font-size: 10px; font-weight: 600; letter-spacing: .01em;
+    text-decoration: none; -webkit-tap-highlight-color: transparent;
+  }
+  .tabitem span { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .tabitem.active { color: var(--accent); }
+  .tabitem:hover { background: none; }
+
+  /* Viewport-sized panes shrink by the same amount rather than scrolling under the bar. */
+  /* margin-bottom:0 (not the -16px inherited from the 900px rule) so the Inbox ends at the tab
+     bar instead of running under it. The side margins re-match .main's tighter 12px here. */
+  .quo { margin: -14px -12px 0; height: calc(100dvh - 61px - var(--tabbar-h)); }
+  .msgsplit { height: calc(100dvh - 200px - var(--tabbar-h)) !important; }
+  .flowcanvas { height: calc(100dvh - 260px - var(--tabbar-h)); }
+
+  .main { padding: 14px 12px;
+    padding-left: calc(12px + env(safe-area-inset-left));
+    padding-right: calc(12px + env(safe-area-inset-right));
+    /* Reserve the strip so the last row of every page stays reachable above the tabs.
+       Must come after the shorthand above, which would otherwise reset it to 14px. */
+    padding-bottom: calc(14px + var(--tabbar-h)); }
+  .toolbar { gap: 6px; }
+  /* kv pairs stack rather than squeezing the value into ~200px */
+  .kv { grid-template-columns: 1fr; gap: 2px 0; }
+  .kv .muted { margin-top: 6px; }
+
+  /* ---- comms tables become stacked cards (Calls, Callers) ----
+     Header row hides and every cell prints its own data-label, so one piece of markup serves
+     both the desktop table and the phone card. Config tables keep the scroll wrapper instead. */
+  /* Must out-specify `.tablewrap table { min-width: 620px }` from the 900px block (0,1,1),
+     otherwise the card layout is still forced to 620px and overflows the screen. */
+  .tablewrap:has(.cardtable) { overflow-x: visible; }
+  .tablewrap .cardtable { min-width: 0; width: 100%; }
+  .cardtable thead { display: none; }
+  .cardtable, .cardtable tbody, .cardtable tr, .cardtable td { display: block; width: 100%; }
+  .cardtable tr {
+    display: flex; flex-direction: column; gap: 2px;
+    border: 1px solid var(--border); border-radius: 12px;
+    background: var(--panel2); padding: 10px 12px; margin-bottom: 10px;
+  }
+  /* The label is absolutely positioned rather than a flex sibling, so the value keeps the full
+     remaining width and can wrap — including nested elements like the number's caption line.
+     A fixed-width flex label overflowed the card on long values. */
+  .cardtable td {
+    border: none; position: relative;
+    padding: 2px 0 2px 96px; min-height: 20px;
+    overflow-wrap: anywhere;
+  }
+  .cardtable td::before {
+    content: attr(data-label); position: absolute; left: 0; top: 4px; width: 88px;
+    color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .04em;
+  }
+  /* Headline: who called, then when. Both drop their labels — they're self-evident. */
+  .cardtable td[data-label="Caller"], .cardtable td[data-label="Number"]:first-child {
+    order: -2; font-size: 16px; font-weight: 600;
+  }
+  .cardtable td[data-label="When"] { order: -1; color: var(--muted); font-size: 12px; }
+  .cardtable td[data-label="Caller"],
+  .cardtable td[data-label="Number"]:first-child,
+  .cardtable td[data-label="When"],
+  .cardtable td[data-label=""] { padding-left: 0; }
+  .cardtable td[data-label="Caller"]::before,
+  .cardtable td[data-label="Number"]:first-child::before,
+  .cardtable td[data-label="When"]::before,
+  .cardtable td[data-label=""]::before { display: none; }
+  /* Row actions sit on their own line at the foot of the card. */
+  .cardtable td[data-label=""] { margin-top: 8px; }
+  .cardtable td[data-label=""] button { width: 100%; }
+  /* Full-width controls read better than ones stranded at a random width. */
+  .cardtable td select { width: 100%; }
+
+  /* ---- form grids: inline 2-up / 3-up templates collapse to one column ---- */
+  .formgrid { grid-template-columns: 1fr !important; }
+
+  /* ---- Settings webhook rows ----
+     The URL and the copy button are inline siblings. At this width the URL wraps to two lines
+     while the button is 44px tall (the tap-target rule), so the second line ran underneath the
+     button. Stack them instead: full-width URL, button below it. */
+  .copyrow { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; }
+  .copyrow .mono { display: block; width: 100%; overflow-wrap: anywhere; }
+
+  /* ---- charts: inline minWidths were wider than the viewport ----
+     min-width:0 alone was not enough, and in fact made things worse: with the 360px floor gone,
+     the flex:2 line chart and the flex:1 donut stopped wrapping and shared a 375px row instead,
+     which clipped the donut and overlapped the date axis labels. Forcing a 100% basis puts each
+     chart on its own line. Both need !important — the components set flex and minWidth inline.
+     Deliberately scoped to .chartcard rather than .row: the stat cards share .row and read
+     perfectly well two-up, so stacking those would only make the page longer. */
+  .chartcard { min-width: 0 !important; flex-basis: 100% !important; }
+}

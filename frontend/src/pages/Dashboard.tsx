@@ -82,7 +82,7 @@ function DashboardBody({ data, hideJunk }: { data: any; hideJunk: boolean }) {
       </div>
 
       <div className="row">
-        <div className="card" style={{ flex: 2, minWidth: 360, height: 260 }}>
+        <div className="card chartcard" style={{ flex: 2, minWidth: 360, height: 260 }}>
           <div className="l">Calls per day (Miami time)</div>
           <ResponsiveContainer width="100%" height="90%">
             <LineChart data={data.daily}>
@@ -95,7 +95,7 @@ function DashboardBody({ data, hideJunk }: { data: any; hideJunk: boolean }) {
           </ResponsiveContainer>
         </div>
 
-        <div className="card" style={{ flex: 1, minWidth: 240, height: 260 }}>
+        <div className="card chartcard" style={{ flex: 1, minWidth: 240, height: 260 }}>
           <div className="l">New vs returning (campaign)</div>
           <ResponsiveContainer width="100%" height="90%">
             <PieChart>
@@ -109,7 +109,7 @@ function DashboardBody({ data, hideJunk }: { data: any; hideJunk: boolean }) {
       </div>
 
       <div className="row" style={{ marginTop: 16 }}>
-        <div className="card" style={{ flex: 1, minWidth: 360, height: 260 }}>
+        <div className="card chartcard" style={{ flex: 1, minWidth: 360, height: 260 }}>
           <div className="l">Call volume by hour (Miami time)</div>
           <ResponsiveContainer width="100%" height="90%">
             <BarChart data={hourData}>
@@ -124,7 +124,7 @@ function DashboardBody({ data, hideJunk }: { data: any; hideJunk: boolean }) {
       </div>
 
       <div className="row" style={{ marginTop: 16 }}>
-        <div className="card" style={{ flex: 1, minWidth: 360, height: 280 }}>
+        <div className="card chartcard" style={{ flex: 1, minWidth: 360, height: 280 }}>
           <div className="l">Calls by campaign</div>
           <ResponsiveContainer width="100%" height="90%">
             <BarChart data={data.by_campaign}>
@@ -137,7 +137,7 @@ function DashboardBody({ data, hideJunk }: { data: any; hideJunk: boolean }) {
           </ResponsiveContainer>
         </div>
 
-        <div className="card" style={{ flex: 1, minWidth: 280 }}>
+        <div className="card chartcard" style={{ flex: 1, minWidth: 280 }}>
           <div className="l" style={{ marginBottom: 8 }}>Top callers</div>
           <table>
             <tbody>

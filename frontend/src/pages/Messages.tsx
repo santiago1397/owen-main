@@ -1,5 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import { api, ApiError } from "../api";
 
 // Two-pane SMS inbox (Ticket 09): threads (grouped by number+caller) on the left, the
@@ -148,7 +149,21 @@ function Conversation({ thread }: { thread: Thread }) {
 }
 
 export default function Messages() {
-  const [selected, setSelected] = useState<string | null>(null);
+  // Selection in the URL (?t=<thread key>) for the same reason as the Inbox: below 900px the
+  // two panes become separate screens, so back navigation has to be real history.
+  const [params, setParams] = useSearchParams();
+  const selected = params.get("t");
+  const setSelected = (key: string | null) => {
+    setParams(
+      (prev) => {
+        const next = new URLSearchParams(prev);
+        if (key) next.set("t", key);
+        else next.delete("t");
+        return next;
+      },
+      { replace: !key }
+    );
+  };
   const { data: threads } = useQuery<Thread[]>({
     queryKey: ["messageThreads"],
     queryFn: () => api.messageThreads(),
@@ -160,8 +175,10 @@ export default function Messages() {
   return (
     <div>
       <h2 style={{ marginTop: 0 }}>Messages</h2>
-      <div className="card" style={{ display: "flex", gap: 0, padding: 0, height: "70vh", overflow: "hidden" }}>
-        <div style={{ width: 300, borderRight: "1px solid var(--border, #2a2a2a)", overflowY: "auto" }}>
+      {/* msgsplit/has-active drive the below-900px single-pane switch — see styles.css. */}
+      <div className={"card msgsplit" + (active ? " has-active" : "")}
+           style={{ display: "flex", gap: 0, padding: 0, height: "70vh", overflow: "hidden" }}>
+        <div className="msglist" style={{ width: 300, borderRight: "1px solid var(--border, #2a2a2a)", overflowY: "auto" }}>
           {(threads || []).map((t) => {
             const key = threadKey(t);
             return (
@@ -194,9 +211,12 @@ export default function Messages() {
             <div className="muted" style={{ padding: 12 }}>No conversations yet.</div>
           )}
         </div>
-        <div style={{ flex: 1, padding: 12, minWidth: 0 }}>
+        <div className="msgconvo" style={{ flex: 1, padding: 12, minWidth: 0 }}>
           {active ? (
-            <Conversation thread={active} />
+            <>
+              <button className="msgback" onClick={() => setSelected(null)}>← Conversations</button>
+              <Conversation thread={active} />
+            </>
           ) : (
             <div className="placeholder" style={{ height: "100%", display: "flex", alignItems: "center", justifyContent: "center" }}>
               <div className="muted">Select a conversation.</div>

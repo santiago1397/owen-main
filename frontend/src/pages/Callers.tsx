@@ -27,33 +27,34 @@ export default function Callers() {
         </select>
       </div>
       <div className="card">
-        <table>
+        {/* data-label drives the below-560px card layout — see styles.css .cardtable. */}
+        <div className="tablewrap"><table className="cardtable">
           <thead>
             <tr><th>Number</th><th>Calls</th><th>First seen</th><th>Last seen</th><th>Spam score</th><th>Label</th><th></th></tr>
           </thead>
           <tbody>
             {(data?.items || []).map((c: any) => (
               <tr key={c.id}>
-                <td>{c.phone_number}</td>
-                <td>{c.total_calls}</td>
-                <td>{c.first_seen_at ? new Date(c.first_seen_at).toLocaleDateString() : "—"}</td>
-                <td>{c.last_seen_at ? new Date(c.last_seen_at).toLocaleDateString() : "—"}</td>
-                <td>{c.spam_score != null ? Number(c.spam_score).toFixed(2) : "—"}</td>
-                <td>
+                <td data-label="Number">{c.phone_number}</td>
+                <td data-label="Calls">{c.total_calls}</td>
+                <td data-label="First seen">{c.first_seen_at ? new Date(c.first_seen_at).toLocaleDateString() : "—"}</td>
+                <td data-label="Last seen">{c.last_seen_at ? new Date(c.last_seen_at).toLocaleDateString() : "—"}</td>
+                <td data-label="Spam score">{c.spam_score != null ? Number(c.spam_score).toFixed(2) : "—"}</td>
+                <td data-label="Label">
                   <select defaultValue={c.label || ""}
                           onChange={(e) => label.mutate({ id: c.id, label: e.target.value || null })}>
                     <option value="">—</option>
                     {["customer", "vendor", "known-spam", "other"].map((l) => <option key={l} value={l}>{l}</option>)}
                   </select>
                 </td>
-                <td>
+                <td data-label="">
                   {/* Ticket 14: outbound call action — prefills the platform dialer + jumps to it. */}
                   <button onClick={() => { requestDial(c.phone_number); navigate("/calls"); }}>Call</button>
                 </td>
               </tr>
             ))}
           </tbody>
-        </table>
+        </table></div>
       </div>
     </div>
   );

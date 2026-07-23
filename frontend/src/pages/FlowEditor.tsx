@@ -311,7 +311,10 @@ function Editor() {
           <span className="badge">draft</span>
         )}
         <div style={{ flex: 1 }} />
-        <label className="muted" style={{ display: "flex", alignItems: "center", gap: 6 }}>
+        {/* floweditonly: editing controls are hidden below 900px, where the builder is
+            view-only (docs/RESPONSIVE_SPEC.md §8). A node graph isn't thumb-editable, and
+            these act on live call routing. */}
+        <label className="muted floweditonly" style={{ display: "flex", alignItems: "center", gap: 6 }}>
           default fallback
           <select
             disabled={readOnly}
@@ -329,17 +332,22 @@ function Editor() {
           </select>
         </label>
         <button
-          className={showVersions ? "primary" : ""}
+          className={"floweditonly" + (showVersions ? " primary" : "")}
           onClick={() => setShowVersions((s) => !s)}
         >
           Versions
         </button>
-        <button disabled={busy || readOnly} onClick={() => saveDraft()}>
+        <button className="floweditonly" disabled={busy || readOnly} onClick={() => saveDraft()}>
           Save draft
         </button>
-        <button className="primary" disabled={busy || readOnly} onClick={activate}>
+        <button className="primary floweditonly" disabled={busy || readOnly} onClick={activate}>
           Activate
         </button>
+      </div>
+
+      {/* Only rendered as a visible banner below 900px. */}
+      <div className="card ro-banner flowmobilenote">
+        <span>Viewing only — open this flow on a larger screen to edit it.</span>
       </div>
 
       {viewing && (
