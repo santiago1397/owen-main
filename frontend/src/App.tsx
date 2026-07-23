@@ -5,6 +5,7 @@ import Callers from "./pages/Callers";
 import Calls from "./pages/Calls";
 import Dashboard from "./pages/Dashboard";
 import Emails from "./pages/Emails";
+import FlowEditor from "./pages/FlowEditor";
 import Flows from "./pages/Flows";
 import Login from "./pages/Login";
 import Messages from "./pages/Messages";
@@ -56,6 +57,7 @@ export default function App() {
       <Route path="/numbers" element={<Protected><Numbers /></Protected>} />
       <Route path="/numbers/:id" element={<Protected><NumberDetail /></Protected>} />
       <Route path="/flows" element={<Protected><Flows /></Protected>} />
+      <Route path="/flows/:id" element={<Protected><FlowEditor /></Protected>} />
       <Route path="/messages" element={<Protected><Messages /></Protected>} />
       <Route path="/agents" element={<Protected><Agents /></Protected>} />
       <Route path="/callers" element={<Protected><Callers /></Protected>} />

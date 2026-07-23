@@ -71,6 +71,21 @@ export const api = {
     }),
   numbers: () => request("/api/numbers"),
   flows: () => request("/api/flows"),
+  flow: (id: string) => request(`/api/flows/${id}`),
+  createFlow: (name: string) =>
+    request("/api/flows", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name }),
+    }),
+  saveFlowVersion: (flowId: string, graph: any) =>
+    request(`/api/flows/${flowId}/versions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ graph }),
+    }),
+  activateFlowVersion: (flowId: string, versionId: string) =>
+    request(`/api/flows/${flowId}/versions/${versionId}/activate`, { method: "POST" }),
   campaigns: () => request("/api/campaigns"),
   callers: (filters: Record<string, any>) => request(`/api/callers${qs(filters)}`),
   updateCaller: (id: string, body: any) =>
