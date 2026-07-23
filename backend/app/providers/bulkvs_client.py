@@ -24,6 +24,10 @@ class BulkvsTn:
 
     phone_number: str          # E.164 (+1XXXXXXXXXX)
     reference_id: str | None   # BulkVS ReferenceID = the label we mirror to friendly_name
+    # Carrier-reported provisioning status, verbatim (e.g. "Active", "SUBMITTED" for a
+    # pending port-in). Only an Active DID is operable — the sync mirrors this into
+    # Number.provider_status and every operation gate refuses non-Active DIDs.
+    status: str | None = None
 
 
 def _to_e164(tn: str) -> str:
@@ -65,7 +69,9 @@ def parse_tn_records(data) -> list[BulkvsTn]:
         if ref is None:
             ref = rec.get("Reference") or rec.get("referenceId")
         ref = (str(ref).strip() or None) if ref is not None else None
-        out.append(BulkvsTn(phone_number=_to_e164(str(tn)), reference_id=ref))
+        st = rec.get("Status") or rec.get("status")
+        st = (str(st).strip() or None) if st is not None else None
+        out.append(BulkvsTn(phone_number=_to_e164(str(tn)), reference_id=ref, status=st))
     return out
 
 

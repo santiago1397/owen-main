@@ -17,7 +17,7 @@ Run: python -m tests.test_number_sync
 import sys
 from types import SimpleNamespace
 
-from app.services.number_sync import derive_lifecycle, plan_sync
+from app.services.number_sync import derive_lifecycle, is_carrier_active, plan_sync
 
 
 def check(name, cond):
@@ -26,15 +26,16 @@ def check(name, cond):
         raise SystemExit(f"number_sync failed at: {name}")
 
 
-def _row(phone, *, label=None, active=True, released_at=None):
+def _row(phone, *, label=None, active=True, released_at=None, provider_status=None):
     """A lightweight stand-in for a bulkvs-owned Number row (plan_sync is duck-typed)."""
     return SimpleNamespace(
-        phone_number=phone, friendly_name=label, active=active, released_at=released_at
+        phone_number=phone, friendly_name=label, active=active, released_at=released_at,
+        provider_status=provider_status,
     )
 
 
-def _tn(phone, ref=None):
-    return SimpleNamespace(phone_number=phone, reference_id=ref)
+def _tn(phone, ref=None, status=None):
+    return SimpleNamespace(phone_number=phone, reference_id=ref, status=status)
 
 
 def main():
@@ -49,6 +50,22 @@ def main():
           derive_lifecycle(active=True, released_at="2026-01-01", campaign_id="c") == "released")
     check("inactive -> released",
           derive_lifecycle(active=False, released_at=None) == "released")
+    check("carrier SUBMITTED -> pending (dominates assigned)",
+          derive_lifecycle(active=True, released_at=None, campaign_id="c",
+                           provider_status="SUBMITTED") == "pending")
+    check("carrier Active -> normal derivation",
+          derive_lifecycle(active=True, released_at=None, provider_status="Active")
+          == "available")
+    check("released dominates pending",
+          derive_lifecycle(active=False, released_at=None, provider_status="SUBMITTED")
+          == "released")
+
+    print("is_carrier_active — SUBMITTED (and any non-Active) is not operable:")
+    check("Active is operable", is_carrier_active("Active"))
+    check("case-insensitive", is_carrier_active("ACTIVE") and is_carrier_active(" active "))
+    check("SUBMITTED is NOT operable", not is_carrier_active("SUBMITTED"))
+    check("any other status is NOT operable", not is_carrier_active("Pending"))
+    check("NULL (legacy / pre-migration row) stays operable", is_carrier_active(None))
 
     print("plan_sync — add-only insert:")
     plan = plan_sync(existing=[], incoming=[_tn("+19195550001", "Roofing CL")])
@@ -90,6 +107,20 @@ def main():
     plan = plan_sync(existing=existing, incoming=[_tn("+1", None)])
     check("cleared ReferenceID mirrors to None", plan.relabel == [(existing[0], None)])
 
+    print("plan_sync — one-way carrier-status mirror:")
+    existing = [_row("+19195550001", provider_status="SUBMITTED")]
+    plan = plan_sync(existing=existing, incoming=[_tn("+19195550001", status="Active")])
+    check("changed Status triggers restatus (port-in completed)",
+          plan.restatus == [(existing[0], "Active")])
+    plan = plan_sync(existing=[_row("+1", provider_status="Active")],
+                     incoming=[_tn("+1", status="Active")])
+    check("unchanged Status -> no restatus churn", not plan.restatus)
+    existing = [_row("+1", label="a", provider_status="Active")]
+    plan = plan_sync(existing=existing, incoming=[_tn("+1", "b", status="SUBMITTED")])
+    check("relabel and restatus can both apply to one row",
+          plan.relabel == [(existing[0], "b")]
+          and plan.restatus == [(existing[0], "SUBMITTED")])
+
     print("plan_sync — ported DID adopts the legacy (foreign-provider) row instead of duplicating:")
     legacy = _row("+19195550009", label="GBP Legacy Twilio")
     plan = plan_sync(existing=[], incoming=[_tn("+19195550009", "Ported Note")], foreign=[legacy])
@@ -109,9 +140,9 @@ def main():
         print(f"  [SKIP] provider client import unavailable: {exc.__class__.__name__}")
     else:
         fake = [
-            {"TN": "9195550001", "ReferenceID": "Roofing CL"},   # 10-digit -> +1
+            {"TN": "9195550001", "ReferenceID": "Roofing CL", "Status": "Active"},  # 10-digit -> +1
             {"TN": "19195550002", "ReferenceID": ""},            # 11-digit, blank ref -> None
-            {"Number": "+19195550003"},                          # alias field, no ref
+            {"Number": "+19195550003", "Status": "SUBMITTED"},   # alias field, no ref
             {"ReferenceID": "orphan"},                            # no TN -> skipped
         ]
         tns = parse_tn_records(fake)
@@ -121,6 +152,9 @@ def main():
         check("11-digit normalized + blank ref -> None",
               tns[1].phone_number == "+19195550002" and tns[1].reference_id is None)
         check("alias TN field parsed", tns[2].phone_number == "+19195550003")
+        check("Status mirrored verbatim", tns[0].status == "Active")
+        check("absent Status -> None", tns[1].status is None)
+        check("SUBMITTED Status parsed", tns[2].status == "SUBMITTED")
         check("wrapped {'TNs': [...]} body also parsed",
               [t.phone_number for t in parse_tn_records({"TNs": fake})] ==
               [t.phone_number for t in tns])

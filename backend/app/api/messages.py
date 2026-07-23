@@ -20,6 +20,7 @@ from app.models import Caller, Campaign, Message, Number, Provider, User
 from app.services import queue, sms
 from app.services.message_threads import group_threads
 from app.services.messages import enqueue_outbound_message, get_optout_state
+from app.services.number_sync import is_carrier_active
 
 router = APIRouter(prefix="/api/messages", tags=["messages"])
 
@@ -163,6 +164,14 @@ async def send_message(
     reason = sms.outbound_block_reason(number.sms_enabled, number.sms_campaign_id)
     if reason:
         raise HTTPException(status.HTTP_409_CONFLICT, reason)
+
+    # Carrier gate: a DID still provisioning at BulkVS (e.g. a SUBMITTED port-in) cannot
+    # be used for any operation until /tnRecord reports it Active.
+    if not is_carrier_active(number.provider_status):
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            f"number is not active at the carrier yet (status: {number.provider_status})",
+        )
 
     # Per-contact opt-out.
     state = await get_optout_state(db, number.id, payload.contact)

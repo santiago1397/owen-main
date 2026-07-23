@@ -96,7 +96,12 @@ export default function Numbers() {
                   <td className="muted">{managed ? "—" : "n/a"}</td>
                   <td>{n.campaign_name || "—"}</td>
                   <td className="muted">{managed ? "—" : "n/a"}</td>
-                  <td><LifecycleBadge lifecycle={n.lifecycle} /></td>
+                  <td>
+                    <LifecycleBadge
+                      lifecycle={n.lifecycle}
+                      title={n.provider_status ? `Carrier status: ${n.provider_status}` : undefined}
+                    />
+                  </td>
                   <td>{n.total_calls}</td>
                 </tr>
               );

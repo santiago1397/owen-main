@@ -25,12 +25,28 @@ from dataclasses import dataclass, field
 logger = logging.getLogger("number_sync")
 
 
-def derive_lifecycle(*, active, released_at, campaign_id=None, flow_id=None) -> str:
+def is_carrier_active(provider_status) -> bool:
+    """True iff the carrier-reported status allows the DID to be operated (calls/SMS/etc.).
+
+    BulkVS /tnRecord reports "Active" for an operable DID and other states (e.g. "SUBMITTED"
+    for a pending port-in) while provisioning. NULL is treated as active for backward compat:
+    legacy (Twilio/SignalWire) rows and rows synced before the provider_status column existed
+    carry NULL and must not be locked out."""
+    if provider_status is None:
+        return True
+    return str(provider_status).strip().lower() == "active"
+
+
+def derive_lifecycle(*, active, released_at, campaign_id=None, flow_id=None,
+                     provider_status=None) -> str:
     """Derived number lifecycle. Released dominates (a soft-released DID is released even if
-    it still carries an old campaign/flow); otherwise a number with a campaign or flow is
-    assigned, and an active un-assigned number is available. No status column exists."""
+    it still carries an old campaign/flow); a non-Active carrier status (e.g. a SUBMITTED
+    port-in) makes it pending; otherwise a number with a campaign or flow is assigned, and
+    an active un-assigned number is available. Lifecycle itself is never stored."""
     if released_at is not None or not active:
         return "released"
+    if not is_carrier_active(provider_status):
+        return "pending"
     if campaign_id is not None or flow_id is not None:
         return "assigned"
     return "available"
@@ -46,6 +62,7 @@ class SyncPlan:
     reactivate: list = field(default_factory=list)     # [(row, tn)]
     adopt: list = field(default_factory=list)          # [(row, tn)]
     relabel: list = field(default_factory=list)        # [(row, new_label)]
+    restatus: list = field(default_factory=list)       # [(row, new_provider_status)]
     soft_release: list = field(default_factory=list)   # [row]
 
 
@@ -76,13 +93,20 @@ def plan_sync(existing, incoming, foreign=None) -> SyncPlan:
             plan.insert.append(tn)
             continue
         # A released (soft-released or otherwise inactive) row that reappears reactivates the
-        # SAME row and re-syncs its label in one step.
+        # SAME row and re-syncs its label + carrier status in one step.
         if not row.active or row.released_at is not None:
             plan.reactivate.append((row, tn))
-        elif tn.reference_id != row.friendly_name:
+            continue
+        if tn.reference_id != row.friendly_name:
             # One-way label mirror: friendly_name tracks ReferenceID (including clearing it
             # back to None when the operator removes the note in the portal).
             plan.relabel.append((row, tn.reference_id))
+        # One-way carrier-status mirror: provider_status tracks /tnRecord's Status verbatim
+        # (e.g. SUBMITTED -> Active when a port-in completes). getattr-tolerant so older
+        # duck-typed rows/TNs without the field diff as None (= no churn).
+        new_status = getattr(tn, "status", None)
+        if new_status != getattr(row, "provider_status", None):
+            plan.restatus.append((row, new_status))
 
     for phone, row in by_phone.items():
         # Only ACTIVE rows soft-release on vanish; an already-released row that stays gone
@@ -125,6 +149,7 @@ async def apply_sync(db, records) -> dict:
         row.media_provider = settings.BULKVS_MEDIA_PROVIDER
         row.active = True
         row.released_at = None
+        row.provider_status = tn.status
         if tn.reference_id and tn.reference_id != row.friendly_name:
             row.friendly_name = tn.reference_id
     for tn in plan.insert:
@@ -136,17 +161,21 @@ async def apply_sync(db, records) -> dict:
                 active=True,
                 owner_provider=settings.BULKVS_OWNER_PROVIDER,
                 media_provider=settings.BULKVS_MEDIA_PROVIDER,
+                provider_status=tn.status,
             )
         )
     for row, tn in plan.reactivate:
         row.active = True
         row.released_at = None
         row.friendly_name = tn.reference_id
+        row.provider_status = tn.status
         # Backfill identity in case the row predates the split-identity columns.
         row.owner_provider = settings.BULKVS_OWNER_PROVIDER
         row.media_provider = settings.BULKVS_MEDIA_PROVIDER
     for row, label in plan.relabel:
         row.friendly_name = label
+    for row, new_status in plan.restatus:
+        row.provider_status = new_status
     for row in plan.soft_release:
         row.active = False
         row.released_at = now
@@ -158,10 +187,12 @@ async def apply_sync(db, records) -> dict:
         "reactivated": len(plan.reactivate),
         "adopted": len(plan.adopt),
         "relabeled": len(plan.relabel),
+        "restatused": len(plan.restatus),
         "soft_released": len(plan.soft_release),
     }
     logger.info(
         "bulkvs number sync: inserted=%(inserted)d reactivated=%(reactivated)d "
-        "adopted=%(adopted)d relabeled=%(relabeled)d soft_released=%(soft_released)d", counts
+        "adopted=%(adopted)d relabeled=%(relabeled)d restatused=%(restatused)d "
+        "soft_released=%(soft_released)d", counts
     )
     return counts

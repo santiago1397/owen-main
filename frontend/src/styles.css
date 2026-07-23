@@ -22,6 +22,7 @@ a { color: var(--accent); text-decoration: none; }
 .badge.lc-available { background: rgba(154,164,178,.15); color: var(--muted); }
 .badge.lc-assigned { background: rgba(79,140,255,.15); color: var(--accent); border-color: var(--accent); }
 .badge.lc-released { background: rgba(255,176,32,.15); color: var(--warn); border-color: var(--warn); }
+.badge.lc-pending { background: rgba(255,176,32,.15); color: var(--warn); border-color: var(--warn); }
 .placeholder { text-align: center; color: var(--muted); padding: 48px 16px; }
 .main { flex: 1; padding: 24px 28px; overflow: auto; }
 .row { display: flex; gap: 16px; flex-wrap: wrap; }

@@ -78,10 +78,18 @@ class Number(Base):
     # reappears. NULL means the number has never been released.
     released_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
+    # Carrier-reported provisioning status, mirrored verbatim from BulkVS /tnRecord's
+    # `Status` field on every sync ("Active", or e.g. "SUBMITTED" for a pending port-in).
+    # NULL for legacy Twilio/SignalWire rows (treated as active — never locked out).
+    # Every operation gate (outbound calls, SMS, inbox default/send) refuses a DID whose
+    # status isn't Active via services.number_sync.is_carrier_active.
+    provider_status: Mapped[str | None] = mapped_column(String)
+
     # Optional behaviour assignment: the call-flow this number routes to (assignment is a
     # LATER ticket; the column exists now so derived lifecycle can key on it). NULL until
-    # a flow is assigned. Lifecycle (available / assigned / released) is DERIVED from
-    # active + released_at + whether campaign_id/flow_id is set — there is NO status column.
+    # a flow is assigned. Lifecycle (available / pending / assigned / released) is DERIVED
+    # from active + released_at + provider_status + whether campaign_id/flow_id is set —
+    # lifecycle itself is never stored.
     flow_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("flows.id"))
 
     # --- Manual outbound SMS gate (Ticket 10, additive) ------------------------------

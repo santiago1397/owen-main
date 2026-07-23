@@ -87,14 +87,19 @@ def time_window_warning(number: str, now_utc: datetime) -> Optional[str]:
 
 
 def is_owned_bulkvs_did(number_row, *, owner_provider: str) -> bool:
-    """True iff a `numbers` row is a usable outbound caller-ID: owned by BulkVS, active, and not
-    soft-released. PURE (duck-typed on attributes) so the from-number restriction is testable
-    without a DB — the endpoint applies the SAME predicate over queried rows. Foreign/spoofed
-    numbers are out of scope (locked design)."""
+    """True iff a `numbers` row is a usable outbound caller-ID: owned by BulkVS, active, not
+    soft-released, and carrier-Active (a SUBMITTED pending port-in is NOT usable). PURE
+    (duck-typed on attributes) so the from-number restriction is testable without a DB — the
+    endpoint applies the SAME predicate over queried rows. Foreign/spoofed numbers are out of
+    scope (locked design). `is_carrier_active` is imported lazily from the (equally pure)
+    number_sync kernel so this module stays stdlib-importable order-free."""
+    from app.services.number_sync import is_carrier_active
+
     return (
         getattr(number_row, "owner_provider", None) == owner_provider
         and bool(getattr(number_row, "active", False))
         and getattr(number_row, "released_at", None) is None
+        and is_carrier_active(getattr(number_row, "provider_status", None))
     )
 
 

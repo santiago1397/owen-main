@@ -44,6 +44,7 @@ from app.services.inbox_threads import (
     resolve_sms_from,
 )
 from app.services.messages import enqueue_outbound_message, get_optout_state
+from app.services.number_sync import is_carrier_active
 
 router = APIRouter(prefix="/api/inbox", tags=["inbox"])
 
@@ -117,7 +118,7 @@ async def _default_did(db: AsyncSession) -> DidRef | None:
     if not nid:
         return None
     number = await db.get(Number, uuid.UUID(nid))
-    if number is None or not number.active:
+    if number is None or not number.active or not is_carrier_active(number.provider_status):
         return None
     return DidRef(
         number_id=str(number.id),
@@ -434,6 +435,9 @@ async def get_inbox_settings(
         .scalars()
         .all()
     )
+    # A DID the carrier hasn't activated yet (e.g. a SUBMITTED port-in) is not offered as
+    # an outbound identity at all.
+    numbers = [n for n in numbers if is_carrier_active(n.provider_status)]
     row = await db.get(AppSetting, DEFAULT_NUMBER_KEY)
     default_id = (row.value or {}).get("number_id") if row else None
     return {
@@ -466,6 +470,11 @@ async def set_default_number(
         if number is None or number.owner_provider != "bulkvs" or not number.active:
             raise HTTPException(
                 status.HTTP_422_UNPROCESSABLE_ENTITY, "not an active owned BulkVS number"
+            )
+        if not is_carrier_active(number.provider_status):
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_ENTITY,
+                f"number is not active at the carrier yet (status: {number.provider_status})",
             )
         value = {"number_id": str(number.id)}
     now = datetime.now(timezone.utc)
@@ -580,6 +589,14 @@ async def send(
         number = await db.get(Number, uuid.UUID(chosen.number_id))
         if number is None:
             raise HTTPException(status.HTTP_409_CONFLICT, "resolved number no longer exists")
+
+    # Carrier gate covers ALL resolution paths (explicit override, sticky, global default):
+    # a DID still provisioning at BulkVS (e.g. SUBMITTED port-in) can never send.
+    if not is_carrier_active(number.provider_status):
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            f"number is not active at the carrier yet (status: {number.provider_status})",
+        )
 
     state = await get_optout_state(db, number.id, contact)
     if sms.is_opted_out(state):

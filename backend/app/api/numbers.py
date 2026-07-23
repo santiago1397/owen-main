@@ -28,6 +28,7 @@ async def list_numbers(
                 Number.owner_provider,
                 Number.media_provider,
                 Number.released_at,
+                Number.provider_status,
                 # Selected only to DERIVE lifecycle below; popped before building the schema.
                 Number.campaign_id,
                 Number.flow_id,
@@ -52,6 +53,7 @@ async def list_numbers(
             released_at=d["released_at"],
             campaign_id=d.pop("campaign_id"),
             flow_id=d.pop("flow_id"),
+            provider_status=d["provider_status"],
         )
         out.append(NumberStats(**d))
     return out

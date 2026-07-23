@@ -15,7 +15,8 @@ export type NumberRow = {
   owner_provider?: string | null;
   media_provider?: string | null;
   released_at?: string | null;
-  lifecycle: string; // available | assigned | released
+  provider_status?: string | null; // carrier-reported (BulkVS /tnRecord Status): "Active" | "SUBMITTED" | …
+  lifecycle: string; // available | pending | assigned | released
 };
 
 const PLATFORM_PROVIDERS = ["bulkvs", "asterisk"];
@@ -42,6 +43,14 @@ export function providerPath(n: NumberRow): string {
   return n.provider || "—";
 }
 
-export function LifecycleBadge({ lifecycle }: { lifecycle: string }) {
-  return <span className={`badge lc-${lifecycle}`}>{lifecycle}</span>;
+export function LifecycleBadge({ lifecycle, title }: { lifecycle: string; title?: string }) {
+  return <span className={`badge lc-${lifecycle}`} title={title}>{lifecycle}</span>;
+}
+
+// True when the carrier has this DID fully provisioned (or the row predates the status
+// mirror / is a legacy provider — NULL is never treated as blocked). Mirrors the backend
+// gate (services.number_sync.is_carrier_active): a SUBMITTED port-in is NOT operable.
+export function isCarrierActive(n: NumberRow): boolean {
+  const s = (n.provider_status || "").trim().toLowerCase();
+  return !s || s === "active";
 }

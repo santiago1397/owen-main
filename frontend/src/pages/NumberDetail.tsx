@@ -1,7 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { Link, useParams } from "react-router-dom";
 import { api } from "../api";
-import { LifecycleBadge, type NumberRow, isPlatformManaged, providerPath } from "../lib/numbers";
+import { LifecycleBadge, type NumberRow, isCarrierActive, isPlatformManaged, providerPath } from "../lib/numbers";
 
 // Per-number detail view. The numbers API returns a list only, so we read from the same
 // cached list and pick the row by id — no new backend endpoint needed (additive).
@@ -28,8 +28,21 @@ export default function NumberDetail() {
       <Link to="/numbers">← Numbers</Link>
       <div className="toolbar" style={{ marginTop: 10 }}>
         <h2 style={{ margin: 0, flex: 1 }}>{n.friendly_name || n.phone_number}</h2>
-        <LifecycleBadge lifecycle={n.lifecycle} />
+        <LifecycleBadge
+          lifecycle={n.lifecycle}
+          title={n.provider_status ? `Carrier status: ${n.provider_status}` : undefined}
+        />
       </div>
+
+      {!isCarrierActive(n) && (
+        <div className="card" style={{ marginBottom: 12 }}>
+          <p className="muted" style={{ margin: 0 }}>
+            ⏳ This number is still provisioning at the carrier (status:{" "}
+            <strong>{n.provider_status}</strong>). It cannot place calls or send messages
+            until BulkVS reports it Active.
+          </p>
+        </div>
+      )}
 
       <div className="card" style={{ marginBottom: 12 }}>
         <div className="kv">

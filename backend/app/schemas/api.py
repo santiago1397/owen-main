@@ -93,7 +93,8 @@ class NumberStats(BaseModel):
     owner_provider: str | None = None   # who owns the DID, e.g. "bulkvs"
     media_provider: str | None = None   # who carries the media, e.g. "asterisk"
     released_at: datetime | None = None  # set when a synced DID vanished from BulkVS
-    lifecycle: str = "available"        # DERIVED: available | assigned | released
+    provider_status: str | None = None  # carrier-reported /tnRecord Status ("Active"/"SUBMITTED"/…)
+    lifecycle: str = "available"        # DERIVED: available | pending | assigned | released
 
 
 class CampaignOut(BaseModel):

@@ -158,27 +158,34 @@ def test_place_outbound_call_variants():
 
 
 class FakeNumber:
-    def __init__(self, phone_number, owner_provider="bulkvs", active=True, released_at=None):
+    def __init__(self, phone_number, owner_provider="bulkvs", active=True, released_at=None,
+                 provider_status=None):
         self.phone_number = phone_number
         self.owner_provider = owner_provider
         self.active = active
         self.released_at = released_at
+        self.provider_status = provider_status
 
 
 def test_from_number_restriction():
-    print("from-number restriction — only active, non-released, owner=bulkvs DIDs:")
+    print("from-number restriction — only active, non-released, carrier-Active, owner=bulkvs DIDs:")
     rows = [
         FakeNumber("+17865550000"),                                   # owned, allowed
         FakeNumber("+13055551111", owner_provider="twilio"),          # foreign owner, denied
         FakeNumber("+13055552222", active=False),                     # inactive, denied
         FakeNumber("+13055553333", released_at=datetime(2026, 1, 1)), # soft-released, denied
+        FakeNumber("+13055554444", provider_status="SUBMITTED"),      # pending port-in, denied
+        FakeNumber("+17865550001", provider_status="Active"),         # carrier-active, allowed
     ]
     allowed = outbound.owned_from_number_set(rows, owner_provider="bulkvs")
-    check("only the owned/active/non-released BulkVS DID is allowed", allowed == {"+17865550000"})
+    check("only owned/active/non-released/carrier-Active BulkVS DIDs are allowed",
+          allowed == {"+17865550000", "+17865550001"})
     check("foreign owner rejected",
           not outbound.is_owned_bulkvs_did(rows[1], owner_provider="bulkvs"))
     check("inactive rejected", not outbound.is_owned_bulkvs_did(rows[2], owner_provider="bulkvs"))
     check("released rejected", not outbound.is_owned_bulkvs_did(rows[3], owner_provider="bulkvs"))
+    check("carrier SUBMITTED rejected",
+          not outbound.is_owned_bulkvs_did(rows[4], owner_provider="bulkvs"))
 
 
 def test_time_window_guardrail():
