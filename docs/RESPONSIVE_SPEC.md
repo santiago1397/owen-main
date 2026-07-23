@@ -153,14 +153,27 @@ Requires a login credential or a token to seed into localStorage.
 Branch `responsive`, one commit per phase, single deploy after screenshot review. Production is
 never left in a half-migrated state, and a bad outcome is one revert.
 
-| Phase | Content |
-|---|---|
-| 0 | Playwright harness + screenshot script (baseline of current breakage) |
-| 1 | Foundations: drawer shell, breakpoint tokens, `.tablewrap`, Login width clamp, all four §9 iOS fixes |
-| 2 | Tables → cards/wrappers; Agents form grids to single column |
-| 3 | Split panes: Inbox + Messages URL state, single-pane, contact slide-over |
-| 4 | FlowEditor read-only mobile mode |
-| 5 | Bottom tab bar for comms routes |
+| Phase | Content | Status |
+|---|---|---|
+| 0 | Playwright harness + screenshot script (baseline of current breakage) | done |
+| 1 | Foundations: drawer shell, breakpoint tokens, `.tablewrap`, Login width clamp, all four §9 iOS fixes | done |
+| 2 | Tables → cards/wrappers; Agents form grids to single column | done |
+| 3 | Split panes: Inbox + Messages URL state, single-pane, contact slide-over | done |
+| 4 | FlowEditor read-only mobile mode | done |
+| 5 | Bottom tab bar for comms routes | done |
+
+All five are on `responsive`, not yet merged or deployed — the single deploy still waits on
+screenshot review, as planned above.
+
+Three defects were found by *reviewing the phase-5 screenshots*, not predicted by this spec:
+
+- Dashboard charts shared a 375px row once their `min-width` floor was removed, clipping the
+  donut. The phase-2 `min-width: 0` fix had made this worse, not better.
+- Settings webhook URLs wrapped underneath their 44px copy buttons.
+- Inbox filter pills were the last controls left below the 44px minimum, at 38px.
+
+The lesson worth keeping: `min-width: 0` on a flex child removes the *reason it was wrapping*.
+Twice now the correct fix was to force a 100% flex-basis instead.
 
 Departure from the usual trunk-based flow is deliberate and justified by the size of the change
 and the live-calls risk.
