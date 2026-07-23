@@ -16,6 +16,8 @@ from app.core.config import settings
 from app.db import SessionLocal
 from app.models import Call, Number
 from app.providers.base import ProviderAdapter
+from app.providers.bulkvs import client_ip as _bulkvs_client_ip
+from app.providers.bulkvs import ip_allowed as _ip_allowed
 from app.services import queue
 from app.services.ingestion import ingest_status_event
 from app.services.messages import ingest_message_event
@@ -73,36 +75,70 @@ async def _fallback_call_sid(db: AsyncSession, tracking_number: str) -> str | No
     return call.provider_call_sid if call else None
 
 
-def build_router(adapter: ProviderAdapter, provider: str, signature_headers: list[str]) -> APIRouter:
+async def verify_request(
+    request: Request,
+    adapter: ProviderAdapter,
+    provider: str,
+    signature_headers: list[str],
+    ip_allowlist: tuple[str, ...] | list[str] | None = None,
+) -> dict[str, str] | None:
+    """Shared inbound-webhook verifier. Returns the parsed params on success, None on
+    verification failure (the caller replies 403). Extracted from build_router so a provider
+    that isn't a full status/recording/message router (BulkVS) can reuse the exact same gate.
+    """
+    content_type = request.headers.get("content-type", "")
+    if "application/json" in content_type:
+        body = await request.json()
+        params = {k: str(v) for k, v in body.items()} if isinstance(body, dict) else {}
+    else:
+        form = await request.form()
+        params = {k: str(v) for k, v in form.items()}
+    # Call Flow Builder's own event schema doesn't reliably identify which tracking
+    # number was originally dialed (see providers/signalwire.py), so we pass it
+    # explicitly as a query param on the webhook URL instead of trusting the payload.
+    tracking_number = request.query_params.get("tracking_number")
+    if tracking_number:
+        params["_tracking_number"] = tracking_number
+    sig = _signature(request, signature_headers)
+    logger.info("%s webhook hit: path=%s content_type=%s sig_present=%s keys=%s",
+                provider, request.url.path, content_type, bool(sig), sorted(params.keys()))
+
+    # FLAGGED additive shared-code change (Ticket 09): a provider whose inbound callbacks
+    # carry NO HMAC signature (BulkVS MO SMS) is verified by a source-IP allow-list instead.
+    # This branch is ONLY reached when the caller passes ip_allowlist; Twilio and SignalWire
+    # pass ip_allowlist=None, so their signature verification below is entirely unchanged.
+    if ip_allowlist is not None:
+        ip = _bulkvs_client_ip(
+            request.headers.get("x-forwarded-for"),
+            request.client.host if request.client else None,
+        )
+        if _ip_allowed(ip, ip_allowlist):
+            logger.info("%s webhook: verified via source IP %s", provider, ip)
+            return params
+        logger.warning("%s webhook: source IP %r not in allow-list", provider, ip)
+        return None
+
+    if provider == "signalwire" and _cfb_basic_auth_ok(request):
+        logger.info("%s webhook: verified via Call Flow Builder basic-auth secret", provider)
+        return params
+
+    if not adapter.verify_signature(_public_url(request), params, sig):
+        logger.warning("%s webhook: signature verification FAILED (url=%s)",
+                       provider, _public_url(request))
+        return None
+    return params
+
+
+def build_router(
+    adapter: ProviderAdapter,
+    provider: str,
+    signature_headers: list[str],
+    ip_allowlist: tuple[str, ...] | list[str] | None = None,
+) -> APIRouter:
     router = APIRouter(prefix=f"/webhooks/{provider}", tags=["webhooks"])
 
     async def _verified(request: Request) -> dict[str, str] | None:
-        content_type = request.headers.get("content-type", "")
-        if "application/json" in content_type:
-            body = await request.json()
-            params = {k: str(v) for k, v in body.items()} if isinstance(body, dict) else {}
-        else:
-            form = await request.form()
-            params = {k: str(v) for k, v in form.items()}
-        # Call Flow Builder's own event schema doesn't reliably identify which tracking
-        # number was originally dialed (see providers/signalwire.py), so we pass it
-        # explicitly as a query param on the webhook URL instead of trusting the payload.
-        tracking_number = request.query_params.get("tracking_number")
-        if tracking_number:
-            params["_tracking_number"] = tracking_number
-        sig = _signature(request, signature_headers)
-        logger.info("%s webhook hit: path=%s content_type=%s sig_present=%s keys=%s",
-                    provider, request.url.path, content_type, bool(sig), sorted(params.keys()))
-
-        if provider == "signalwire" and _cfb_basic_auth_ok(request):
-            logger.info("%s webhook: verified via Call Flow Builder basic-auth secret", provider)
-            return params
-
-        if not adapter.verify_signature(_public_url(request), params, sig):
-            logger.warning("%s webhook: signature verification FAILED (url=%s)",
-                           provider, _public_url(request))
-            return None
-        return params
+        return await verify_request(request, adapter, provider, signature_headers, ip_allowlist)
 
     @router.post("/status")
     async def status(request: Request) -> Response:

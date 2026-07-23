@@ -19,6 +19,8 @@ from app.api import settings as settings_api
 from app.core.config import settings
 from app.db import engine
 from app.migrate import run_migrations
+from app.api import messages as messages_api
+from app.webhooks import bulkvs as bulkvs_webhooks
 from app.webhooks import signalwire as signalwire_webhooks
 from app.webhooks import twilio as twilio_webhooks
 
@@ -52,9 +54,11 @@ app.include_router(emails_api.router)
 app.include_router(flows_api.router)
 app.include_router(recordings_api.router)
 app.include_router(settings_api.router)
+app.include_router(messages_api.router)
 app.include_router(health_api.router)
 app.include_router(twilio_webhooks.router)
 app.include_router(signalwire_webhooks.router)
+app.include_router(bulkvs_webhooks.router)
 
 
 @app.get("/health")

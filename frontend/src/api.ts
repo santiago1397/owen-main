@@ -99,4 +99,7 @@ export const api = {
   emails: (filters: Record<string, any>) => request(`/api/emails${qs(filters)}`),
   email: (id: string) => request(`/api/emails/${id}`),
   relayEmail: (id: string) => request(`/api/emails/${id}/relay`, { method: "POST" }),
+  messageThreads: (params: Record<string, any> = {}) => request(`/api/messages/threads${qs(params)}`),
+  messageThread: (params: { number_id?: string; caller_id?: string }) =>
+    request(`/api/messages/thread${qs(params)}`),
 };
