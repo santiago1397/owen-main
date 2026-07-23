@@ -60,6 +60,11 @@ class FakeAri:
         self.calls.append(("dial", channel_id, number))
         return self._dial_result
 
+    async def dial_operator(self, channel_id, operators, *, caller_id, timeout_s):
+        # Record the resolved operator list; reuse the scripted dial result (Ticket 13).
+        self.calls.append(("dial_operator", channel_id, tuple(operators)))
+        return self._dial_result
+
     async def hangup(self, channel_id):
         self.calls.append(("hangup", channel_id, None))
 
@@ -219,6 +224,84 @@ def test_dial_busy_routes_to_busy_port():
     check("dial busy -> vm -> terminate", rec.node_ids()[-2:] == ["sales", "vm"])
 
 
+def _operator_graph(node):
+    """A minimal entry -> dial(operator) -> [answered]->bye graph; `node` is the dial node."""
+    return {
+        "default_fallback": "vm",
+        "nodes": {
+            "start": {"type": "entry", "next": {"default": "op"}},
+            "op": node,
+            "vm": {"type": "voicemail", "next": {"default": "bye"}},
+            "bye": {"type": "hangup"},
+        },
+    }
+
+
+def test_operator_target_individual_dials_operator():
+    print("dial operator-target (individual) -> dial_operator with the one operator, answered -> bye:")
+    node = {"type": "dial", "target_kind": "operator", "operator": "jane@x.com",
+            "next": {"answered": "bye", "noanswer": "vm"}}
+    ari = FakeAri(dial_result="answered")
+    rec = Recorder()
+    interp = FlowInterpreter(graph=_operator_graph(node), channel_id=CHAN, ari=ari, emit=rec.emit,
+                             linkedid=LINKEDID, now=ALWAYS_OPEN, on_start=rec.pin)
+    _run(interp)
+    check("dial_operator called with [jane@x.com]", ("dial_operator", CHAN, ("jane@x.com",)) in ari.calls)
+    check("answered routed to bye", rec.node_ids() == ["start", "op", "bye"])
+
+
+def test_operator_target_group_dedups_and_routes():
+    print("dial operator-target (group, mixed id/object shapes) dedups; answered -> bye:")
+    node = {"type": "dial", "target_kind": "operator",
+            "operators": ["jane@x.com", {"id": "bob@x.com"}, "jane@x.com"],
+            "next": {"answered": "bye", "noanswer": "vm"}}
+    ari = FakeAri(dial_result="answered")
+    rec = Recorder()
+    interp = FlowInterpreter(graph=_operator_graph(node), channel_id=CHAN, ari=ari, emit=rec.emit,
+                             linkedid=LINKEDID, now=ALWAYS_OPEN, on_start=rec.pin)
+    _run(interp)
+    check("group flattened + de-duplicated in order",
+          ("dial_operator", CHAN, ("jane@x.com", "bob@x.com")) in ari.calls)
+    check("answered routed to bye", rec.node_ids() == ["start", "op", "bye"])
+
+
+def test_operator_target_no_answer_falls_to_default_fallback():
+    print("operator no-answer (unavailable/unregistered) -> default_fallback (voicemail):")
+    node = {"type": "dial", "target_kind": "operator", "operator": "jane@x.com",
+            "next": {"answered": "bye"}}  # 'noanswer' unwired -> falls through
+    ari = FakeAri(dial_result="noanswer")
+    rec = Recorder()
+    interp = FlowInterpreter(graph=_operator_graph(node), channel_id=CHAN, ari=ari, emit=rec.emit,
+                             linkedid=LINKEDID, now=ALWAYS_OPEN, on_start=rec.pin)
+    _run(interp)
+    check("no-answer falls through to default_fallback vm", rec.node_ids() == ["start", "op", "vm"])
+
+
+def test_operator_target_empty_falls_to_default_fallback():
+    print("operator-target with NO operators configured -> error -> default_fallback:")
+    node = {"type": "dial", "target_kind": "operator", "operators": [], "next": {"answered": "bye"}}
+    ari = FakeAri(dial_result="answered")
+    rec = Recorder()
+    interp = FlowInterpreter(graph=_operator_graph(node), channel_id=CHAN, ari=ari, emit=rec.emit,
+                             linkedid=LINKEDID, now=ALWAYS_OPEN, on_start=rec.pin)
+    _run(interp)
+    check("no dial_operator attempted", "dial_operator" not in ari.ops())
+    check("errored operator target -> vm", rec.node_ids() == ["start", "op", "vm"])
+
+
+def test_number_target_still_works():
+    print("regression: a NUMBER-target dial still routes via dial_number (not dial_operator):")
+    node = {"type": "dial", "target": "+13055550000",
+            "next": {"answered": "bye", "busy": "vm", "noanswer": "vm", "failed": "vm"}}
+    ari = FakeAri(dial_result="answered")
+    rec = Recorder()
+    interp = FlowInterpreter(graph=_operator_graph(node), channel_id=CHAN, ari=ari, emit=rec.emit,
+                             linkedid=LINKEDID, now=ALWAYS_OPEN, on_start=rec.pin)
+    _run(interp)
+    check("dial_number used for a number target", ("dial", CHAN, "+13055550000") in ari.calls)
+    check("dial_operator NOT used", "dial_operator" not in ari.ops())
+
+
 def test_evaluate_hours_pure():
     print("evaluate_hours (pure) — open window vs outside window vs no-schedule fail-open:")
     node = {"type": "hours", "hours": {"tz": "America/New_York", "schedule": {"wed": [["09:00", "17:00"]]}}}
@@ -237,6 +320,11 @@ def main():
     test_hours_closed_routes_to_closed_port()
     test_missing_fallback_dead_end_hangs_up_cleanly()
     test_dial_busy_routes_to_busy_port()
+    test_operator_target_individual_dials_operator()
+    test_operator_target_group_dedups_and_routes()
+    test_operator_target_no_answer_falls_to_default_fallback()
+    test_operator_target_empty_falls_to_default_fallback()
+    test_number_target_still_works()
     test_evaluate_hours_pure()
     print("\nALL FLOW INTERPRETER CHECKS PASSED")
 

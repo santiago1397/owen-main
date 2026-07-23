@@ -224,6 +224,34 @@ class Settings(BaseSettings):
     # Poll cadence for the inventory sync (well within a portal-mirrored latency need).
     BULKVS_SYNC_POLL_SECONDS: int = 300
 
+    # --- Operator WebRTC softphone (Ticket 13, additive, gated on ASTERISK_ENABLED) -------
+    # The operator answers platform calls in the browser via a per-operator chan_pjsip
+    # WebRTC endpoint (SIP.js, wss + DTLS-SRTP). Signalling wss is fronted by Traefik; media
+    # reuses the existing 10000-10200/udp RTP range; coturn (TLS/443) relays through firewalls
+    # with backend-minted ephemeral creds. See asterisk/README.md + app/telephony/.
+    #   The digest password for the static per-operator pjsip WebRTC endpoints (rendered into
+    #   pjsip.conf from ${OPERATOR_SIP_SECRET}). Returned only to authenticated operators by
+    #   the cred-minting endpoint; the real gate is app login (ARI stays server-side).
+    OPERATOR_SIP_SECRET: str = ""
+    # SIP domain / realm the softphone registers against (usually the app/public host).
+    OPERATOR_SIP_DOMAIN: str = ""
+    # Public wss URL of the Traefik-fronted Asterisk WebSocket, e.g. wss://api.<APP_DOMAIN>/ws.
+    OPERATOR_WSS_URL: str = ""
+    # How long a minted SIP credential is advertised as valid before the frontend re-mints.
+    OPERATOR_SIP_TTL_SECONDS: int = 3600
+    # coturn shared secret (use-auth-secret / TURN REST API). Empty => TURN disabled (no
+    # ice_servers minted; STUN/host candidates only). Never committed — lives in .env.prod.
+    TURN_STATIC_SECRET: str = ""
+    # coturn ICE server URLs advertised to SIP.js, comma-separated, e.g.
+    #   turns:turn.<APP_DOMAIN>:443?transport=tcp,stun:turn.<APP_DOMAIN>:443
+    TURN_URLS: str = ""
+    # Ephemeral TURN credential lifetime (short — coturn validates the embedded expiry).
+    TURN_TTL_SECONDS: int = 3600
+
+    @property
+    def turn_urls(self) -> list[str]:
+        return [u.strip() for u in self.TURN_URLS.split(",") if u.strip()]
+
     @property
     def bulkvs_api_enabled(self) -> bool:
         """The BulkVS inventory sync only runs when the platform flag is on AND REST creds

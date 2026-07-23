@@ -16,6 +16,7 @@ from app.api import health as health_api
 from app.api import numbers as numbers_api
 from app.api import recordings as recordings_api
 from app.api import settings as settings_api
+from app.api import telephony as telephony_api
 from app.core.config import settings
 from app.db import engine
 from app.migrate import run_migrations
@@ -53,6 +54,7 @@ app.include_router(flows_api.router)
 app.include_router(recordings_api.router)
 app.include_router(settings_api.router)
 app.include_router(health_api.router)
+app.include_router(telephony_api.router)
 app.include_router(twilio_webhooks.router)
 app.include_router(signalwire_webhooks.router)
 
