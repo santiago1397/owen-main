@@ -71,11 +71,16 @@ def parse_tn_records(data) -> list[BulkvsTn]:
 
 async def fetch_tn_records() -> list[BulkvsTn]:
     """GET /tnRecord and return the owned DIDs, normalized. Best-effort at the call site:
-    the worker wraps this and logs+skips on failure so one bad poll never crashes the loop."""
+    the worker wraps this and logs+skips on failure so one bad poll never crashes the loop.
+
+    /tnRecord has no offset/cursor pagination and no total-count in its response — just an
+    optional `Limit` query param (undocumented default when omitted). Pass an explicit high
+    Limit so the sync never silently relies on that default and truncates the DID list
+    (which would soft-release real numbers past the cap on the next poll)."""
     url = f"{settings.BULKVS_API_BASE.rstrip('/')}/tnRecord"
     auth = (settings.BULKVS_API_USERNAME, settings.BULKVS_API_PASSWORD)
     async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
-        resp = await client.get(url, auth=auth)
+        resp = await client.get(url, params={"Limit": "10000"}, auth=auth)
         resp.raise_for_status()
         return parse_tn_records(resp.json())
 

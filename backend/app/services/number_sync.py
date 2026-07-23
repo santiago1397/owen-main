@@ -38,25 +38,39 @@ def derive_lifecycle(*, active, released_at, campaign_id=None, flow_id=None) -> 
 
 @dataclass
 class SyncPlan:
-    """What apply_sync should do this poll. `insert`/`reactivate` carry the incoming TN (so
-    the label is known); `relabel` carries the row + its new label; `soft_release` the row."""
+    """What apply_sync should do this poll. `insert`/`reactivate`/`adopt` carry the incoming
+    TN (so the label is known); `relabel` carries the row + its new label; `soft_release` the
+    row."""
 
     insert: list = field(default_factory=list)        # [tn]
     reactivate: list = field(default_factory=list)     # [(row, tn)]
+    adopt: list = field(default_factory=list)          # [(row, tn)]
     relabel: list = field(default_factory=list)        # [(row, new_label)]
     soft_release: list = field(default_factory=list)   # [row]
 
 
-def plan_sync(existing, incoming) -> SyncPlan:
+def plan_sync(existing, incoming, foreign=None) -> SyncPlan:
     """Pure diff. `existing` = current bulkvs-owned Number rows (need .phone_number,
     .friendly_name, .active, .released_at); `incoming` = normalized BulkVS TNs (need
     .phone_number, .reference_id). Keys on phone_number. Duplicate incoming TNs collapse
-    (last wins). Rows are inspected only, never mutated — the applier does the writes."""
+    (last wins). Rows are inspected only, never mutated — the applier does the writes.
+
+    `foreign` = Number rows for the same phone_number already owned by a DIFFERENT provider
+    (typically a legacy Twilio/SignalWire row for a DID that has since been ported to BulkVS).
+    A DID that matches one of these ADOPTS that row in place (stamps owner/media provider onto
+    the SAME row, preserving its campaign_id/call history) instead of being planned as a fresh
+    insert — inserting would create a second `numbers` row for one physical DID, which is
+    exactly the "duplicate number" bug this guards against."""
     by_phone = {row.phone_number: row for row in existing}
+    foreign_by_phone = {row.phone_number: row for row in (foreign or [])}
     incoming_by_phone = {tn.phone_number: tn for tn in incoming}
 
     plan = SyncPlan()
     for phone, tn in incoming_by_phone.items():
+        foreign_row = foreign_by_phone.get(phone)
+        if foreign_row is not None:
+            plan.adopt.append((foreign_row, tn))
+            continue
         row = by_phone.get(phone)
         if row is None:
             plan.insert.append(tn)
@@ -96,10 +110,23 @@ async def apply_sync(db, records) -> dict:
     existing = (
         await db.execute(select(Number).where(Number.provider_id == provider.id))
     ).scalars().all()
+    # Rows for the same phone_number already owned by a DIFFERENT provider (e.g. a legacy
+    # Twilio/SignalWire tracking number whose DID has since been ported to BulkVS). These are
+    # candidates to ADOPT rather than duplicate.
+    foreign = (
+        await db.execute(select(Number).where(Number.provider_id != provider.id))
+    ).scalars().all()
 
-    plan = plan_sync(existing, records)
+    plan = plan_sync(existing, records, foreign=foreign)
     now = datetime.now(timezone.utc)
 
+    for row, tn in plan.adopt:
+        row.owner_provider = settings.BULKVS_OWNER_PROVIDER
+        row.media_provider = settings.BULKVS_MEDIA_PROVIDER
+        row.active = True
+        row.released_at = None
+        if tn.reference_id and tn.reference_id != row.friendly_name:
+            row.friendly_name = tn.reference_id
     for tn in plan.insert:
         db.add(
             Number(
@@ -129,11 +156,12 @@ async def apply_sync(db, records) -> dict:
     counts = {
         "inserted": len(plan.insert),
         "reactivated": len(plan.reactivate),
+        "adopted": len(plan.adopt),
         "relabeled": len(plan.relabel),
         "soft_released": len(plan.soft_release),
     }
     logger.info(
         "bulkvs number sync: inserted=%(inserted)d reactivated=%(reactivated)d "
-        "relabeled=%(relabeled)d soft_released=%(soft_released)d", counts
+        "adopted=%(adopted)d relabeled=%(relabeled)d soft_released=%(soft_released)d", counts
     )
     return counts

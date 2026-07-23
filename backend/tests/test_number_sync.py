@@ -90,6 +90,13 @@ def main():
     plan = plan_sync(existing=existing, incoming=[_tn("+1", None)])
     check("cleared ReferenceID mirrors to None", plan.relabel == [(existing[0], None)])
 
+    print("plan_sync — ported DID adopts the legacy (foreign-provider) row instead of duplicating:")
+    legacy = _row("+19195550009", label="GBP Legacy Twilio")
+    plan = plan_sync(existing=[], incoming=[_tn("+19195550009", "Ported Note")], foreign=[legacy])
+    check("ported DID is adopted, not inserted",
+          len(plan.adopt) == 1 and plan.adopt[0][0] is legacy and not plan.insert)
+    check("adopt carries the fresh label", plan.adopt[0][1].reference_id == "Ported Note")
+
     print("plan_sync — rows are inspected, never mutated:")
     row = _row("+19195550002", label="HVAC")
     plan_sync(existing=[row], incoming=[])  # would soft-release
