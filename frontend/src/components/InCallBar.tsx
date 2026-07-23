@@ -5,7 +5,8 @@
 // codebase is keyed by the call's Linkedid (== provider_call_sid), so we pass that as the
 // channel id. An availability toggle registers/unregisters the softphone (unavailable =>
 // the interpreter's operator-target dial finds the endpoint offline => default_fallback).
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { Settings } from "lucide-react";
 import { api } from "../api";
 import {
   DIAL_EVENT,
@@ -13,6 +14,15 @@ import {
   setLastFromNumber,
   takePendingDial,
 } from "../lib/dialer";
+import {
+  applySink,
+  getAudioPref,
+  setAudioPref,
+  startRingtone,
+  stopRingtone,
+  useAudioDevices,
+  type AudioKind,
+} from "../lib/audioDevices";
 import { useSoftphone } from "../lib/softphone";
 
 type TransferKind = "did" | "operator" | "ai_agent";
@@ -101,6 +111,101 @@ function Dialer() {
   );
 }
 
+// Gear → audio settings (Quo-style): pick microphone, speaker, and ringtone output device.
+// Selections persist per-browser (localStorage) and apply live — speaker/ringtone via
+// setSinkId on the existing elements, mic on the next call. A popover anchored to the gear.
+function AudioSettings() {
+  const [open, setOpen] = useState(false);
+  const { devices, error, refresh } = useAudioDevices();
+  const wrapRef = useRef<HTMLDivElement>(null);
+  // Re-render on selection so the <select value> reflects the saved pref.
+  const [, force] = useState(0);
+
+  // Close on outside click / Escape.
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (e: MouseEvent) => {
+      if (wrapRef.current && !wrapRef.current.contains(e.target as Node)) setOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => e.key === "Escape" && setOpen(false);
+    document.addEventListener("mousedown", onDown);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDown);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [open]);
+
+  const remoteEl = () =>
+    document.getElementById("softphone-remote-audio") as HTMLAudioElement | null;
+
+  const onPick = (kind: AudioKind, deviceId: string) => {
+    setAudioPref(kind, deviceId);
+    force((n) => n + 1);
+    // Apply immediately where we can (mic takes effect on the next call).
+    if (kind === "speaker") void applySink(remoteEl(), "speaker");
+    if (kind === "ringtone") {
+      // Brief preview so the operator hears which device the ring lands on.
+      void startRingtone();
+      window.setTimeout(stopRingtone, 1500);
+    }
+  };
+
+  const Row = ({ kind, label, options }: { kind: AudioKind; label: string; options: { deviceId: string; label: string }[] }) => (
+    <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+      <span className="muted" style={{ fontSize: 12 }}>{label}</span>
+      <select value={getAudioPref(kind)} onChange={(e) => onPick(kind, e.target.value)}>
+        <option value="">System default</option>
+        {options.map((d) => (
+          <option key={d.deviceId} value={d.deviceId}>{d.label}</option>
+        ))}
+      </select>
+    </label>
+  );
+
+  return (
+    <div ref={wrapRef} style={{ position: "relative", display: "inline-flex" }}>
+      <button
+        title="Audio settings"
+        aria-label="Audio settings"
+        onClick={() => {
+          const next = !open;
+          setOpen(next);
+          if (next) void refresh();
+        }}
+        style={{ display: "inline-flex", alignItems: "center", padding: 6 }}
+      >
+        <Settings size={16} />
+      </button>
+      {open && (
+        <div
+          className="card"
+          style={{
+            position: "absolute",
+            top: "calc(100% + 6px)",
+            right: 0,
+            zIndex: 20,
+            width: 260,
+            display: "flex",
+            flexDirection: "column",
+            gap: 10,
+            padding: 12,
+          }}
+        >
+          <div style={{ fontWeight: 600 }}>Audio settings</div>
+          <Row kind="mic" label="Microphone" options={devices.inputs} />
+          <Row kind="speaker" label="Speaker" options={devices.outputs} />
+          <Row kind="ringtone" label="Ringtone" options={devices.outputs} />
+          {error && <div className="muted" style={{ fontSize: 12 }}>{error}</div>}
+          <div className="muted" style={{ fontSize: 11 }}>
+            Microphone applies to your next call.
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // `channelId` is the caller channel to hold/transfer (the selected/active platform call's
 // provider_call_sid). Optional: without one, hold/transfer are disabled with a hint.
 export default function InCallBar({ channelId }: { channelId?: string }) {
@@ -175,6 +280,7 @@ export default function InCallBar({ channelId }: { channelId?: string }) {
         <button disabled={!canControl || busy} onClick={toggleHold}>
           {held ? "Resume" : "Hold"}
         </button>
+        <AudioSettings />
       </div>
 
       {/* Ticket 14: manual operator outbound calling (from-number picker + consent + bridge). */}

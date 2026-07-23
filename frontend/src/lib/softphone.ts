@@ -11,6 +11,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Web } from "sip.js";
 import { api } from "../api";
+import { applySink, micConstraints, startRingtone, stopRingtone } from "./audioDevices";
 
 export type SoftphoneStatus =
   | "offline" // not registered (availability toggle off, or connect failed)
@@ -47,6 +48,8 @@ function remoteAudioEl(): HTMLAudioElement {
     el.autoplay = true;
     document.body.appendChild(el);
   }
+  // Route call audio to the operator's chosen speaker (live; no-op if unsupported).
+  void applySink(el, "speaker");
   return el;
 }
 
@@ -73,7 +76,13 @@ export function useSoftphone() {
       const aor = `sip:${creds.sip.username}@${creds.sip.domain}`;
       const options: Web.SimpleUserOptions = {
         aor,
-        media: { remote: { audio: remoteAudioEl() } },
+        media: {
+          // Honor the operator's chosen microphone (read fresh at connect time). SIP.js types
+          // `audio` as boolean but forwards it verbatim to getUserMedia, so a deviceId
+          // MediaTrackConstraints object is valid at runtime — cast at this boundary.
+          constraints: { audio: micConstraints() as unknown as boolean, video: false },
+          remote: { audio: remoteAudioEl() },
+        },
         userAgentOptions: {
           authorizationUsername: creds.sip.authorization_username,
           authorizationPassword: creds.sip.password,
@@ -145,9 +154,17 @@ export function useSoftphone() {
     patch({ status: state.available ? "available" : "offline" });
   }, [state.available]);
 
+  // Ring the operator's chosen ringtone device while an incoming call is pending; stop the
+  // moment it's answered, hung up, or the phone goes offline.
+  useEffect(() => {
+    if (state.status === "ringing") void startRingtone();
+    else stopRingtone();
+  }, [state.status]);
+
   // Tear down on unmount so we don't leak a registration.
   useEffect(() => {
     return () => {
+      stopRingtone();
       void disconnect();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
