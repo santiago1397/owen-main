@@ -2,8 +2,9 @@ import { useQuery } from "@tanstack/react-query";
 import { api } from "../api";
 
 function Copy({ text }: { text: string }) {
+  // copyrow: below 560px this stacks the URL above the button — see styles.css. Inert above.
   return (
-    <span>
+    <span className="copyrow">
       <code className="mono">{text}</code>{" "}
       <button onClick={() => navigator.clipboard.writeText(text)}>copy</button>
     </span>
