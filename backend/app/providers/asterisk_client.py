@@ -151,6 +151,48 @@ class AsteriskAriClient:
         ok = await self._post("/ari/channels", params=params)
         return "answered" if ok else "failed"
 
+    # --- Outbound calling (Ticket 14) — originate helpers that RETURN the channel id ---------
+    # Unlike _originate above (which only needs answered/failed for the flow interpreter), the
+    # outbound orchestration must bridge the new legs, so these return ARI's assigned channel id.
+
+    async def _originate_channel(
+        self, endpoint: str, *, caller_id=None, originator=None, variables=None
+    ) -> str | None:
+        params = {"endpoint": endpoint, "app": settings.ARI_APP}
+        if caller_id:
+            params["callerId"] = str(caller_id)
+        if originator:
+            params["originator"] = str(originator)
+        body = {"variables": dict(variables)} if variables else None
+        data = await self._post_json("/ari/channels", params=params, json=body)
+        if isinstance(data, dict) and data.get("id"):
+            return str(data["id"])
+        return None
+
+    async def originate_operator(
+        self, operator_id: str, *, caller_id=None, variables=None
+    ) -> str | None:
+        """Originate the operator's own WebRTC leg (PJSIP/operator-<slug>) into Stasis."""
+        return await self._originate_channel(
+            operator_dial_endpoint(operator_id), caller_id=caller_id, variables=variables
+        )
+
+    async def originate_number(
+        self, number: str, *, caller_id=None, trunk_name=None, originator=None, variables=None
+    ) -> str | None:
+        """Originate an external number over the BulkVS trunk into Stasis."""
+        trunk = trunk_name or settings.BULKVS_TRUNK_NAME
+        return await self._originate_channel(
+            f"PJSIP/{number}@{trunk}", caller_id=caller_id, originator=originator, variables=variables
+        )
+
+    async def record_bridge(self, bridge_id: str, name: str) -> None:
+        """Start a mixed recording of a bridge (both legs) — outbound calls record by default."""
+        await self._post(
+            f"/ari/bridges/{bridge_id}/record",
+            params={"name": name, "format": "wav", "ifExists": "overwrite"},
+        )
+
     async def hangup(self, channel_id: str) -> None:
         await self._delete(f"/ari/channels/{channel_id}")
 
@@ -195,12 +237,13 @@ class AsteriskAriClient:
             logger.exception("ARI POST %s failed", path)
             return False
 
-    async def _post_json(self, path: str, params: dict | None = None):
+    async def _post_json(self, path: str, params: dict | None = None, json: dict | None = None):
         """POST and return the parsed JSON body (or None). Used where we need ARI's response
-        (e.g. the id of a newly created bridge)."""
+        (e.g. the id of a newly created bridge / originated channel). An optional `json` body
+        carries originate `variables`."""
         try:
             async with await self._client() as client:
-                resp = await client.post(f"{self._base}{path}", params=params or {})
+                resp = await client.post(f"{self._base}{path}", params=params or {}, json=json)
                 if resp.status_code >= 300:
                     return None
                 return resp.json()
