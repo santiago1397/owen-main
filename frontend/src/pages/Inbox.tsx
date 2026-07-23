@@ -1,5 +1,19 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo, useRef, useState } from "react";
+import {
+  Check,
+  Headphones,
+  MessageSquarePlus,
+  Paperclip,
+  Phone,
+  PhoneIncoming,
+  PhoneOutgoing,
+  Plus,
+  RotateCcw,
+  SendHorizontal,
+  Settings,
+  X,
+} from "lucide-react";
 import { API_BASE, api, ApiError } from "../api";
 import InCallBar from "../components/InCallBar";
 
@@ -155,7 +169,9 @@ function Timeline({ items }: { items: TimelineItem[] }) {
             {divider && <div className="quo-day">{day}</div>}
             {it.type === "call" ? (
               <div className="quo-callchip">
-                <span>{it.direction === "outbound" ? "↗" : "↙"} 📞</span>
+                <span style={{ display: "inline-flex", alignItems: "center" }}>
+                  {it.direction === "outbound" ? <PhoneOutgoing size={13} /> : <PhoneIncoming size={13} />}
+                </span>
                 <span>
                   {it.direction === "outbound" ? "Outgoing call" : "Incoming call"}
                   {it.status && it.status !== "completed" ? ` · ${it.status}` : ""}
@@ -172,7 +188,8 @@ function Timeline({ items }: { items: TimelineItem[] }) {
                     (it.media_urls || []).map((u, i) => (
                       <a key={i} href={u} target="_blank" rel="noreferrer"
                          style={{ display: "block", fontSize: 11, color: "inherit", textDecoration: "underline" }}>
-                        📎 media {i + 1}
+                        <Paperclip size={11} style={{ verticalAlign: "-1px", marginRight: 3 }} />
+                        media {i + 1}
                       </a>
                     ))}
                 </div>
@@ -185,7 +202,7 @@ function Timeline({ items }: { items: TimelineItem[] }) {
           </div>
         );
       })}
-      {items.length === 0 && <div className="quo-day">No activity yet — say hi 👋</div>}
+      {items.length === 0 && <div className="quo-day">No activity yet — say hi</div>}
       <div ref={endRef} />
     </div>
   );
@@ -228,7 +245,7 @@ function ContactPanel({ detail, onCall }: { detail: ThreadDetail; onCall: () => 
       </div>
       <h3>{c.name || fmtPhone(c.phone_number) || "Unknown"}</h3>
       <div style={{ display: "flex", justifyContent: "center", gap: 8, marginTop: 10 }}>
-        <button className="quo-iconbtn" style={{ border: "1px solid var(--q-border)" }} title="Call" onClick={onCall}>📞</button>
+        <button className="quo-iconbtn" style={{ border: "1px solid var(--q-border)" }} title="Call" onClick={onCall}><Phone size={16} /></button>
       </div>
 
       <div className="quo-sec">Contact</div>
@@ -267,7 +284,7 @@ function ContactPanel({ detail, onCall }: { detail: ThreadDetail; onCall: () => 
                placeholder="Write a note…" value={note}
                onChange={(e) => setNote(e.target.value)}
                onKeyDown={(e) => e.key === "Enter" && addNote()} />
-        <button className="quo-send" disabled={!note.trim()} onClick={addNote}>+</button>
+        <button className="quo-send" disabled={!note.trim()} onClick={addNote}><Plus size={16} /></button>
       </div>
       {detail.notes.map((n) => (
         <div key={n.id} className="quo-note">
@@ -275,7 +292,7 @@ function ContactPanel({ detail, onCall }: { detail: ThreadDetail; onCall: () => 
           <div className="muted" style={{ fontSize: 10.5, marginTop: 4, display: "flex", justifyContent: "space-between" }}>
             <span>{n.author || ""} · {new Date(n.created_at).toLocaleString()}</span>
             <a style={{ cursor: "pointer" }}
-               onClick={() => api.inboxDeleteNote(n.id).then(invalidate)}>✕</a>
+               onClick={() => api.inboxDeleteNote(n.id).then(invalidate)}><X size={12} /></a>
           </div>
         </div>
       ))}
@@ -349,9 +366,9 @@ export default function Inbox() {
           <button className={"qtab" + (tab === "chats" ? " active" : "")} onClick={() => setTab("chats")}>Chats</button>
           <button className={"qtab" + (tab === "calls" ? " active" : "")} onClick={() => setTab("calls")}>Calls</button>
           <div style={{ flex: 1 }} />
-          <button className="quo-iconbtn" title="Softphone" onClick={() => setShowPhone((v) => !v)}>📞</button>
-          <button className="quo-iconbtn" title="New chat" onClick={() => setShowNewChat(true)}>💬</button>
-          <button className="quo-iconbtn" title="Inbox settings" onClick={() => setShowSettings(true)}>⚙</button>
+          <button className="quo-iconbtn" title="Softphone" onClick={() => setShowPhone((v) => !v)}><Phone size={16} /></button>
+          <button className="quo-iconbtn" title="New chat" onClick={() => setShowNewChat(true)}><MessageSquarePlus size={16} /></button>
+          <button className="quo-iconbtn" title="Inbox settings" onClick={() => setShowSettings(true)}><Settings size={16} /></button>
         </div>
 
         {tab === "chats" && (
@@ -504,10 +521,10 @@ function Conversation({ thread, onCall }: { thread: Thread; onCall: () => void }
               </div>
             </div>
             <div style={{ flex: 1 }} />
-            <button className="quo-iconbtn" title="Call" onClick={onCall}>📞</button>
+            <button className="quo-iconbtn" title="Call" onClick={onCall}><Phone size={16} /></button>
             <button className="quo-iconbtn" title={thread.open ? "Mark done (close)" : "Reopen"}
                     onClick={toggleClosed}>
-              {thread.open ? "✓" : "↩"}
+              {thread.open ? <Check size={16} /> : <RotateCcw size={16} />}
             </button>
           </div>
 
@@ -534,7 +551,7 @@ function Conversation({ thread, onCall }: { thread: Thread; onCall: () => void }
               />
               <button className="quo-send" onClick={submit}
                       disabled={!canSend || !draft.trim() || send.isPending}>
-                {send.isPending ? "…" : "➤"}
+                {send.isPending ? "…" : <SendHorizontal size={16} />}
               </button>
             </div>
             <div className="muted" style={{ fontSize: 11, marginTop: 4, color: "var(--q-muted)" }}>
@@ -576,7 +593,11 @@ function CallLog({ onOpenThread }: { onOpenThread: (phone: string) => void }) {
         <div key={c.id}>
           <div className="quo-callrow" style={{ cursor: "pointer" }}
                onClick={() => setExpanded(expanded === c.id ? null : c.id)}>
-            <span>{c.direction === "outbound" ? "↗" : "↙"}</span>
+            <span style={{ display: "inline-flex", alignItems: "center" }}>
+              {c.direction === "outbound"
+                ? <PhoneOutgoing size={14} color="var(--q-muted)" />
+                : <PhoneIncoming size={14} color="var(--q-muted)" />}
+            </span>
             <div style={{ flex: 1, minWidth: 0 }}>
               <div style={{ fontWeight: 600 }}>{fmtPhone(c.caller_number) || "Unknown"}</div>
               <div style={{ color: "var(--q-muted)", fontSize: 11.5 }}>
@@ -585,7 +606,7 @@ function CallLog({ onOpenThread }: { onOpenThread: (phone: string) => void }) {
             </div>
             <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 2 }}>
               <span className="quo-ttime">{fmtListTime(c.started_at)}</span>
-              {c.has_recording && <span style={{ fontSize: 11 }}>🎧</span>}
+              {c.has_recording && <Headphones size={13} color="var(--q-muted)" />}
             </div>
           </div>
           {expanded === c.id && (
