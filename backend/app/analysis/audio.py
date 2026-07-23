@@ -74,11 +74,15 @@ async def probe_channel_count(path: str) -> int:
 
 async def split_stereo(path: str, ch0_path: str, ch1_path: str) -> None:
     """Extract channel 0 -> ch0_path and channel 1 -> ch1_path as mono MP3s. Raises on
-    ffmpeg failure. `-y` overwrites so a retry re-deriving the splits is safe."""
+    ffmpeg failure. `-y` overwrites so a retry re-deriving the splits is safe.
+
+    Uses the `channelsplit` filter rather than `-map_channel`: the latter was removed from
+    modern ffmpeg builds (7.x), where it errors with "Unrecognized option 'map_channel'"."""
     code, _, err = await _run(
         "ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", path,
-        "-map_channel", "0.0.0", ch0_path,
-        "-map_channel", "0.0.1", ch1_path,
+        "-filter_complex", "[0:a]channelsplit=channel_layout=stereo[left][right]",
+        "-map", "[left]", ch0_path,
+        "-map", "[right]", ch1_path,
     )
     if code != 0:
         raise RuntimeError(f"ffmpeg split failed ({code}): {err.decode(errors='replace')[:200]}")

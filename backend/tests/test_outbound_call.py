@@ -206,11 +206,13 @@ def test_time_window_guardrail():
 
 
 def test_opt_out_defensive():
-    print("opt-out guardrail — defensive when the Ticket-10 sms_opt_outs model is absent:")
-    # In this sandbox (and until Ticket 10 merges) the SmsOptOut model does not exist, so the
-    # resolver returns None and the caller skips the opt-out check silently.
-    check("resolve_opt_out_model() is None when the model/table is absent",
-          outbound.resolve_opt_out_model() is None)
+    print("opt-out guardrail — resolves now that Ticket 10's sms_opt_outs model has merged:")
+    # Ticket 10 (manual outbound SMS + opt-out gate) has since merged, so the model exists
+    # and the resolver must find it. `resolve_opt_out_model()` staying import-light/defensive
+    # (returning None on any import error) is still exercised by test_number_sync-style callers
+    # that don't have the model layer available at all.
+    check("resolve_opt_out_model() resolves the merged SmsOptOut model",
+          outbound.resolve_opt_out_model() is not None)
     check("opt_out_warning(None) -> no warning (undetermined => skip)",
           outbound.opt_out_warning(None) is None)
     check("opt_out_warning(False) -> no warning", outbound.opt_out_warning(False) is None)

@@ -12,6 +12,7 @@ No new schema — the signal lives in the existing free-form `tags` (ARCHITECTUR
 """
 
 import json
+import logging
 import re
 from dataclasses import dataclass, field
 from typing import Protocol
@@ -19,6 +20,8 @@ from typing import Protocol
 import httpx
 
 from app.core.config import settings
+
+logger = logging.getLogger("analysis.classification")
 
 # Controlled category vocabulary (chartable). Free-form `tags` carry the nuance.
 CATEGORIES = [
@@ -158,6 +161,23 @@ _JOB_INSTRUCTIONS = (
 )
 
 
+def _parse_tool_json(raw: str) -> dict:
+    """Parse a function-call JSON payload, tolerating the truncated/malformed output some
+    OpenAI-compatible providers (MiniMax) occasionally emit: try a straight parse, then
+    attempt to repair a truncated tail (unterminated string / unbalanced brackets) before
+    giving up. Raises json.JSONDecodeError if the payload still can't be salvaged."""
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        pass
+    repaired = raw
+    if repaired.count('"') % 2 == 1:
+        repaired += '"'
+    repaired += "}" * max(0, repaired.count("{") - repaired.count("}"))
+    repaired += "]" * max(0, repaired.count("[") - repaired.count("]"))
+    return json.loads(repaired)
+
+
 def _result_from_tool_input(data: dict, model: str) -> AnalysisResult:
     """Build an AnalysisResult from a validated tool-call payload, folding the job/lead
     signal into the free-form tags. Shared by the Claude and MiniMax engines."""
@@ -248,10 +268,21 @@ class MinimaxAnalysisEngine:
         resp.raise_for_status()
         message = resp.json()["choices"][0]["message"]
         tool_calls = message.get("tool_calls") or []
-        if tool_calls:
-            data = json.loads(tool_calls[0]["function"]["arguments"])
-        else:
-            data = json.loads(message["content"])
+        raw = tool_calls[0]["function"]["arguments"] if tool_calls else message.get("content", "")
+        try:
+            data = _parse_tool_json(raw)
+        except json.JSONDecodeError:
+            # MiniMax occasionally emits malformed/truncated function-call JSON. Falling
+            # back to the offline heuristic keeps the job (and the call's analysis row)
+            # alive instead of exhausting retries and dead-lettering permanently — logged
+            # loudly so it stays visible rather than silently degrading quality.
+            logger.warning(
+                "minimax analyze: malformed tool-call JSON, falling back to heuristic engine: %r",
+                raw[:300],
+            )
+            result = await DummyAnalysisEngine().analyze(transcript)
+            result.model = "minimax-fallback"
+            return result
         return _result_from_tool_input(data, settings.ANALYSIS_MODEL)
 
 
