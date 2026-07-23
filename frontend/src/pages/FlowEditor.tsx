@@ -28,6 +28,7 @@ import {
   graphToCanvas,
   makeEdge,
   makeNode,
+  nodePorts,
   uniqueId,
   unwiredPorts,
 } from "../lib/canvasGraph";
@@ -176,6 +177,8 @@ function Editor() {
 
   const patchConfig = useCallback(
     (nid: string, patch: Record<string, any>) => {
+      let newConfig: Record<string, any> | null = null;
+      let ntype: NodeType | null = null;
       setNodes((nds) =>
         nds.map((n) => {
           if (n.id !== nid) return n;
@@ -184,12 +187,15 @@ function Editor() {
             if (v === undefined) delete config[k];
             else config[k] = v;
           }
+          newConfig = config;
+          ntype = n.data.ntype;
           return { ...n, data: { ...n.data, config } };
         })
       );
-      // Disabling a menu digit must drop that port's edge too.
-      if ("digits" in patch && Array.isArray(patch.digits)) {
-        const keep = new Set([...patch.digits, "timeout", "invalid"]);
+      // A config change can remove ports (a disabled menu digit, a deleted/renamed
+      // conditions row): drop edges wired to ports the node no longer exposes.
+      if (newConfig && ntype) {
+        const keep = new Set(nodePorts(ntype, newConfig));
         setEdges((eds) =>
           eds.filter((e) => e.source !== nid || keep.has(e.sourceHandle || "default"))
         );

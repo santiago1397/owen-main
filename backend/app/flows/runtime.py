@@ -16,10 +16,15 @@ Each emit() uses its own short-lived session + commit so the (possibly minutes-l
 never holds one transaction open.
 """
 
+import asyncio
+import json
 import logging
 import uuid
-from typing import Optional
+from datetime import datetime, timezone
+from typing import Any, Optional
+from zoneinfo import ZoneInfo
 
+import httpx
 from sqlalchemy import select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
@@ -30,11 +35,106 @@ from app.db import SessionLocal
 from app.flows.interpreter import AriControl, FlowInterpreter
 from app.models import Agent, AgentVersion, Call, CallEvent, Flow, FlowVersion, Number
 from app.providers.asterisk import linkedid as _linkedid
+from app.services import queue, sms
 from app.services.ingestion import _get_or_create_provider
+from app.services.messages import enqueue_outbound_message, get_optout_state
+from app.services.number_sync import is_carrier_active
 
 logger = logging.getLogger("flows.runtime")
 
 PROVIDER_NAME = "asterisk"  # matches asterisk_consumer.PROVIDER_NAME (call row / call_events)
+
+# `request` node: hard wall-clock ceiling on the whole HTTP exchange (Ticket 17).
+_REQUEST_TIMEOUT_S = 5.0
+
+_DOW = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
+
+
+def _builtin_variables(caller_number: str, dialed_number: str) -> dict:
+    """Seed the interpreter's per-call variable store (Ticket 17). call.time / call.dow are
+    computed HERE (app code, not the pure interpreter) in the business timezone."""
+    try:
+        local = datetime.now(ZoneInfo(settings.BUSINESS_TZ))
+    except Exception:  # noqa: BLE001 - a misconfigured tz must not break call handling
+        local = datetime.now(timezone.utc)
+    return {
+        "caller_number": caller_number,
+        "dialed_number": dialed_number,
+        "call.time": local.strftime("%H:%M"),
+        "call.dow": _DOW[local.weekday()],
+    }
+
+
+async def _send_flow_sms(dialed_number: str, to: str, body: str, lid: str) -> None:
+    """Background task behind the `send_sms` node: enqueue an outbound SMS FROM the flow's
+    DID through the platform outbound path, so the SAME gates as a manual send apply
+    (per-number 10DLC, carrier-active, per-contact opt-out; the worker re-checks opt-out at
+    drain). Own short-lived session (the runtime's session-per-emit pattern); best-effort —
+    any refusal/failure is logged and the call is never affected."""
+    try:
+        async with SessionLocal() as db:
+            number = (
+                await db.execute(
+                    select(Number).where(
+                        Number.phone_number == dialed_number,
+                        Number.media_provider == settings.BULKVS_MEDIA_PROVIDER,
+                    ).limit(1)
+                )
+            ).scalar_one_or_none()
+            if number is None:
+                logger.warning("flow send_sms: no Number row for DID %s (linkedid=%s)", dialed_number, lid)
+                return
+            reason = sms.outbound_block_reason(number.sms_enabled, number.sms_campaign_id)
+            if reason:
+                logger.info("flow send_sms: refused for %s — %s (linkedid=%s)", dialed_number, reason, lid)
+                return
+            if not is_carrier_active(number.provider_status):
+                logger.info(
+                    "flow send_sms: %s not carrier-active (status=%s, linkedid=%s)",
+                    dialed_number, number.provider_status, lid,
+                )
+                return
+            state = await get_optout_state(db, number.id, to)
+            if sms.is_opted_out(state):
+                logger.info("flow send_sms: %s opted out of %s (linkedid=%s)", to, dialed_number, lid)
+                return
+            msg = await enqueue_outbound_message(db, number, to, body, None)
+            await queue.enqueue(db, "message_send", {"message_id": str(msg.id)})
+            logger.info("flow send_sms: queued %s -> %s (linkedid=%s)", dialed_number, to, lid)
+    except Exception:  # noqa: BLE001 - fire-and-forget: never raises into anything
+        logger.exception("flow send_sms: failed (DID %s -> %s, linkedid=%s)", dialed_number, to, lid)
+
+
+async def _http_request(method: str, url: str, headers: dict, body: Any) -> tuple[int, Any]:
+    """The `request` node's transport seam: one HTTP exchange under a HARD 5s ceiling.
+
+    Returns (status, parsed_body) — parsed JSON when the response is JSON, else the text.
+    Any transport error / timeout -> (0, None), which the interpreter maps to the `failure`
+    port with request.status = 0. Never raises."""
+    async def _do() -> tuple[int, Any]:
+        kwargs: dict = {}
+        if method == "POST" and body is not None:
+            if isinstance(body, (dict, list)):
+                kwargs["json"] = body
+            else:
+                text = str(body)
+                try:
+                    kwargs["json"] = json.loads(text)
+                except ValueError:
+                    kwargs["content"] = text
+        async with httpx.AsyncClient(timeout=_REQUEST_TIMEOUT_S) as client:
+            resp = await client.request(method, url, headers=headers or None, **kwargs)
+        try:
+            parsed: Any = resp.json()
+        except ValueError:
+            parsed = resp.text
+        return resp.status_code, parsed
+
+    try:
+        return await asyncio.wait_for(_do(), timeout=_REQUEST_TIMEOUT_S)
+    except Exception as exc:  # noqa: BLE001 - timeout/transport error -> failure port
+        logger.warning("flow request: %s %s failed: %r", method, url, exc)
+        return 0, None
 
 
 async def _resolve_active_flow_version(
@@ -148,6 +248,7 @@ async def run_flow_for_stasis(event: dict, ari: AriControl) -> None:
     channel_id = str(ch.get("id") or "")
     lid = _linkedid(event)
     dialed = (ch.get("dialplan") or {}).get("exten") if isinstance(ch.get("dialplan"), dict) else None
+    caller_number = str((ch.get("caller") or {}).get("number") or "") if isinstance(ch.get("caller"), dict) else ""
     if not channel_id or not lid or not dialed:
         return
 
@@ -216,6 +317,12 @@ async def run_flow_for_stasis(event: dict, ari: AriControl) -> None:
             logger.exception("flow runtime: ai_agent run failed (linkedid=%s)", lid)
             return ("failed", {})
 
+    async def send_sms(to: str, body: str) -> bool:
+        # send_sms node (Ticket 17): fire-and-forget. Schedule the gated enqueue on its own
+        # task + session so the interpreter takes its `default` port immediately.
+        asyncio.create_task(_send_flow_sms(str(dialed), to, body, lid))
+        return True
+
     interpreter = FlowInterpreter(
         graph=graph,
         channel_id=channel_id,
@@ -225,6 +332,9 @@ async def run_flow_for_stasis(event: dict, ari: AriControl) -> None:
         business_tz=settings.BUSINESS_TZ,
         on_start=pin,
         run_agent=run_agent,
+        send_sms=send_sms,
+        http_request=_http_request,
+        variables=_builtin_variables(caller_number, str(dialed)),
     )
     logger.info("flow runtime: running flow_version=%s on linkedid=%s DID=%s", fv_id, lid, dialed)
     try:

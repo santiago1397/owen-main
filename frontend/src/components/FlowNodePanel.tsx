@@ -1,4 +1,15 @@
-import { DAYS, MENU_DIGITS, NODE_TITLES, type CanvasNode, type NodeConfig } from "../lib/canvasGraph";
+import {
+  CONDITION_OPERATORS,
+  DAYS,
+  MENU_DIGITS,
+  NODE_TITLES,
+  type CanvasNode,
+  type ConditionOperator,
+  type ConditionRow,
+  type NodeConfig,
+  conditionRows,
+  rowPortName,
+} from "../lib/canvasGraph";
 
 // Per-type node config side panel (Ticket 16). Pure controlled component: the editor owns
 // the node state; every input funnels through onChange(partial-config). `record` +
@@ -234,6 +245,40 @@ export default function FlowNodePanel({
         </>
       )}
 
+      {ntype === "set_vars" && <SetVarsEditor config={config} set={set} />}
+
+      {ntype === "unset_vars" && <UnsetVarsEditor config={config} set={set} />}
+
+      {ntype === "conditions" && <ConditionsEditor config={config} set={set} />}
+
+      {ntype === "send_sms" && (
+        <>
+          <Field label="To (blank = the caller)">
+            <input
+              style={{ width: "100%" }}
+              placeholder="{{caller_number}}"
+              value={config.to || ""}
+              onChange={(e) => set("to", e.target.value)}
+            />
+          </Field>
+          <Field label="Message body">
+            <textarea
+              style={{ width: "100%", minHeight: 70 }}
+              placeholder="Thanks for calling! …"
+              value={config.body || ""}
+              onChange={(e) => set("body", e.target.value)}
+            />
+          </Field>
+          <p className="muted" style={{ margin: "4px 0 0", fontSize: 12 }}>
+            Sent fire-and-forget from this flow's DID. Use{" "}
+            <code className="mono">{"{{caller_number}}"}</code> and other variables in either
+            field. Opt-out and 10DLC gates apply; the call never waits on delivery.
+          </p>
+        </>
+      )}
+
+      {ntype === "request" && <RequestEditor config={config} set={set} />}
+
       {ntype === "hangup" && (
         <p className="muted" style={{ margin: 0 }}>
           Terminal node — hangs up the call. Nothing to configure.
@@ -323,6 +368,245 @@ function HoursEditor({ config, set }: { config: NodeConfig; set: (k: string, v: 
       </Field>
       <p className="muted" style={{ margin: "4px 0 0", fontSize: 12 }}>
         No schedule at all = always open (fail-open, matching the runtime).
+      </p>
+    </>
+  );
+}
+
+// --- Ticket 17: key/value rows shared by set_vars, request headers ------------------------
+
+function KeyValueRows({
+  pairs,
+  onChange,
+  keyPlaceholder,
+  valuePlaceholder,
+}: {
+  pairs: [string, string][];
+  onChange: (pairs: [string, string][]) => void;
+  keyPlaceholder: string;
+  valuePlaceholder: string;
+}) {
+  const setPair = (i: number, key: string, value: string) =>
+    onChange(pairs.map((p, j) => (j === i ? [key, value] : p)));
+  return (
+    <div>
+      {pairs.map(([k, v], i) => (
+        <div key={i} className="kvrow" style={{ display: "flex", gap: 6, marginBottom: 6 }}>
+          <input
+            style={{ flex: "0 0 40%" }}
+            placeholder={keyPlaceholder}
+            value={k}
+            onChange={(e) => setPair(i, e.target.value, v)}
+          />
+          <input
+            style={{ flex: 1 }}
+            placeholder={valuePlaceholder}
+            value={v}
+            onChange={(e) => setPair(i, k, e.target.value)}
+          />
+          <button type="button" onClick={() => onChange(pairs.filter((_, j) => j !== i))}>
+            ✕
+          </button>
+        </div>
+      ))}
+      <button type="button" className="hoursadd" onClick={() => onChange([...pairs, ["", ""]])}>
+        + row
+      </button>
+    </div>
+  );
+}
+
+// set_vars config: {vars: {name: "literal or {{var}}"}}. Edited as ordered key/value rows;
+// serialized back to an object (a stable-order object, matching the interpreter's iteration).
+function SetVarsEditor({ config, set }: { config: NodeConfig; set: (k: string, v: any) => void }) {
+  const vars: Record<string, string> =
+    config.vars && typeof config.vars === "object" ? config.vars : {};
+  const pairs = Object.entries(vars).map(([k, v]) => [k, String(v)] as [string, string]);
+  const commit = (next: [string, string][]) => {
+    const obj: Record<string, string> = {};
+    for (const [k, v] of next) if (k.trim()) obj[k.trim()] = v;
+    set("vars", next.length ? obj : undefined);
+  };
+  return (
+    <Field label="Variables to set (value may contain {{vars}})">
+      <KeyValueRows
+        pairs={pairs.length ? pairs : [["", ""]]}
+        onChange={commit}
+        keyPlaceholder="name"
+        valuePlaceholder="literal or {{var}}"
+      />
+    </Field>
+  );
+}
+
+// unset_vars config: {names: [...]}. One name per row.
+function UnsetVarsEditor({ config, set }: { config: NodeConfig; set: (k: string, v: any) => void }) {
+  const names: string[] = Array.isArray(config.names) ? config.names : [];
+  const commit = (next: string[]) => set("names", next.some((n) => n.trim()) ? next.map((n) => n.trim()).filter(Boolean) : undefined);
+  const rows = names.length ? names : [""];
+  return (
+    <Field label="Variable names to remove">
+      <div>
+        {rows.map((n, i) => (
+          <div key={i} style={{ display: "flex", gap: 6, marginBottom: 6 }}>
+            <input
+              style={{ flex: 1 }}
+              placeholder="name"
+              value={n}
+              onChange={(e) => commit(rows.map((x, j) => (j === i ? e.target.value : x)))}
+            />
+            <button type="button" onClick={() => commit(rows.filter((_, j) => j !== i))}>
+              ✕
+            </button>
+          </div>
+        ))}
+        <button type="button" className="hoursadd" onClick={() => commit([...rows, ""])}>
+          + name
+        </button>
+      </div>
+    </Field>
+  );
+}
+
+// conditions config: {rows: [{variable, operator, value, port}]}. Ordered editor; first
+// match wins at runtime. Each row's port is auto-derived (match_1, match_2, …) and kept
+// stable per position; the always-present "else" port catches no-match. Up/down reorder.
+function ConditionsEditor({ config, set }: { config: NodeConfig; set: (k: string, v: any) => void }) {
+  const rows = conditionRows(config);
+  // Re-derive positional port names so ports stay match_<n> after add/remove/reorder.
+  const commit = (next: ConditionRow[]) =>
+    set(
+      "rows",
+      next.length
+        ? next.map((r, i) => ({ ...r, port: rowPortName(i) }))
+        : undefined
+    );
+  const setRow = (i: number, patch: Partial<ConditionRow>) =>
+    commit(rows.map((r, j) => (j === i ? { ...r, ...patch } : r)));
+  const move = (i: number, dir: -1 | 1) => {
+    const j = i + dir;
+    if (j < 0 || j >= rows.length) return;
+    const next = [...rows];
+    [next[i], next[j]] = [next[j], next[i]];
+    commit(next);
+  };
+  const addRow = () =>
+    commit([...rows, { variable: "", operator: "equals", value: "", port: rowPortName(rows.length) }]);
+
+  return (
+    <>
+      <Field label="Rules (first match wins; each adds an output port)">
+        <div>
+          {rows.map((r, i) => (
+            <div key={i} className="condrow" style={{ border: "1px solid var(--border)", borderRadius: 6, padding: 8, marginBottom: 8 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
+                <span className="badge">{rowPortName(i)}</span>
+                <span style={{ display: "flex", gap: 4 }}>
+                  <button type="button" disabled={i === 0} onClick={() => move(i, -1)} title="Move up">
+                    ↑
+                  </button>
+                  <button type="button" disabled={i === rows.length - 1} onClick={() => move(i, 1)} title="Move down">
+                    ↓
+                  </button>
+                  <button type="button" onClick={() => commit(rows.filter((_, j) => j !== i))} title="Remove rule">
+                    ✕
+                  </button>
+                </span>
+              </div>
+              <input
+                style={{ width: "100%", marginBottom: 6 }}
+                placeholder="variable (e.g. gather.digits, request.body.status)"
+                value={r.variable || ""}
+                onChange={(e) => setRow(i, { variable: e.target.value })}
+              />
+              <div style={{ display: "flex", gap: 6 }}>
+                <select
+                  value={r.operator || "equals"}
+                  onChange={(e) => setRow(i, { operator: e.target.value as ConditionOperator })}
+                >
+                  {CONDITION_OPERATORS.map((op) => (
+                    <option key={op} value={op}>
+                      {op}
+                    </option>
+                  ))}
+                </select>
+                {r.operator !== "is_empty" && (
+                  <input
+                    style={{ flex: 1 }}
+                    placeholder="value (may contain {{var}})"
+                    value={r.value || ""}
+                    onChange={(e) => setRow(i, { value: e.target.value })}
+                  />
+                )}
+              </div>
+            </div>
+          ))}
+          <button type="button" className="hoursadd" onClick={addRow}>
+            + rule
+          </button>
+        </div>
+      </Field>
+      <p className="muted" style={{ margin: "4px 0 0", fontSize: 12 }}>
+        Rows evaluate top-to-bottom; the first match takes its port. If nothing matches, the{" "}
+        <code className="mono">else</code> port is taken. <code className="mono">gt</code>/
+        <code className="mono">lt</code> compare numerically when both sides are numbers.
+      </p>
+    </>
+  );
+}
+
+// request config: {method, url, headers?, body?}. Method select, url, header key/value rows,
+// JSON/text body. All fields interpolate {{vars}} at call time.
+function RequestEditor({ config, set }: { config: NodeConfig; set: (k: string, v: any) => void }) {
+  const headers: Record<string, string> =
+    config.headers && typeof config.headers === "object" ? config.headers : {};
+  const headerPairs = Object.entries(headers).map(([k, v]) => [k, String(v)] as [string, string]);
+  const commitHeaders = (next: [string, string][]) => {
+    const obj: Record<string, string> = {};
+    for (const [k, v] of next) if (k.trim()) obj[k.trim()] = v;
+    set("headers", Object.keys(obj).length ? obj : undefined);
+  };
+  return (
+    <>
+      <div style={{ display: "flex", gap: 8 }}>
+        <Field label="Method">
+          <select value={config.method || "GET"} onChange={(e) => set("method", e.target.value)}>
+            <option value="GET">GET</option>
+            <option value="POST">POST</option>
+          </select>
+        </Field>
+        <Field label="URL">
+          <input
+            style={{ width: "100%", minWidth: 200 }}
+            placeholder="https://api.example.com/lookup?n={{caller_number}}"
+            value={config.url || ""}
+            onChange={(e) => set("url", e.target.value)}
+          />
+        </Field>
+      </div>
+      <Field label="Headers">
+        <KeyValueRows
+          pairs={headerPairs.length ? headerPairs : [["", ""]]}
+          onChange={commitHeaders}
+          keyPlaceholder="Header-Name"
+          valuePlaceholder="value or {{var}}"
+        />
+      </Field>
+      {(config.method || "GET") === "POST" && (
+        <Field label="Body (JSON or text; {{vars}} interpolated)">
+          <textarea
+            style={{ width: "100%", minHeight: 70 }}
+            placeholder={'{"caller": "{{caller_number}}"}'}
+            value={config.body || ""}
+            onChange={(e) => set("body", e.target.value)}
+          />
+        </Field>
+      )}
+      <p className="muted" style={{ margin: "4px 0 0", fontSize: 12 }}>
+        5s timeout. A 2xx response takes the <code className="mono">success</code> port and
+        exposes <code className="mono">{"{{request.status}}"}</code> /{" "}
+        <code className="mono">{"{{request.body.*}}"}</code>; anything else takes{" "}
+        <code className="mono">failure</code>.
       </p>
     </>
   );

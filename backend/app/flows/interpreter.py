@@ -32,13 +32,26 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Awaitable, Callable, ClassVar, Optional, Protocol
+from typing import Any, Awaitable, Callable, ClassVar, Optional, Protocol
 from zoneinfo import ZoneInfo
+
+from app.flows.variables import evaluate_conditions, interpolate
 
 logger = logging.getLogger("flows.interpreter")
 
 # Node types that TERMINATE the call: once run, the interpreter stops (no onward routing).
 TERMINAL_TYPES: frozenset[str] = frozenset({"voicemail", "hangup"})
+
+# Ticket 17 parity nodes emit their transition event AFTER the handler runs (instead of the
+# usual emit-on-entry), so the payload can snapshot the OUTCOME (vars set, matched condition
+# row, request status). All of these run in bounded time (send_sms is fire-and-forget; the
+# request node has a hard timeout), so deferring the emit never delays it meaningfully.
+_POST_EMIT_TYPES: frozenset[str] = frozenset(
+    {"set_vars", "unset_vars", "conditions", "send_sms", "request"}
+)
+
+# Event-payload snapshot cap: variable VALUES in flow.node.* payloads are truncated to this.
+_SNAP_MAX = 200
 
 # Sentinel port meaning "the handler could not choose a valid port" (unknown node type or a
 # handler error). It never matches a wired edge, so it always falls through to the fallback.
@@ -46,6 +59,11 @@ _ERROR: str = "\x00__error__"
 
 # Weekday index (Mon=0) -> the schedule key an `hours` node uses.
 _DOW = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
+
+
+def _snap(value: Any) -> str:
+    """A value as it appears in a flow.node.* event payload: str()'d, capped at _SNAP_MAX."""
+    return "" if value is None else str(value)[:_SNAP_MAX]
 
 
 # --- Injected collaborators (all substitutable with fakes in tests) -----------------------
@@ -87,6 +105,15 @@ StartFn = Callable[[], Awaitable[None]]
 # the graph edge for that port — the agent NEVER bridges. Injectable so the node is unit-
 # testable with a fake; when None the node keeps its legacy stub (routes to `default`).
 RunAgentFn = Callable[[dict], Awaitable[tuple[str, dict]]]
+# send_sms(to, body) -> awaitable bool. The seam for the `send_sms` node (Ticket 17): the
+# runtime SCHEDULES the send through the platform outbound SMS service (opt-out + 10DLC
+# gates apply) and returns immediately — fire-and-forget, the flow never waits on carriers.
+# With no seam injected the node logs and continues (port `default` regardless).
+SendSmsFn = Callable[[str, str], Awaitable[bool]]
+# http_request(method, url, headers, body) -> awaitable (status, parsed_body). The seam for
+# the `request` node (Ticket 17): the runtime performs the HTTP call (httpx, 5s hard
+# timeout) so the interpreter stays transport-free. Transport errors/timeouts -> (0, None).
+HttpRequestFn = Callable[[str, str, dict, Any], Awaitable[tuple[int, Any]]]
 
 
 def _default_now() -> datetime:
@@ -178,7 +205,15 @@ class FlowInterpreter:
     max_steps: int = 100
     on_start: Optional[StartFn] = None
     run_agent: Optional[RunAgentFn] = None
+    send_sms: Optional[SendSmsFn] = None
+    http_request: Optional[HttpRequestFn] = None
+    # Per-call variable store (Ticket 17). The runtime seeds the built-ins (caller_number,
+    # dialed_number, call.time, call.dow) at construction; node handlers add gather.digits /
+    # request.status / request.body / set_vars entries as the call progresses.
+    variables: dict = field(default_factory=dict)
     _rec_counter: int = field(default=0, init=False)
+    # Outcome snapshot the deferred-emit node handlers stash for their transition event.
+    _event_extra: Optional[dict] = field(default=None, init=False)
 
     async def run(self) -> None:
         # Pin the flow_version onto the call FIRST, at StasisStart, before any node runs
@@ -217,13 +252,21 @@ class FlowInterpreter:
                 continue
 
             ntype = node.get("type")
-            await self._emit_transition(step, current, ntype)
+            # Ticket 17 parity nodes emit AFTER the handler so the event snapshots the
+            # outcome; everything else keeps the original emit-on-entry.
+            post_emit = ntype in _POST_EMIT_TYPES
+            if not post_emit:
+                await self._emit_transition(step, current, ntype)
 
+            self._event_extra = None
             try:
                 port = await self._run_node(node, ntype)
             except Exception:  # noqa: BLE001 - a node failure must fall through, not dead-air
                 logger.exception("interpreter %s: node '%s' (%s) failed", self.linkedid, current, ntype)
                 port = _ERROR
+
+            if post_emit:
+                await self._emit_transition(step, current, ntype, extra=self._event_extra)
 
             if ntype in TERMINAL_TYPES:
                 return  # voicemail / hangup already terminated the channel
@@ -280,7 +323,7 @@ class FlowInterpreter:
     async def _h_play(self, node: dict) -> Optional[str]:
         if node.get("record"):
             await self.ari.record(self.channel_id, self._rec_name("play"))
-        media = self._media(node)
+        media = self._interp(self._media(node))
         if media:
             await self.ari.play(self.channel_id, media)
         return "default"
@@ -289,12 +332,14 @@ class FlowInterpreter:
         return "open" if evaluate_hours(node, self.now(), self.business_tz) else "closed"
 
     async def _h_menu(self, node: dict) -> Optional[str]:
-        media = self._media(node)
+        media = self._interp(self._media(node))
         timeout_s = float(node.get("timeout", 5))
         max_digits = int(node.get("max_digits", 1))
         digit = await self.ari.read_digit(
             self.channel_id, prompt=media, timeout_s=timeout_s, max_digits=max_digits
         )
+        # Ticket 17: the collected digits become a flow variable ("" on timeout/no input).
+        self.variables["gather.digits"] = digit or ""
         edges = node.get("next") if isinstance(node.get("next"), dict) else {}
         if not digit:
             return "timeout"          # no input; routes via 'timeout' port or falls through
@@ -320,17 +365,18 @@ class FlowInterpreter:
                 self.channel_id, operators, caller_id=caller_id, timeout_s=timeout_s
             )
 
-        # NUMBER target (default). `target`/`number` holds the E.164 to reach over the trunk.
-        target = node.get("target") or node.get("number")
+        # NUMBER target (default). `target`/`number` holds the E.164 to reach over the trunk;
+        # {{var}} templates (e.g. a number captured into a variable) interpolate first.
+        target = self._interp(node.get("target") or node.get("number")).strip()
         if not target:
             return _ERROR
         result = await self.ari.dial_number(
-            self.channel_id, str(target), caller_id=caller_id, timeout_s=timeout_s
+            self.channel_id, target, caller_id=caller_id, timeout_s=timeout_s
         )
         return result  # "answered" | "noanswer" | "busy" | "failed"
 
     async def _h_voicemail(self, node: dict) -> Optional[str]:
-        media = self._media(node) or self._media_key(node, "greeting")
+        media = self._interp(self._media(node) or self._media_key(node, "greeting")) or None
         if media:
             await self.ari.play(self.channel_id, media)
         await self.ari.record(self.channel_id, self._rec_name("vm"))
@@ -362,6 +408,112 @@ class FlowInterpreter:
             return "complete"
         return port or "failed"
 
+    # --- Ticket 17 parity nodes ---
+
+    async def _h_set_vars(self, node: dict) -> Optional[str]:
+        # config: {"vars": {name: "literal or {{var}}"}}. String values interpolate against
+        # the current store (so `greeting = "Hi {{caller_number}}"` works); non-strings are
+        # stored as-is. Insertion order of the config dict is the assignment order.
+        cfg = node.get("vars")
+        snapshot: dict = {}
+        if isinstance(cfg, dict):
+            for name, value in cfg.items():
+                if not name:
+                    continue
+                key = str(name)
+                self.variables[key] = interpolate(value, self.variables) if isinstance(value, str) else value
+                snapshot[key] = _snap(self.variables[key])
+        self._event_extra = {"vars_set": snapshot}
+        return "default"
+
+    async def _h_unset_vars(self, node: dict) -> Optional[str]:
+        # config: {"names": ["a", "b"]}. Unknown names are a no-op.
+        names = node.get("names")
+        removed: list[str] = []
+        if isinstance(names, (list, tuple)):
+            for n in names:
+                key = str(n) if n else ""
+                if key and key in self.variables:
+                    self.variables.pop(key)
+                    removed.append(key)
+        self._event_extra = {"vars_unset": removed}
+        return "default"
+
+    async def _h_conditions(self, node: dict) -> Optional[str]:
+        # Ordered rows, first match wins; no match -> "else". Evaluation is pure (see
+        # app/flows/variables.py) and never raises — bad regexes/malformed rows are skipped.
+        rows = node.get("rows") if isinstance(node.get("rows"), list) else []
+        idx, port, actual = evaluate_conditions(rows, self.variables)
+        if port is None:
+            self._event_extra = {"matched_row": None, "port": "else"}
+            return "else"
+        row = rows[idx] if isinstance(rows[idx], dict) else {}
+        self._event_extra = {
+            "matched_row": idx,
+            "port": port,
+            "variable": _snap(row.get("variable")),
+            "operator": _snap(row.get("operator")),
+            "actual": _snap(actual),
+        }
+        return port
+
+    async def _h_send_sms(self, node: dict) -> Optional[str]:
+        # Fire-and-forget: the injected seam SCHEDULES the send through the platform outbound
+        # SMS service (from = the flow's DID; opt-out + 10DLC gates apply there) and returns
+        # immediately. The `default` port is taken regardless of send outcome — an SMS
+        # problem must never stall or reroute the call.
+        to = interpolate(node.get("to") or "{{caller_number}}", self.variables).strip()
+        body = interpolate(node.get("body"), self.variables).strip()
+        self._event_extra = {"sms_to": _snap(to), "sms_body": _snap(body)}
+        if not to or not body:
+            logger.warning("interpreter %s: send_sms node missing to/body; skipping", self.linkedid)
+            return "default"
+        if self.send_sms is None:
+            logger.warning("interpreter %s: send_sms node has no sender seam; skipping", self.linkedid)
+            return "default"
+        try:
+            await self.send_sms(to, body)
+        except Exception:  # noqa: BLE001 - fire-and-forget: an SMS failure never reroutes the call
+            logger.exception("interpreter %s: send_sms scheduling failed", self.linkedid)
+        return "default"
+
+    async def _h_request(self, node: dict) -> Optional[str]:
+        # HTTP GET/POST via the injected seam (runtime: httpx, 5s hard timeout). 2xx ->
+        # "success" and request.status / request.body populate the store (dot-path readable,
+        # e.g. {{request.body.data.status}}); anything else -> "failure" with request.status
+        # set (0 for transport errors/timeouts/missing config).
+        method = str(node.get("method") or "GET").upper()
+        if method not in ("GET", "POST"):
+            method = "GET"
+        url = interpolate(node.get("url"), self.variables).strip()
+        raw_headers = node.get("headers") if isinstance(node.get("headers"), dict) else {}
+        headers = {
+            interpolate(k, self.variables): interpolate(v, self.variables)
+            for k, v in raw_headers.items()
+            if k
+        }
+        body = node.get("body")
+        if isinstance(body, str):
+            body = interpolate(body, self.variables)
+
+        status, parsed = 0, None
+        if url and self.http_request is not None:
+            try:
+                status, parsed = await self.http_request(method, url, headers, body)
+                status = int(status or 0)
+            except Exception:  # noqa: BLE001 - a transport error takes the failure port
+                logger.exception("interpreter %s: request node failed (%s %s)", self.linkedid, method, url)
+                status, parsed = 0, None
+        elif not url:
+            logger.warning("interpreter %s: request node has no url", self.linkedid)
+        else:
+            logger.warning("interpreter %s: request node has no http seam", self.linkedid)
+
+        self.variables["request.status"] = status
+        self.variables["request.body"] = parsed
+        self._event_extra = {"request_status": status, "request_url": _snap(url)}
+        return "success" if 200 <= status < 300 else "failure"
+
     _HANDLERS: ClassVar[dict[str, Callable[["FlowInterpreter", dict], Awaitable[Optional[str]]]]] = {
         "entry": _h_entry,
         "play": _h_play,
@@ -371,6 +523,11 @@ class FlowInterpreter:
         "voicemail": _h_voicemail,
         "hangup": _h_hangup,
         "ai_agent": _h_ai_agent,
+        "set_vars": _h_set_vars,
+        "unset_vars": _h_unset_vars,
+        "conditions": _h_conditions,
+        "send_sms": _h_send_sms,
+        "request": _h_request,
     }
 
     # --- misc ---
@@ -383,27 +540,36 @@ class FlowInterpreter:
     def _media(self, node: dict) -> Optional[str]:
         return self._media_key(node, "media") or self._media_key(node, "prompt")
 
+    def _interp(self, text: Optional[str]) -> str:
+        """Interpolate {{var}} templates against this call's variable store ("" for None).
+
+        Interpolated prompt text deliberately BYPASSES the activation-time TTS prewarm
+        (which skips {{...}}): the downstream play path synthesizes lazily and caches by
+        the INTERPOLATED text, so repeated values still hit the TTS cache."""
+        return interpolate(text, self.variables)
+
     def _rec_name(self, tag: str) -> str:
         self._rec_counter += 1
         return f"{self.linkedid}-{tag}-{self._rec_counter}"
 
-    async def _emit_transition(self, step: int, node_id: str, ntype: Optional[str]) -> None:
+    async def _emit_transition(
+        self, step: int, node_id: str, ntype: Optional[str], extra: Optional[dict] = None
+    ) -> None:
         """Emit EXACTLY ONE call_event for entering this node. The dedup key
         `{linkedid}:{step}:{node_id}` is unique per transition (a node revisited in a loop
-        gets a fresh step), matching call_events' (call_id, event_type, provider_sequence)."""
+        gets a fresh step), matching call_events' (call_id, event_type, provider_sequence).
+        `extra` (Ticket 17 deferred-emit nodes) merges an outcome snapshot into the payload
+        — variable values are pre-truncated to _SNAP_MAX chars by the handlers."""
         seq = f"{self.linkedid}:{step}:{node_id}"
-        await self.emit(
-            f"flow.node.{ntype}",
-            seq,
-            {
-                "flow": {
-                    "step": step,
-                    "node_id": node_id,
-                    "node_type": ntype,
-                    "linkedid": self.linkedid,
-                }
-            },
-        )
+        flow: dict = {
+            "step": step,
+            "node_id": node_id,
+            "node_type": ntype,
+            "linkedid": self.linkedid,
+        }
+        if extra:
+            flow.update(extra)
+        await self.emit(f"flow.node.{ntype}", seq, {"flow": flow})
 
     async def _safe_hangup(self) -> None:
         try:

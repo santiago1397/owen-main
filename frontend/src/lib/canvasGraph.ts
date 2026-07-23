@@ -21,7 +21,32 @@ export type NodeType =
   | "dial"
   | "voicemail"
   | "ai_agent"
-  | "hangup";
+  | "hangup"
+  // Ticket 17 parity nodes.
+  | "set_vars"
+  | "unset_vars"
+  | "conditions"
+  | "send_sms"
+  | "request";
+
+// Ticket 17 conditions node operators (mirror validator/variables CONDITION_OPERATORS).
+export const CONDITION_OPERATORS = [
+  "equals",
+  "not_equals",
+  "contains",
+  "regex",
+  "gt",
+  "lt",
+  "is_empty",
+] as const;
+export type ConditionOperator = (typeof CONDITION_OPERATORS)[number];
+
+export type ConditionRow = {
+  variable: string;
+  operator: ConditionOperator;
+  value: string;
+  port: string;
+};
 
 export const MENU_DIGITS = ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "*", "#"];
 
@@ -48,6 +73,11 @@ export const PALETTE: { type: NodeType; title: string; hint: string }[] = [
   { type: "dial", title: "Dial", hint: "Forward to a number or operator" },
   { type: "voicemail", title: "Voicemail", hint: "Greeting + record a message (terminal)" },
   { type: "ai_agent", title: "AI Agent", hint: "Hand the call to a voice agent" },
+  { type: "set_vars", title: "Set vars", hint: "Assign variables (literals or {{vars}})" },
+  { type: "unset_vars", title: "Unset vars", hint: "Remove variables" },
+  { type: "conditions", title: "Conditions", hint: "Branch on variable comparisons" },
+  { type: "send_sms", title: "Send SMS", hint: "Fire-and-forget SMS from this DID" },
+  { type: "request", title: "HTTP request", hint: "Call an API; branch on success/failure" },
   { type: "hangup", title: "Hang up", hint: "End the call (terminal)" },
 ];
 
@@ -60,10 +90,16 @@ export const NODE_TITLES: Record<NodeType, string> = {
   voicemail: "Voicemail",
   ai_agent: "AI Agent",
   hangup: "Hang up",
+  set_vars: "Set vars",
+  unset_vars: "Unset vars",
+  conditions: "Conditions",
+  send_sms: "Send SMS",
+  request: "HTTP request",
 };
 
-// Mirrors validator.ALLOWED_PORTS. Menu ports are computed from config (see nodePorts).
-const STATIC_PORTS: Record<Exclude<NodeType, "menu">, string[]> = {
+// Mirrors validator.ALLOWED_PORTS. Menu ports (and conditions ports) are computed from
+// config (see nodePorts / conditionPorts).
+const STATIC_PORTS: Record<Exclude<NodeType, "menu" | "conditions">, string[]> = {
   entry: ["default"],
   play: ["default"],
   hours: ["open", "closed"],
@@ -72,7 +108,28 @@ const STATIC_PORTS: Record<Exclude<NodeType, "menu">, string[]> = {
   // `failed` is being added backend-side (Ticket 15.4) — include it here.
   ai_agent: ["default", "transfer", "complete", "failed"],
   hangup: [],
+  // Ticket 17 parity nodes.
+  set_vars: ["default"],
+  unset_vars: ["default"],
+  send_sms: ["default"],
+  request: ["success", "failure"],
 };
+
+// A conditions node's dynamic ports: each row's port (in order) + the required "else"
+// (mirrors validator.condition_ports). Per-row ports default to match_<n> — see rowPortName.
+export function conditionRows(config: NodeConfig): ConditionRow[] {
+  return Array.isArray(config.rows) ? (config.rows as ConditionRow[]) : [];
+}
+
+export function rowPortName(index: number): string {
+  return `match_${index + 1}`;
+}
+
+export function conditionPorts(config: NodeConfig): string[] {
+  const rows = conditionRows(config);
+  const ports = rows.map((r, i) => r.port || rowPortName(i));
+  return [...ports, "else"];
+}
 
 // The enabled digits of a menu node: explicit `digits` config, else derived from wiring.
 export function menuDigits(config: NodeConfig, next?: Record<string, string>): string[] {
@@ -85,6 +142,7 @@ export function menuDigits(config: NodeConfig, next?: Record<string, string>): s
 // The output ports (source handles) a node of this type/config exposes, in render order.
 export function nodePorts(ntype: NodeType, config: NodeConfig): string[] {
   if (ntype === "menu") return [...menuDigits(config), "timeout", "invalid"];
+  if (ntype === "conditions") return conditionPorts(config);
   return STATIC_PORTS[ntype] || [];
 }
 
@@ -120,6 +178,28 @@ export function nodeSummary(ntype: NodeType, config: NodeConfig): string {
     }
     case "ai_agent":
       return config.agent_name || config.agent_id || "no agent selected";
+    case "set_vars": {
+      const names = Object.keys(config.vars || {});
+      return names.length ? `set ${names.join(", ")}` : "no vars set";
+    }
+    case "unset_vars": {
+      const names = Array.isArray(config.names) ? config.names : [];
+      return names.length ? `unset ${names.join(", ")}` : "no vars";
+    }
+    case "conditions": {
+      const rows = conditionRows(config);
+      return rows.length ? `${rows.length} rule${rows.length > 1 ? "s" : ""} + else` : "no rules (else only)";
+    }
+    case "send_sms": {
+      const to = (config.to || "{{caller_number}}").trim();
+      const b = (config.body || "").trim();
+      return `→ ${to}${b ? ` · “${b.length > 32 ? b.slice(0, 32) + "…" : b}”` : ""}`;
+    }
+    case "request": {
+      const m = (config.method || "GET").toUpperCase();
+      const u = (config.url || "").trim();
+      return u ? `${m} ${u.length > 40 ? u.slice(0, 40) + "…" : u}` : `${m} (no url)`;
+    }
     case "hangup":
       return "ends the call";
   }

@@ -130,7 +130,92 @@ def main():
     check("cycle -> warning", any("cycle" in w for w in res.warnings))
     check("cycle still activatable", res.ok is True)
 
+    ticket17()
+
     print("\nALL FLOW VALIDATOR CHECKS PASSED")
+
+
+def _parity_graph():
+    """Ticket 17: a fully wired graph exercising the four parity node types — no warnings."""
+    return {
+        "default_fallback": "vm",
+        "nodes": {
+            "start": {"type": "entry", "next": {"default": "setv"}},
+            "setv": {"type": "set_vars", "vars": {"greeting": "Hi {{caller_number}}"},
+                     "next": {"default": "req"}},
+            "req": {"type": "request", "method": "GET", "url": "https://api.example.com/x",
+                    "next": {"success": "cond", "failure": "vm"}},
+            "cond": {"type": "conditions",
+                     "rows": [
+                         {"variable": "request.body.status", "operator": "equals",
+                          "value": "open", "port": "match_1"},
+                         {"variable": "call.dow", "operator": "equals", "value": "sat",
+                          "port": "match_2"},
+                     ],
+                     "next": {"match_1": "sms", "match_2": "vm", "else": "unsetv"}},
+            "sms": {"type": "send_sms", "body": "Thanks for calling!", "next": {"default": "bye"}},
+            "unsetv": {"type": "unset_vars", "names": ["greeting"], "next": {"default": "bye"}},
+            "vm": {"type": "voicemail", "next": {"default": "bye"}},
+            "bye": {"type": "hangup"},
+        },
+    }
+
+
+def ticket17():
+    print("validate_graph — Ticket 17 parity nodes:")
+    res = validate_graph(_parity_graph())
+    check("parity graph has no errors", res.errors == [])
+    check("parity graph has no warnings", res.warnings == [])
+
+    # set_vars/unset_vars/send_sms only allow `default`.
+    g = _parity_graph()
+    g["nodes"]["setv"]["next"]["success"] = "bye"
+    res = validate_graph(g)
+    check("non-default port on set_vars -> error",
+          any("invalid port 'success'" in e for e in res.errors) and not res.ok)
+    g = _parity_graph()
+    g["nodes"]["sms"]["next"]["sent"] = "bye"
+    res = validate_graph(g)
+    check("invalid port on send_sms -> error",
+          any("invalid port 'sent'" in e for e in res.errors) and not res.ok)
+
+    # request only allows success/failure.
+    g = _parity_graph()
+    g["nodes"]["req"]["next"]["default"] = "bye"
+    res = validate_graph(g)
+    check("'default' port on request -> error",
+          any("invalid port 'default'" in e for e in res.errors) and not res.ok)
+
+    # conditions ports are DYNAMIC: each row's port + else. An unconfigured port errors.
+    g = _parity_graph()
+    g["nodes"]["cond"]["next"]["match_9"] = "bye"
+    res = validate_graph(g)
+    check("port with no matching conditions row -> error",
+          any("invalid port 'match_9'" in e for e in res.errors) and not res.ok)
+
+    # `else` is EXPECTED on conditions: leaving it unwired warns, never blocks.
+    g = _parity_graph()
+    del g["nodes"]["cond"]["next"]["else"]
+    res = validate_graph(g)
+    check("unwired conditions 'else' -> warning",
+          any("unwired port 'else'" in w for w in res.warnings))
+    check("unwired 'else' still activatable", res.ok is True)
+
+    # Unwired row port also warns (falls through to default_fallback at runtime).
+    g = _parity_graph()
+    del g["nodes"]["cond"]["next"]["match_2"]
+    res = validate_graph(g)
+    check("unwired conditions row port -> warning",
+          any("unwired port 'match_2'" in w for w in res.warnings))
+    check("unwired row port still activatable", res.ok is True)
+
+    # Unwired request `failure` warns (expected port).
+    g = _parity_graph()
+    del g["nodes"]["req"]["next"]["failure"]
+    res = validate_graph(g)
+    check("unwired request 'failure' -> warning",
+          any("unwired port 'failure'" in w for w in res.warnings))
+    check("unwired request 'failure' still activatable", res.ok is True)
 
 
 if __name__ == "__main__":

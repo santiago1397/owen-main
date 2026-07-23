@@ -21,9 +21,13 @@ Validation GATES ACTIVATION, not draft saving:
 
 from dataclasses import dataclass, field
 
-# The eight node types. `record` is deliberately absent — it is a node modifier.
+# The node types. `record` is deliberately absent — it is a node modifier. Ticket 17 adds
+# the parity nodes: set_vars / unset_vars / conditions / send_sms / request.
 NODE_TYPES: frozenset[str] = frozenset(
-    {"entry", "play", "hours", "menu", "dial", "voicemail", "ai_agent", "hangup"}
+    {
+        "entry", "play", "hours", "menu", "dial", "voicemail", "ai_agent", "hangup",
+        "set_vars", "unset_vars", "conditions", "send_sms", "request",
+    }
 )
 
 _MENU_PORTS: frozenset[str] = frozenset(
@@ -32,6 +36,8 @@ _MENU_PORTS: frozenset[str] = frozenset(
 
 # Ports that are type-correct for each node type. A port key outside this set is a HARD
 # ERROR ("ports are type-correct for the node type"). `hangup` is terminal: no ports.
+# `conditions` is DYNAMIC (each row's port + "else" — like menu digits): see
+# condition_ports(), applied in validate_graph / _warn_unwired_ports.
 ALLOWED_PORTS: dict[str, frozenset[str]] = {
     "entry": frozenset({"default"}),
     "play": frozenset({"default"}),
@@ -43,18 +49,41 @@ ALLOWED_PORTS: dict[str, frozenset[str]] = {
     # result is mapped to the "complete" port at the interpreter seam.
     "ai_agent": frozenset({"default", "transfer", "complete", "failed"}),
     "hangup": frozenset(),
+    # Ticket 17 parity nodes.
+    "set_vars": frozenset({"default"}),
+    "unset_vars": frozenset({"default"}),
+    "send_sms": frozenset({"default"}),
+    "request": frozenset({"success", "failure"}),
+    "conditions": frozenset(),  # placeholder — replaced per-node by condition_ports()
 }
 
 # Ports we EXPECT to be wired for a node type; a missing one is a WARNING (the
 # default_fallback catches it at runtime). Types with dynamic/optional wiring
-# (menu, voicemail, hangup) have no expected ports.
+# (menu, voicemail, hangup) have no expected ports; `conditions` expectations are
+# dynamic (each row's port + the required "else") — see _warn_unwired_ports.
 EXPECTED_PORTS: dict[str, frozenset[str]] = {
     "entry": frozenset({"default"}),
     "play": frozenset({"default"}),
     "hours": frozenset({"open", "closed"}),
     "dial": frozenset({"answered"}),
     "ai_agent": frozenset({"default", "transfer", "complete", "failed"}),
+    "set_vars": frozenset({"default"}),
+    "unset_vars": frozenset({"default"}),
+    "send_sms": frozenset({"default"}),
+    "request": frozenset({"success", "failure"}),
 }
+
+
+def condition_ports(node: dict) -> frozenset[str]:
+    """The dynamic port set of a `conditions` node: every configured row's port + "else"
+    (the required no-match exit). Malformed rows are ignored (the runtime skips them too)."""
+    ports = {"else"}
+    rows = node.get("rows")
+    if isinstance(rows, list):
+        for row in rows:
+            if isinstance(row, dict) and row.get("port"):
+                ports.add(str(row["port"]))
+    return frozenset(ports)
 
 
 @dataclass
@@ -117,7 +146,7 @@ def validate_graph(graph: dict) -> ValidationResult:
             result.errors.append(f"node '{nid}' has unknown type '{ntype}'")
             # Skip port checks for unknown types; still resolve targets below.
         else:
-            allowed = ALLOWED_PORTS[ntype]
+            allowed = condition_ports(node) if ntype == "conditions" else ALLOWED_PORTS[ntype]
             for port in edges:
                 if port not in allowed:
                     result.errors.append(
@@ -150,7 +179,11 @@ def _warn_unwired_ports(nodes: dict, result: ValidationResult) -> None:
         if ntype == "menu" and not edges:
             result.warnings.append(f"menu node '{nid}' has no options wired")
             continue
-        for port in sorted(EXPECTED_PORTS.get(ntype, frozenset())):
+        expected = (
+            condition_ports(node) if ntype == "conditions"
+            else EXPECTED_PORTS.get(ntype, frozenset())
+        )
+        for port in sorted(expected):
             if port not in edges:
                 result.warnings.append(f"node '{nid}' ({ntype}) has unwired port '{port}'")
 

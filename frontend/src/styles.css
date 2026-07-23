@@ -79,6 +79,11 @@ code.mono { background: var(--panel2); padding: 2px 6px; border-radius: 6px; fon
 .fn-type-dial { color: #37d6c3; border-color: #37d6c3; }
 .fn-type-voicemail { color: #ff9d5c; border-color: #ff9d5c; }
 .fn-type-ai_agent { color: #ff7ad9; border-color: #ff7ad9; }
+.fn-type-set_vars { color: #7aa2ff; border-color: #7aa2ff; }
+.fn-type-unset_vars { color: #7aa2ff; border-color: #7aa2ff; }
+.fn-type-conditions { color: #f2c14e; border-color: #f2c14e; }
+.fn-type-send_sms { color: #4fd67a; border-color: #4fd67a; }
+.fn-type-request { color: #5cc8ff; border-color: #5cc8ff; }
 .fn-type-hangup { color: var(--danger); border-color: var(--danger); }
 .fn-summary { color: var(--muted); padding: 4px 10px 7px; font-size: 11px;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

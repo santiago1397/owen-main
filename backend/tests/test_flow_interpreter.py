@@ -302,6 +302,202 @@ def test_number_target_still_works():
     check("dial_operator NOT used", "dial_operator" not in ari.ops())
 
 
+# --- Ticket 17 parity nodes ---------------------------------------------------------------
+
+
+def _flow_of(interp_kwargs, graph, ari=None):
+    ari = ari or FakeAri()
+    rec = Recorder()
+    interp = FlowInterpreter(graph=graph, channel_id=CHAN, ari=ari, emit=rec.emit,
+                             linkedid=LINKEDID, now=ALWAYS_OPEN, on_start=rec.pin, **interp_kwargs)
+    _run(interp)
+    return ari, rec, interp
+
+
+def test_set_vars_interpolation_and_snapshot():
+    print("set_vars + {{var}} interpolation into a play prompt; event snapshots values:")
+    g = {
+        "default_fallback": "vm",
+        "nodes": {
+            "start": {"type": "entry", "next": {"default": "setv"}},
+            "setv": {"type": "set_vars", "vars": {"who": "{{caller_number}}", "n": 7},
+                     "next": {"default": "greet"}},
+            "greet": {"type": "play", "prompt": "Hi {{who}}, you are caller {{n}}. {{nope}}",
+                      "next": {"default": "bye"}},
+            "vm": {"type": "voicemail", "next": {}},
+            "bye": {"type": "hangup"},
+        },
+    }
+    ari, rec, interp = _flow_of({"variables": {"caller_number": "+13055550123"}}, g)
+    check("visited set_vars then play then bye", rec.node_ids() == ["start", "setv", "greet", "bye"])
+    check("play prompt interpolated (unknown var -> empty)",
+          ("play", CHAN, "Hi +13055550123, you are caller 7. ") in ari.calls)
+    setv_evt = rec.events[1]
+    check("set_vars event snapshots names+values",
+          setv_evt[2]["flow"].get("vars_set") == {"who": "+13055550123", "n": "7"})
+    check("non-string literal stored as-is", interp.variables["n"] == 7)
+
+
+def test_unset_vars_removes_names():
+    print("unset_vars removes listed vars; event lists what was removed:")
+    g = {
+        "default_fallback": "bye",
+        "nodes": {
+            "start": {"type": "entry", "next": {"default": "unsetv"}},
+            "unsetv": {"type": "unset_vars", "names": ["a", "missing"], "next": {"default": "bye"}},
+            "bye": {"type": "hangup"},
+        },
+    }
+    _, rec, interp = _flow_of({"variables": {"a": "1", "b": "2"}}, g)
+    check("'a' removed, 'b' kept", "a" not in interp.variables and interp.variables.get("b") == "2")
+    check("event lists removed names only", rec.events[1][2]["flow"].get("vars_unset") == ["a"])
+
+
+def _conditions_graph(rows):
+    return {
+        "default_fallback": "vm",
+        "nodes": {
+            "start": {"type": "entry", "next": {"default": "cond"}},
+            "cond": {"type": "conditions", "rows": rows,
+                     "next": {"m1": "one", "m2": "two", "else": "other"}},
+            "one": {"type": "hangup"},
+            "two": {"type": "hangup"},
+            "other": {"type": "hangup"},
+            "vm": {"type": "voicemail", "next": {}},
+        },
+    }
+
+
+def test_conditions_routing_and_gather_digits():
+    print("conditions node: first match wins; gather.digits set by menu; else on no match:")
+    rows = [
+        {"variable": "gather.digits", "operator": "equals", "value": "9", "port": "m1"},
+        {"variable": "gather.digits", "operator": "equals", "value": "1", "port": "m2"},
+    ]
+    g = _conditions_graph(rows)
+    # Put a menu in front so gather.digits is populated by the flow itself.
+    g["nodes"]["start"]["next"]["default"] = "menu"
+    g["nodes"]["menu"] = {"type": "menu", "next": {"1": "cond", "timeout": "vm"}}
+    ari, rec, interp = _flow_of({}, g, FakeAri(digit="1"))
+    check("menu set gather.digits", interp.variables.get("gather.digits") == "1")
+    check("second row matched -> port m2 -> two",
+          rec.node_ids() == ["start", "menu", "cond", "two"])
+    cond_evt = rec.events[2][2]["flow"]
+    check("event snapshots matched row + port + actual",
+          cond_evt.get("matched_row") == 1 and cond_evt.get("port") == "m2"
+          and cond_evt.get("actual") == "1")
+
+    _, rec, _ = _flow_of({"variables": {"gather.digits": "5"}}, _conditions_graph(rows))
+    check("no match -> else port", rec.node_ids() == ["start", "cond", "other"])
+
+    bad = [{"variable": "gather.digits", "operator": "regex", "value": "([", "port": "m1"},
+           {"variable": "gather.digits", "operator": "equals", "value": "5", "port": "m2"}]
+    _, rec, _ = _flow_of({"variables": {"gather.digits": "5"}}, _conditions_graph(bad))
+    check("bad regex row skipped; next row matches", rec.node_ids() == ["start", "cond", "two"])
+
+
+def test_send_sms_fire_and_forget():
+    print("send_sms node: interpolated to/body through the seam; default port regardless:")
+    sent = []
+
+    async def sender(to, body):
+        sent.append((to, body))
+        return True
+
+    g = {
+        "default_fallback": "vm",
+        "nodes": {
+            "start": {"type": "entry", "next": {"default": "sms"}},
+            "sms": {"type": "send_sms", "body": "Thanks {{caller_number}}!", "next": {"default": "bye"}},
+            "vm": {"type": "voicemail", "next": {}},
+            "bye": {"type": "hangup"},
+        },
+    }
+    _, rec, _ = _flow_of({"variables": {"caller_number": "+13055550123"},
+                          "send_sms": sender}, g)
+    check("sender got interpolated to (default {{caller_number}}) + body",
+          sent == [("+13055550123", "Thanks +13055550123!")])
+    check("default port taken -> bye", rec.node_ids() == ["start", "sms", "bye"])
+    check("event snapshots to/body", rec.events[1][2]["flow"].get("sms_to") == "+13055550123")
+
+    async def boom(to, body):
+        raise RuntimeError("carrier down")
+
+    _, rec, _ = _flow_of({"variables": {"caller_number": "+13055550123"}, "send_sms": boom}, g)
+    check("sender failure still takes default port", rec.node_ids() == ["start", "sms", "bye"])
+
+    _, rec, _ = _flow_of({"variables": {"caller_number": "+13055550123"}}, g)
+    check("no seam still takes default port", rec.node_ids() == ["start", "sms", "bye"])
+
+
+def test_request_node_success_failure_and_dot_path():
+    print("request node: 2xx -> success + request.body.* readable; error -> failure + status 0:")
+    seen = []
+
+    async def http_ok(method, url, headers, body):
+        seen.append((method, url, headers, body))
+        return 200, {"data": {"status": "open"}}
+
+    g = {
+        "default_fallback": "vm",
+        "nodes": {
+            "start": {"type": "entry", "next": {"default": "req"}},
+            "req": {"type": "request", "method": "POST", "url": "https://x.test/{{caller_number}}",
+                    "headers": {"X-Caller": "{{caller_number}}"}, "body": "{\"n\": \"{{caller_number}}\"}",
+                    "next": {"success": "cond", "failure": "fail"}},
+            "cond": {"type": "conditions",
+                     "rows": [{"variable": "request.body.data.status", "operator": "equals",
+                               "value": "open", "port": "m1"}],
+                     "next": {"m1": "ok", "else": "other"}},
+            "ok": {"type": "hangup"},
+            "other": {"type": "hangup"},
+            "fail": {"type": "hangup"},
+            "vm": {"type": "voicemail", "next": {}},
+        },
+    }
+    _, rec, interp = _flow_of({"variables": {"caller_number": "+1305"}, "http_request": http_ok}, g)
+    check("url/headers/body interpolated",
+          seen == [("POST", "https://x.test/+1305", {"X-Caller": "+1305"}, '{"n": "+1305"}')])
+    check("2xx -> success; dot-path condition matched",
+          rec.node_ids() == ["start", "req", "cond", "ok"])
+    check("request.status stored", interp.variables.get("request.status") == 200)
+    check("request event snapshots status", rec.events[1][2]["flow"].get("request_status") == 200)
+
+    async def http_500(method, url, headers, body):
+        return 500, {"error": "boom"}
+
+    _, rec, interp = _flow_of({"variables": {"caller_number": "+1305"}, "http_request": http_500}, g)
+    check("non-2xx -> failure port", rec.node_ids() == ["start", "req", "fail"])
+    check("failed status stored", interp.variables.get("request.status") == 500)
+
+    async def http_boom(method, url, headers, body):
+        raise RuntimeError("transport down")
+
+    _, rec, interp = _flow_of({"variables": {"caller_number": "+1305"}, "http_request": http_boom}, g)
+    check("transport error -> failure port with status 0",
+          rec.node_ids() == ["start", "req", "fail"] and interp.variables.get("request.status") == 0)
+
+    _, rec, _ = _flow_of({"variables": {"caller_number": "+1305"}}, g)
+    check("no http seam -> failure port", rec.node_ids() == ["start", "req", "fail"])
+
+
+def test_runtime_builtins_seeded():
+    print("built-in variables seeded via the constructor reach interpolation:")
+    g = {
+        "default_fallback": "bye",
+        "nodes": {
+            "start": {"type": "entry", "next": {"default": "greet"}},
+            "greet": {"type": "play", "prompt": "You called {{dialed_number}} at {{call.time}} on {{call.dow}}",
+                      "next": {"default": "bye"}},
+            "bye": {"type": "hangup"},
+        },
+    }
+    ari, _, _ = _flow_of({"variables": {"dialed_number": "+13055559999", "call.time": "14:05",
+                                        "call.dow": "wed"}}, g)
+    check("built-ins interpolate into the prompt",
+          ("play", CHAN, "You called +13055559999 at 14:05 on wed") in ari.calls)
+
+
 def test_evaluate_hours_pure():
     print("evaluate_hours (pure) — open window vs outside window vs no-schedule fail-open:")
     node = {"type": "hours", "hours": {"tz": "America/New_York", "schedule": {"wed": [["09:00", "17:00"]]}}}
@@ -325,6 +521,12 @@ def main():
     test_operator_target_no_answer_falls_to_default_fallback()
     test_operator_target_empty_falls_to_default_fallback()
     test_number_target_still_works()
+    test_set_vars_interpolation_and_snapshot()
+    test_unset_vars_removes_names()
+    test_conditions_routing_and_gather_digits()
+    test_send_sms_fire_and_forget()
+    test_request_node_success_failure_and_dot_path()
+    test_runtime_builtins_seeded()
     test_evaluate_hours_pure()
     print("\nALL FLOW INTERPRETER CHECKS PASSED")
 
