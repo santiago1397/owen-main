@@ -119,6 +119,12 @@ class Call(Base):
     flow_version_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("flow_versions.id"), index=True
     )
+    # Agent version an `ai_agent` flow node ran for this call (Ticket 11), pinned once on node
+    # entry exactly like flow_version_id — so analysis can attribute which agent config
+    # handled the call. NULL for calls that hit no ai_agent node.
+    agent_version_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("agent_versions.id"), index=True
+    )
 
     direction: Mapped[str | None] = mapped_column(String)
     status: Mapped[str | None] = mapped_column(String)  # projection of highest-rank event seen
@@ -342,6 +348,47 @@ class FlowVersion(Base):
     flow_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("flows.id"), index=True)
     version: Mapped[int] = mapped_column(Integer)  # 1-based, monotonically increasing per flow
     graph: Mapped[dict] = mapped_column(JSONB)  # nodes + edges (per-node `next` port map)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class Agent(Base):
+    """A reusable AI voice agent (name + pointer to its currently active version). Ticket 11,
+    mirrors `Flow`: the row is an append-only ENVELOPE — only the `active_version_id` pointer
+    is mutated (on activation). Config lives in immutable `agent_versions` rows. An agent is
+    NEVER bound to a number; it is only REFERENCED from a flow's `ai_agent` node, and the
+    interpreter PINS the specific `agent_version_id` onto the call on node entry (like flows
+    pin `flow_version_id`).
+    """
+
+    __tablename__ = "agents"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_uuid)
+    name: Mapped[str] = mapped_column(String)
+    # Pointer to the active version (nullable until first activation). use_alter breaks the
+    # agents <-> agent_versions circular FK at DDL time (same trick as flows).
+    active_version_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("agent_versions.id", use_alter=True, name="fk_agents_active_version"),
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class AgentVersion(Base):
+    """An immutable snapshot of an agent's config. APPEND-ONLY: every save inserts a new row
+    (version = prior max + 1); existing rows are never updated. `config` (jsonb) holds
+    persona / voice / greeting / model / engine / tools[] toggles / in-context knowledge /
+    guardrails (max_call_seconds, max_silence_seconds, model tier). Validation gates
+    ACTIVATION, not saving (mirrors flow_versions)."""
+
+    __tablename__ = "agent_versions"
+    __table_args__ = (
+        UniqueConstraint("agent_id", "version", name="uq_agent_version"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_uuid)
+    agent_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("agents.id"), index=True)
+    version: Mapped[int] = mapped_column(Integer)  # 1-based, monotonically increasing per agent
+    config: Mapped[dict] = mapped_column(JSONB)  # persona/voice/greeting/model/engine/tools/…
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 

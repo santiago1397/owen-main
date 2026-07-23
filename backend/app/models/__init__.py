@@ -1,4 +1,6 @@
 from app.models.models import (
+    Agent,
+    AgentVersion,
     Base,
     Caller,
     Call,
@@ -18,6 +20,8 @@ from app.models.models import (
 )
 
 __all__ = [
+    "Agent",
+    "AgentVersion",
     "Base",
     "Caller",
     "Call",
