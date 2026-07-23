@@ -218,6 +218,8 @@ code.mono { background: var(--panel2); padding: 2px 6px; border-radius: 6px; fon
 /* Mobile-only Inbox/Messages controls. Declared BEFORE the media queries so the show-rules
    inside them win on source order — putting this after would silently kill the back button. */
 .quo-back, .quo-contacttoggle, .quo-sideclose, .msgback { display: none; }
+/* FlowEditor's mobile view-only banner: hidden on desktop, where editing is available. */
+.flowmobilenote { display: none; }
 /* Login card keeps its 320px on desktop but may now shrink below it. */
 .logincard { width: 320px; max-width: 100%; }
 
@@ -335,6 +337,17 @@ code.mono { background: var(--panel2); padding: 2px 6px; border-radius: 6px; fon
   .msgsplit:not(.has-active) .msgconvo { display: none; }
   .msgback { display: inline-block; margin-bottom: 10px; }
   .quo-back, .quo-contacttoggle { display: inline-flex; }
+
+  /* ---- FlowEditor: view-only canvas (docs/RESPONSIVE_SPEC.md §8) ----
+     The 190px palette and 300px node panel can't coexist with a canvas on a 375px screen, and
+     a node graph isn't thumb-editable. The canvas keeps xyflow's touch pan/zoom so you can
+     still answer "why did this call route that way?" from a phone. */
+  .flowpalette, .flowside, .floweditonly { display: none !important; }
+  .flowmobilenote { display: flex; }
+  .flowgrid { display: block; }
+  .flowcanvas {
+    width: 100%; height: calc(100dvh - 260px); min-height: 320px;
+  }
 }
 
 @media (max-width: 560px) {
