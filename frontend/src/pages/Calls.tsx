@@ -2,6 +2,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 import { API_BASE, api } from "../api";
 import DateRangeBar from "../components/DateRangeBar";
+import InCallBar from "../components/InCallBar";
 import { type Range } from "../lib/dates";
 
 function RecordingPlayer({ recordingId }: { recordingId: string }) {
@@ -150,6 +151,12 @@ export default function Calls() {
     include_short: hideJunk ? undefined : true,
   };
   const { data } = useQuery({ queryKey: ["calls", query], queryFn: () => api.calls(query) });
+  // The in-call bar (Ticket 13) hold/transfer act on the CALLER channel, keyed by Linkedid
+  // (== provider_call_sid). Use the selected platform call's sid as the active channel.
+  const activeChannel: string | undefined =
+    tab === "platform"
+      ? (data?.items || []).find((c: any) => c.id === selected)?.provider_call_sid
+      : undefined;
   const set = (k: string, v: any) => setFilters((f: any) => ({ ...f, [k]: v, page: 1 }));
   const onRange = (r: Range | null) =>
     setFilters((f: any) => ({
@@ -178,6 +185,13 @@ export default function Calls() {
           Platform
         </button>
       </div>
+      {/* Ticket 13: in-platform calling. The in-call bar (softphone + backend-driven
+          hold/blind-transfer) fills ticket-06's reserved slot on the Platform sub-tab. */}
+      {tab === "platform" && (
+        <div style={{ marginTop: 8 }}>
+          <InCallBar channelId={activeChannel} />
+        </div>
+      )}
       <div className="toolbar" style={{ flexWrap: "wrap", gap: 8, marginTop: 8 }}>
         <input placeholder="caller number…" onChange={(e) => set("caller", e.target.value)} />
         <select onChange={(e) => set("campaign_id", e.target.value || undefined)}>

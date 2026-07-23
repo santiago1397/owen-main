@@ -118,4 +118,27 @@ export const api = {
   messageThreads: (params: Record<string, any> = {}) => request(`/api/messages/threads${qs(params)}`),
   messageThread: (params: { number_id?: string; caller_id?: string }) =>
     request(`/api/messages/thread${qs(params)}`),
+
+  // --- Operator WebRTC softphone (Ticket 13) ---
+  // Mint short-lived SIP + TURN creds for this operator's browser softphone (app-login gate).
+  webrtcCredentials: () => request("/api/telephony/webrtc/credentials", { method: "POST" }),
+  // Backend-driven control ops (SIP.js NEVER touches ARI): hold / bridge / blind-transfer.
+  telephonyHold: (channel_id: string, hold: boolean) =>
+    request("/api/telephony/control/hold", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ channel_id, hold }),
+    }),
+  telephonyBridge: (channel_a: string, channel_b: string) =>
+    request("/api/telephony/control/bridge", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ channel_a, channel_b }),
+    }),
+  telephonyTransfer: (channel_id: string, kind: string, target: string) =>
+    request("/api/telephony/control/transfer", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ channel_id, kind, target }),
+    }),
 };

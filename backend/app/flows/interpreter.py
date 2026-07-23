@@ -20,11 +20,11 @@ DESIGN (mirrors app/flows/validator.py — dependency-light, unit-testable in is
   voicemail) so a call never hits dead air. If `default_fallback` is itself missing, the
   interpreter hangs up cleanly rather than leaving dead air.
 
-SCOPE: operator-target dialing and the recordings pipeline are LATER tickets. `ai_agent`
-runs a VoiceAgentSession through the injected `run_agent` seam (Ticket 11) and exits by the
-returned port; with no seam injected it keeps its legacy stub (routes to `default`). `dial`
-supports a NUMBER target only, and `record` merely drives ARI record — the WAV
-fetch/transcribe reuse is ticket 05's job.
+SCOPE: the recordings pipeline is a LATER ticket. `ai_agent` runs a VoiceAgentSession through
+the injected `run_agent` seam (Ticket 11) and exits by the returned port; with no seam injected
+it keeps its legacy stub (routes to `default`). `dial` supports a NUMBER target and (Ticket 13)
+an OPERATOR target (individual or group; via `dial_operator`). `record` merely drives ARI
+record — the WAV fetch/transcribe reuse is ticket 05's job.
 """
 
 from __future__ import annotations
@@ -68,6 +68,9 @@ class AriControl(Protocol):
     async def dial_number(
         self, channel_id: str, number: str, *, caller_id: Optional[str], timeout_s: float
     ) -> str: ...
+    async def dial_operator(
+        self, channel_id: str, operators: list, *, caller_id: Optional[str], timeout_s: float
+    ) -> str: ...
     async def hangup(self, channel_id: str) -> None: ...
 
 
@@ -88,6 +91,30 @@ RunAgentFn = Callable[[dict], Awaitable[tuple[str, dict]]]
 
 def _default_now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _operator_list(node: dict) -> list:
+    """The operator id(s) an operator-target `dial` node reaches, as a de-duplicated list.
+
+    Accepts an individual (`operator`) or a group (`operators`/`group` list). Group members
+    may be plain ids or {"id": ...} objects (the flow-builder shape). Blanks are dropped.
+    Pure/stdlib so it stays unit-testable with the interpreter core."""
+    raw = node.get("operators")
+    if raw is None:
+        raw = node.get("group")
+    if raw is None:
+        single = node.get("operator") or node.get("target")
+        raw = [single] if single else []
+    if not isinstance(raw, (list, tuple)):
+        raw = [raw]
+    out: list = []
+    for item in raw:
+        op = item.get("id") if isinstance(item, dict) else item
+        if op:
+            op = str(op)
+            if op not in out:
+                out.append(op)
+    return out
 
 
 # --- Pure business-hours evaluation -------------------------------------------------------
@@ -276,16 +303,29 @@ class FlowInterpreter:
         return "invalid" if "invalid" in edges else digit  # unwired digit -> fallback
 
     async def _h_dial(self, node: dict) -> Optional[str]:
-        target = node.get("target") or node.get("number")
-        if not target:
-            return _ERROR  # no NUMBER target (operator-target is a later ticket)
+        kind = node.get("target_kind") or node.get("kind")
+        timeout_s = float(node.get("timeout", 30))
+        caller_id = node.get("caller_id")
         if node.get("record"):
             await self.ari.record(self.channel_id, self._rec_name("dial"))
+
+        # Operator-target (Ticket 13): dial one operator (individual) or a group of operators
+        # (first-to-answer). An offline/unavailable operator never answers, so the unwired/
+        # 'noanswer' port falls through to default_fallback — never dead air.
+        if kind == "operator":
+            operators = _operator_list(node)
+            if not operators:
+                return _ERROR  # operator target with no operators configured
+            return await self.ari.dial_operator(
+                self.channel_id, operators, caller_id=caller_id, timeout_s=timeout_s
+            )
+
+        # NUMBER target (default). `target`/`number` holds the E.164 to reach over the trunk.
+        target = node.get("target") or node.get("number")
+        if not target:
+            return _ERROR
         result = await self.ari.dial_number(
-            self.channel_id,
-            str(target),
-            caller_id=node.get("caller_id"),
-            timeout_s=float(node.get("timeout", 30)),
+            self.channel_id, str(target), caller_id=caller_id, timeout_s=timeout_s
         )
         return result  # "answered" | "noanswer" | "busy" | "failed"
 

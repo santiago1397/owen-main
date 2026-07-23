@@ -18,6 +18,7 @@ import logging
 import httpx
 
 from app.core.config import settings
+from app.telephony.credentials import operator_dial_endpoint
 
 logger = logging.getLogger("providers.asterisk_client")
 
@@ -117,6 +118,27 @@ class AsteriskAriClient:
     async def dial_number(self, channel_id: str, number: str, *, caller_id, timeout_s: float) -> str:
         # See class docstring: outcome confirmation needs the dialed leg's WS state events.
         endpoint = f"PJSIP/{number}@{settings.BULKVS_TRUNK_NAME}"
+        return await self._originate(endpoint, caller_id=caller_id, timeout_s=timeout_s)
+
+    async def dial_operator(
+        self, channel_id: str, operators: list[str], *, caller_id, timeout_s: float
+    ) -> str:
+        """Dial one or more operator browser legs (Ticket 13 operator-target on the `dial`
+        node). Originates to `PJSIP/operator-<slug>` for each operator; an offline/unregistered
+        (or app-toggled-off) endpoint simply fails to answer, so the interpreter falls through
+        to default_fallback. Like dial_number this REST-only client can't observe the answered
+        leg's WS state, so it returns "answered" if an originate was accepted, else "noanswer"
+        (-> fallback). First-to-answer bridging for GROUPS is a WS-consumer follow-on."""
+        endpoints = [operator_dial_endpoint(op) for op in operators if op]
+        if not endpoints:
+            return "failed"
+        any_ok = False
+        for endpoint in endpoints:
+            result = await self._originate(endpoint, caller_id=caller_id, timeout_s=timeout_s)
+            any_ok = any_ok or result == "answered"
+        return "answered" if any_ok else "noanswer"
+
+    async def _originate(self, endpoint: str, *, caller_id, timeout_s: float) -> str:
         params = {
             "endpoint": endpoint,
             "app": settings.ARI_APP,
@@ -132,6 +154,38 @@ class AsteriskAriClient:
     async def hangup(self, channel_id: str) -> None:
         await self._delete(f"/ari/channels/{channel_id}")
 
+    # --- Softphone control ops (Ticket 13) — driven ONLY by the backend, never the browser ---
+
+    async def hold(self, channel_id: str) -> None:
+        await self._post(f"/ari/channels/{channel_id}/hold")
+
+    async def unhold(self, channel_id: str) -> None:
+        await self._delete(f"/ari/channels/{channel_id}/hold")
+
+    async def create_bridge(self) -> str | None:
+        """Create a mixing bridge; return its id (ARI assigns one) or None on failure."""
+        data = await self._post_json("/ari/bridges", params={"type": "mixing"})
+        if isinstance(data, dict):
+            bid = data.get("id")
+            return str(bid) if bid else None
+        return None
+
+    async def add_to_bridge(self, bridge_id: str, *channel_ids: str) -> None:
+        chans = ",".join(c for c in channel_ids if c)
+        if not chans:
+            return
+        await self._post(f"/ari/bridges/{bridge_id}/addChannel", params={"channel": chans})
+
+    async def destroy_bridge(self, bridge_id: str) -> None:
+        await self._delete(f"/ari/bridges/{bridge_id}")
+
+    async def blind_transfer(self, channel_id: str, endpoint: str) -> None:
+        """Blind-transfer: redirect the channel to a new endpoint (v1 — attended is out of
+        scope). The endpoint string is resolved server-side by app/telephony/control.py."""
+        await self._post(
+            f"/ari/channels/{channel_id}/redirect", params={"endpoint": endpoint}
+        )
+
     async def _post(self, path: str, params: dict | None = None) -> bool:
         try:
             async with await self._client() as client:
@@ -140,6 +194,19 @@ class AsteriskAriClient:
         except Exception:  # noqa: BLE001 - control ops are best-effort
             logger.exception("ARI POST %s failed", path)
             return False
+
+    async def _post_json(self, path: str, params: dict | None = None):
+        """POST and return the parsed JSON body (or None). Used where we need ARI's response
+        (e.g. the id of a newly created bridge)."""
+        try:
+            async with await self._client() as client:
+                resp = await client.post(f"{self._base}{path}", params=params or {})
+                if resp.status_code >= 300:
+                    return None
+                return resp.json()
+        except Exception:  # noqa: BLE001 - control ops are best-effort
+            logger.exception("ARI POST(json) %s failed", path)
+            return None
 
     async def _delete(self, path: str) -> bool:
         try:
