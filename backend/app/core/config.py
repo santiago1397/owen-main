@@ -138,6 +138,37 @@ class Settings(BaseSettings):
     # air. E.164. Empty = no forward (the call is hung up cleanly instead).
     FLOW_FALLBACK_FORWARD_NUMBER: str = ""
 
+    # --- Default call handling for UNASSIGNED Asterisk numbers (Ticket 18) ----------------
+    # When a BulkVS/Asterisk DID has NO flow assigned, OWEN no longer no-ops the call (which
+    # left dead air). The built-in default: answer -> consent notice -> ring every AVAILABLE
+    # operator's softphone at once (first to answer is bridged, the rest stop ringing) -> if
+    # nobody is available or nobody answers in time, take a voicemail. A real assigned flow
+    # OVERRIDES this default. See docs/DEFAULT_CALL_HANDLING_SPEC.md.
+    #   Master switch for the ring-operators step. False = go straight to voicemail for
+    #   unassigned numbers (still never dead air). Gated by ASTERISK_ENABLED regardless.
+    NO_FLOW_RING_OPERATORS: bool = True
+    #   How long (seconds) all available operators ring before the call rolls to voicemail.
+    OPERATOR_RING_TIMEOUT_SECONDS: int = 25
+    #   Recording-consent notice played to the caller BEFORE operators ring (FL all-party
+    #   consent — ARCHITECTURE.md #17). Plain text is TTS-synthesized like a flow prompt; a
+    #   "sound:" URI is played as-is. Empty = no notice (skip straight to the ring).
+    INBOUND_CONSENT_MEDIA: str = "This call may be recorded for quality and training purposes."
+    #   Record operator-answered inbound calls (feeds transcription/analysis/GHL). Off = the
+    #   bridge is not recorded (no consent concern, but no transcript either).
+    INBOUND_RECORDING_ENABLED: bool = True
+
+    # Voicemail (used by the unassigned-number default AND the flow `voicemail` node). The
+    # greeting is played (plain text -> TTS; "sound:" URI as-is), then a beep, then the caller
+    # is recorded until they hang up or fall silent, capped at the max duration. The WAV rides
+    # the existing recording->transcribe->analyze->GHL pipeline (name prefixed with the call
+    # Linkedid) and surfaces in the Inbox thread + Calls.
+    VOICEMAIL_GREETING: str = (
+        "You've reached us, but we can't take your call right now. "
+        "Please leave a message after the tone and we'll get back to you as soon as we can."
+    )
+    VOICEMAIL_MAX_DURATION_SECONDS: int = 120
+    VOICEMAIL_MAX_SILENCE_SECONDS: int = 5
+
     ANALYSIS_ENGINE: str = "dummy"  # dummy | claude | minimax
     ANTHROPIC_API_KEY: str = ""
     ANALYSIS_MODEL: str = "claude-haiku-4-5-20251001"

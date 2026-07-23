@@ -24,7 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import current_user
 from app.core.config import settings
 from app.db import get_db
-from app.models import Number, User
+from app.models import Caller, Number, User
 from app.telephony import control, outbound
 from app.telephony.credentials import build_webrtc_credentials
 
@@ -61,6 +61,34 @@ async def webrtc_credentials(user: User = Depends(current_user)) -> dict:
         sip_ttl_seconds=settings.OPERATOR_SIP_TTL_SECONDS,
         turn_ttl_seconds=settings.TURN_TTL_SECONDS,
     )
+
+
+@router.get("/incoming-context")
+async def incoming_context(
+    caller: str = "",
+    dialed: str = "",
+    _: User = Depends(current_user),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Enrich a ringing call for the incoming-call popup (Ticket 18): resolve the caller's
+    number to a known contact label and the dialed DID to its friendly name / campaign. Both
+    are best-effort — an unknown number just falls back to the raw digits in the UI."""
+    _require_enabled()
+    caller_name: str | None = None
+    dialed_label: str | None = None
+    if dialed:
+        num = (
+            await db.execute(select(Number).where(Number.phone_number == dialed).limit(1))
+        ).scalar_one_or_none()
+        if num is not None:
+            dialed_label = num.friendly_name or None
+    if caller:
+        row = (
+            await db.execute(select(Caller).where(Caller.phone_number == caller).limit(1))
+        ).scalar_one_or_none()
+        if row is not None:
+            caller_name = row.label or None
+    return {"caller_name": caller_name, "dialed_label": dialed_label}
 
 
 # --- 2. ARI control (server-side only) -----------------------------------------------------

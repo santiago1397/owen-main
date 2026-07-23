@@ -109,7 +109,7 @@ def test_run_agent_exception_routes_failed():
     pins = []
     ari, rec = _run(_graph("transfer"), _make_run_agent(pins, raise_it=True))
     check("raised session -> failed -> fallback vm", rec.node_ids() == ["start", "agent", "vm"])
-    check("clean hangup, no bridge", ari.ops()[-1] == "hangup" and "dial" not in ari.ops())
+    check("clean end at voicemail, no bridge", ari.ops()[-1] == "voicemail" and "dial" not in ari.ops())
 
 
 def test_legacy_stub_without_seam():

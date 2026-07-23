@@ -125,3 +125,62 @@ def push_channel_event(channel_id: str, event: dict) -> int:
 def registry_sizes() -> tuple[int, int]:
     """(digit queues, watched channels) currently registered — for tests/leak assertions."""
     return len(_digit_queues), len(_watchers)
+
+
+# --- Playback + recording completion signals (Ticket 18) ----------------------------------
+# The unassigned-number default handler and the voicemail node must PLAY a prompt to
+# completion before the next step (consent before ringing operators; greeting before the
+# record beep), and must know when a voicemail RECORDING has finished (silence-triggered) to
+# end the call. ARI signals both over the same WS: PlaybackFinished (keyed by playback id) and
+# RecordingFinished (keyed by recording name). These one-shot queues are the await seam, fed
+# by the consumer exactly like the DTMF/channel registries — non-blocking, auto-cleaned.
+
+_playbacks: dict[str, asyncio.Queue] = {}
+_recordings: dict[str, asyncio.Queue] = {}
+
+
+def register_playback(playback_id: str) -> asyncio.Queue:
+    """Register a one-shot queue for a playback id; the client awaits it, the consumer feeds
+    PlaybackFinished into it. Pair with `unregister_playback` in a finally."""
+    queue: asyncio.Queue = asyncio.Queue(maxsize=4)
+    _playbacks[str(playback_id)] = queue
+    return queue
+
+
+def push_playback(playback_id: str, event: dict) -> bool:
+    """Feed a PlaybackFinished event to a waiting client. Non-blocking; False if nobody waits."""
+    queue = _playbacks.get(str(playback_id))
+    if queue is None:
+        return False
+    try:
+        queue.put_nowait(event)
+        return True
+    except asyncio.QueueFull:
+        return False
+
+
+def unregister_playback(playback_id: str) -> None:
+    _playbacks.pop(str(playback_id), None)
+
+
+def register_recording(name: str) -> asyncio.Queue:
+    """Register a one-shot queue for a recording name; the client awaits RecordingFinished."""
+    queue: asyncio.Queue = asyncio.Queue(maxsize=4)
+    _recordings[str(name)] = queue
+    return queue
+
+
+def push_recording(name: str, event: dict) -> bool:
+    """Feed a RecordingFinished event to a waiting client. Non-blocking; False if nobody waits."""
+    queue = _recordings.get(str(name))
+    if queue is None:
+        return False
+    try:
+        queue.put_nowait(event)
+        return True
+    except asyncio.QueueFull:
+        return False
+
+
+def unregister_recording(name: str) -> None:
+    _recordings.pop(str(name), None)

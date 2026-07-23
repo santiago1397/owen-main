@@ -33,10 +33,16 @@ export type Credentials = {
   ice_servers: { urls: string[]; username?: string; credential?: string }[];
 };
 
+// Who's calling on a pending incoming INVITE (Ticket 18). `caller` is the calling party's
+// number (SIP From user); `dialed` is the display name Asterisk stamps = the DID that was
+// dialed (so the popup can show "to what number"). Both are enriched to names in the UI.
+export type IncomingInfo = { caller: string | null; dialed: string | null };
+
 export type SoftphoneState = {
   status: SoftphoneStatus;
   available: boolean;
   error: string | null;
+  incoming: IncomingInfo | null;
 };
 
 // The <audio> element the remote (caller) audio is routed into. Created once, lazily.
@@ -63,6 +69,7 @@ export function useSoftphone() {
     status: "offline",
     available: false,
     error: null,
+    incoming: null,
   });
   const userRef = useRef<Web.SimpleUser | null>(null);
 
@@ -97,10 +104,18 @@ export function useSoftphone() {
         },
         delegate: {
           onCallReceived: async () => {
-            patch({ status: "ringing" });
+            // Read the incoming INVITE's identity so the popup can show who's calling and to
+            // which DID. SimpleUser hides the session type, so reach it loosely: remoteIdentity
+            // is the From header — .uri.user = caller number, .displayName = the dialed DID
+            // (Asterisk stamps it as the operator leg's caller-ID name; see runtime._handle_unassigned).
+            const s: any = (userRef.current as any)?.session;
+            const rid = s?.remoteIdentity;
+            const caller = (rid?.uri?.user as string) || null;
+            const dialed = (rid?.displayName as string) || null;
+            patch({ status: "ringing", incoming: { caller, dialed } });
           },
           onCallHangup: () => {
-            patch({ status: state.available ? "available" : "offline" });
+            patch({ status: state.available ? "available" : "offline", incoming: null });
           },
           onCallAnswered: () => {
             patch({ status: "in-call" });
@@ -144,14 +159,27 @@ export function useSoftphone() {
     const user = userRef.current;
     if (!user) return;
     await user.answer();
-    patch({ status: "in-call" });
+    patch({ status: "in-call", incoming: null });
   }, []);
+
+  const decline = useCallback(async () => {
+    // Reject a pending incoming INVITE (the operator opts out; Asterisk keeps ringing the
+    // other operators and rolls to voicemail on the ring timeout).
+    const user = userRef.current;
+    if (!user) return;
+    try {
+      await user.decline();
+    } catch {
+      /* no pending invite */
+    }
+    patch({ status: state.available ? "available" : "offline", incoming: null });
+  }, [state.available]);
 
   const hangup = useCallback(async () => {
     const user = userRef.current;
     if (!user) return;
     await user.hangup();
-    patch({ status: state.available ? "available" : "offline" });
+    patch({ status: state.available ? "available" : "offline", incoming: null });
   }, [state.available]);
 
   // Ring the operator's chosen ringtone device while an incoming call is pending; stop the
@@ -170,5 +198,7 @@ export function useSoftphone() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  return { state, setAvailable, answer, hangup };
+  return { state, setAvailable, answer, decline, hangup };
 }
+
+export type SoftphoneApi = ReturnType<typeof useSoftphone>;

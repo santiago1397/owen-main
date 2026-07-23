@@ -282,33 +282,243 @@ class AsteriskAriClient:
     async def dial_operator(
         self, channel_id: str, operators: list[str], *, caller_id, timeout_s: float
     ) -> str:
-        """Dial one or more operator browser legs (Ticket 13 operator-target on the `dial`
-        node). Originates to `PJSIP/operator-<slug>` for each operator; an offline/unregistered
-        (or app-toggled-off) endpoint simply fails to answer, so the interpreter falls through
-        to default_fallback. Deliberately kept originate-only (unlike the Ticket 15.3
-        `dial_number` rework): it returns "answered" if an originate was accepted, else
-        "noanswer" (-> fallback). First-to-answer bridging for GROUPS is a follow-on."""
+        """Dial operator browser legs (the `dial` operator-target node) and BRIDGE the caller to
+        the first that answers (Ticket 18 — replaces the old originate-only stub). Rings every
+        `PJSIP/operator-<slug>` at once; the first to answer is bridged to the caller and the
+        rest are hung up; an offline/unregistered (or app-toggled-off) endpoint never answers.
+
+        Outcome -> port: "answered" (bridged; returns after either leg leaves), "noanswer"
+        (nobody answered / all unavailable / caller hung up while ringing), "failed" (error).
+        Caller-ID passthrough: with no explicit `caller_id`, the `originator` link makes ARI
+        reuse the inbound caller's callerid on each operator leg, so operators see who's calling."""
         endpoints = [operator_dial_endpoint(op) for op in operators if op]
         if not endpoints:
             return "failed"
-        any_ok = False
-        for endpoint in endpoints:
-            result = await self._originate(endpoint, caller_id=caller_id, timeout_s=timeout_s)
-            any_ok = any_ok or result == "answered"
-        return "answered" if any_ok else "noanswer"
+        return await self.ring_and_bridge(
+            channel_id, endpoints, caller_id=caller_id, timeout_s=timeout_s
+        )
 
-    async def _originate(self, endpoint: str, *, caller_id, timeout_s: float) -> str:
-        params = {
-            "endpoint": endpoint,
-            "app": settings.ARI_APP,
-            "timeout": str(int(timeout_s)),
-        }
-        if caller_id:
-            params["callerId"] = str(caller_id)
-        elif settings.BULKVS_FROM_NUMBER:
-            params["callerId"] = settings.BULKVS_FROM_NUMBER
-        ok = await self._post("/ari/channels", params=params)
-        return "answered" if ok else "failed"
+    async def available_operators(self) -> list[str]:
+        """The `PJSIP/operator-<slug>` endpoints whose browser softphone is CURRENTLY registered
+        (Ticket 18 presence). Availability = SIP registration: the InCallBar toggle registers/
+        unregisters the endpoint, so an ARI /endpoints state of 'online' means a live contact is
+        ready to ring. Best-effort: any error -> [] (the default handler then goes to voicemail)."""
+        url = f"{self._base}/ari/endpoints"
+        try:
+            async with await self._client() as client:
+                resp = await client.get(url)
+                if resp.status_code >= 300:
+                    return []
+                data = resp.json()
+        except Exception:  # noqa: BLE001 - presence probe is best-effort
+            logger.exception("ARI available_operators query failed")
+            return []
+        out: list[str] = []
+        for ep in data if isinstance(data, list) else []:
+            if not isinstance(ep, dict):
+                continue
+            resource = str(ep.get("resource") or "")
+            tech = str(ep.get("technology") or "").upper()
+            state = str(ep.get("state") or "").lower()
+            if tech == "PJSIP" and resource.startswith("operator-") and state == "online":
+                out.append(f"PJSIP/{resource}")
+        return out
+
+    async def ring_and_bridge(
+        self, channel_id: str, endpoints: list[str], *, caller_id, timeout_s: float,
+        record_name: str | None = None,
+    ) -> str:
+        """Ring EVERY endpoint at once; bridge the caller to the first that answers, hang up the
+        rest, optionally record the bridge, then block until either bridged leg leaves (Ticket 18).
+
+        Each operator leg is originated INTO OUR OWN Stasis app, marked as a flow-dial leg
+        (appArgs + channel-id prefix) so the consumer never treats it as a fresh inbound call,
+        and linked onto the caller via `originator` (collapses onto the caller's Linkedid + gives
+        caller-ID passthrough). Returns "answered" | "noanswer" | "failed"."""
+        endpoints = [e for e in endpoints if e]
+        if not endpoints:
+            return "noanswer"
+        timeout_s = max(1.0, float(timeout_s or 25))
+        legs = {f"{FLOW_DIAL_CHANNEL_PREFIX}{uuid.uuid4().hex}": ep for ep in endpoints}
+        watch_ids = list(legs.keys()) + [channel_id]
+        queue = dtmf.watch(*watch_ids)
+        bridge_id: str | None = None
+        try:
+            for out_id, endpoint in legs.items():
+                params = {
+                    "endpoint": endpoint,
+                    "app": settings.ARI_APP,
+                    "appArgs": FLOW_DIAL_APP_ARG,
+                    "channelId": out_id,
+                    "originator": channel_id,
+                    "timeout": str(int(timeout_s)),
+                }
+                if caller_id:
+                    params["callerId"] = str(caller_id)
+                await self._post_json("/ari/channels", params=params)
+
+            answered_id = await self._await_first_answer(
+                queue, channel_id, set(legs.keys()), timeout_s
+            )
+            if answered_id is None:
+                return "noanswer"
+
+            # Winner found: hang up every other still-ringing operator leg.
+            for out_id in legs:
+                if out_id != answered_id:
+                    await self._delete(f"/ari/channels/{out_id}")
+
+            bridge_id = await self.create_bridge()
+            if not bridge_id:
+                return "failed"
+            await self.add_to_bridge(bridge_id, channel_id, answered_id)
+            if record_name:
+                await self.record_bridge(bridge_id, record_name)
+            await self._await_bridge_end(queue, channel_id, answered_id)
+            return "answered"
+        except Exception:  # noqa: BLE001 - a ring/bridge failure falls through, never crashes the call
+            logger.exception("ARI ring_and_bridge failed")
+            return "failed"
+        finally:
+            dtmf.unwatch(queue, *watch_ids)
+            if bridge_id:
+                await self.destroy_bridge(bridge_id)
+            for out_id in legs:  # drop any leg still up (winner after bridge-end, or leftovers)
+                await self._delete(f"/ari/channels/{out_id}")
+
+    async def _await_first_answer(
+        self, queue: asyncio.Queue, channel_id: str, out_ids: set[str], timeout_s: float
+    ) -> str | None:
+        """Watch all ringing operator legs; return the channel id of the FIRST to answer, or
+        None if the caller hangs up, all legs die, or the ring times out. Answer = the leg's
+        StasisStart (originate-with-app enters Stasis on answer) or a ChannelStateChange to Up."""
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout_s + _DIAL_ANSWER_GRACE_S
+        pending = set(out_ids)
+        while pending:
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                return None
+            try:
+                event = await asyncio.wait_for(queue.get(), timeout=remaining)
+            except asyncio.TimeoutError:
+                return None
+            etype = event.get("type")
+            ch = event.get("channel") if isinstance(event.get("channel"), dict) else {}
+            cid = str(ch.get("id") or "")
+            if cid == channel_id:
+                if etype in _LEG_GONE_EVENTS:
+                    return None  # caller hung up while we were ringing operators
+                continue
+            if cid not in pending:
+                continue
+            if etype == "ChannelDestroyed":
+                pending.discard(cid)  # this operator declined / no-answer / busy
+                continue
+            if etype == "StasisStart":
+                return cid
+            if etype == "ChannelStateChange" and str(ch.get("state") or "").lower() == "up":
+                return cid
+        return None
+
+    async def ring_start(self, channel_id: str) -> None:
+        """Send ringing indication to a channel (caller hears ringback while operators ring)."""
+        await self._post(f"/ari/channels/{channel_id}/ring")
+
+    async def ring_stop(self, channel_id: str) -> None:
+        await self._delete(f"/ari/channels/{channel_id}/ring")
+
+    async def play_and_wait(self, channel_id: str, media: str, *, timeout_s: float = 30.0) -> None:
+        """Play a prompt and BLOCK until it finishes (PlaybackFinished over the WS) — so a
+        consent notice completes before operators ring and a voicemail greeting completes before
+        the record beep. Best-effort: an unplayable prompt or a missing finished-event (timeout)
+        just returns, never dead-airs."""
+        uri = await self._resolve_media(str(media))
+        if not uri:
+            return
+        data = await self._post_json(
+            f"/ari/channels/{channel_id}/play", params={"media": uri}
+        )
+        pb_id = data.get("id") if isinstance(data, dict) else None
+        if not pb_id:
+            return
+        wait_queue = dtmf.register_playback(str(pb_id))
+        try:
+            await asyncio.wait_for(wait_queue.get(), timeout=timeout_s)
+        except asyncio.TimeoutError:
+            pass
+        finally:
+            dtmf.unregister_playback(str(pb_id))
+
+    async def voicemail(
+        self, channel_id: str, *, greeting, name: str,
+        max_duration_s: float, max_silence_s: float,
+    ) -> None:
+        """Take a voicemail (Ticket 18 — the real capture the old node stub lacked): play the
+        greeting to completion, then record the caller with a beep until they hang up or fall
+        silent (capped at max_duration), then hang up. The WAV is named `{linkedid}-...` by the
+        caller so RecordingFinished rides the existing recording->transcribe->analyze pipeline.
+
+        Best-effort throughout: a greeting/record failure still hangs up cleanly (never dead air)."""
+        try:
+            if greeting:
+                await self.play_and_wait(channel_id, str(greeting))
+            rec_queue = dtmf.register_recording(str(name))
+            watch_queue = dtmf.watch(channel_id)
+            try:
+                started = await self._post(
+                    f"/ari/channels/{channel_id}/record",
+                    params={
+                        "name": name,
+                        "format": "wav",
+                        "ifExists": "overwrite",
+                        "beep": "true",
+                        "maxSilenceSeconds": str(int(max_silence_s)),
+                        "maxDurationSeconds": str(int(max_duration_s)),
+                    },
+                )
+                if not started:
+                    return
+                await self._await_voicemail_end(
+                    rec_queue, watch_queue, channel_id, float(max_duration_s)
+                )
+            finally:
+                dtmf.unregister_recording(str(name))
+                dtmf.unwatch(watch_queue, channel_id)
+        except Exception:  # noqa: BLE001 - voicemail is best-effort; always hang up cleanly
+            logger.exception("ARI voicemail failed for %s", channel_id)
+        finally:
+            await self.hangup(channel_id)
+
+    async def _await_voicemail_end(
+        self, rec_queue: asyncio.Queue, watch_queue: asyncio.Queue,
+        channel_id: str, max_duration_s: float,
+    ) -> None:
+        """Block until the voicemail recording finishes (silence/maxDuration -> RecordingFinished)
+        OR the caller hangs up, whichever comes first (bounded by max_duration + grace)."""
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + max_duration_s + 5.0
+        while True:
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                return
+            getters = {
+                asyncio.ensure_future(rec_queue.get()),
+                asyncio.ensure_future(watch_queue.get()),
+            }
+            done, pendingfs = await asyncio.wait(
+                getters, timeout=remaining, return_when=asyncio.FIRST_COMPLETED
+            )
+            for fut in pendingfs:
+                fut.cancel()
+            if not done:
+                return  # timed out
+            event = next(iter(done)).result()
+            etype = event.get("type") if isinstance(event, dict) else None
+            if etype == "RecordingFinished":
+                return  # caller went silent / hit the cap; recording saved
+            if etype in _LEG_GONE_EVENTS:
+                return  # caller hung up; Asterisk finalizes the recording
 
     # --- Outbound calling (Ticket 14) — originate helpers that RETURN the channel id ---------
     # Unlike _originate above (which only needs answered/failed for the flow interpreter), the

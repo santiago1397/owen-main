@@ -60,6 +60,11 @@ _ERROR: str = "\x00__error__"
 # Weekday index (Mon=0) -> the schedule key an `hours` node uses.
 _DOW = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
 
+# Voicemail record caps (Ticket 18) when a `voicemail` node doesn't override them. The pure
+# interpreter can't import settings; the runtime default handler passes settings values directly.
+_VM_MAX_DURATION_S = 120.0
+_VM_MAX_SILENCE_S = 5.0
+
 
 def _snap(value: Any) -> str:
     """A value as it appears in a flow.node.* event payload: str()'d, capped at _SNAP_MAX."""
@@ -89,6 +94,10 @@ class AriControl(Protocol):
     async def dial_operator(
         self, channel_id: str, operators: list, *, caller_id: Optional[str], timeout_s: float
     ) -> str: ...
+    async def voicemail(
+        self, channel_id: str, *, greeting: Optional[str], name: str,
+        max_duration_s: float, max_silence_s: float,
+    ) -> None: ...
     async def hangup(self, channel_id: str) -> None: ...
 
 
@@ -376,11 +385,20 @@ class FlowInterpreter:
         return result  # "answered" | "noanswer" | "busy" | "failed"
 
     async def _h_voicemail(self, node: dict) -> Optional[str]:
+        # Real voicemail capture (Ticket 18): greeting -> beep -> record until the caller hangs
+        # up or falls silent (capped), then hang up. Delegated to the ARI client's `voicemail`
+        # (which blocks for the message); the old stub started a recording then immediately hung
+        # up, capturing nothing. Terminal node — the caller leaves a message, the flow ends.
         media = self._interp(self._media(node) or self._media_key(node, "greeting")) or None
-        if media:
-            await self.ari.play(self.channel_id, media)
-        await self.ari.record(self.channel_id, self._rec_name("vm"))
-        await self.ari.hangup(self.channel_id)
+        max_duration = float(node.get("max_duration", _VM_MAX_DURATION_S))
+        max_silence = float(node.get("max_silence", _VM_MAX_SILENCE_S))
+        await self.ari.voicemail(
+            self.channel_id,
+            greeting=media,
+            name=self._rec_name("vm"),
+            max_duration_s=max_duration,
+            max_silence_s=max_silence,
+        )
         return None  # terminal
 
     async def _h_hangup(self, node: dict) -> Optional[str]:

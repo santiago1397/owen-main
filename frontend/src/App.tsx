@@ -1,5 +1,7 @@
 import { NavLink, Navigate, Route, Routes, useNavigate } from "react-router-dom";
 import { clearToken, getToken } from "./api";
+import IncomingCallModal from "./components/IncomingCallModal";
+import { SoftphoneProvider } from "./lib/softphoneContext";
 import Agents from "./pages/Agents";
 import Callers from "./pages/Callers";
 import Calls from "./pages/Calls";
@@ -51,8 +53,14 @@ function Protected({ children }: { children: any }) {
 }
 
 export default function App() {
+  // Ticket 18: the softphone provider sits ABOVE <Routes> so the single registration (and any
+  // live call) survives navigation — mounting it inside a route element would tear the
+  // softphone down on every page change. The global incoming-call popup rides alongside it so
+  // a call to an unassigned DID can be answered from ANY page (Quo-style).
   return (
-    <Routes>
+    <SoftphoneProvider>
+      <IncomingCallModal />
+      <Routes>
       <Route path="/login" element={<Login />} />
       <Route path="/" element={<Protected><Dashboard /></Protected>} />
       <Route path="/calls" element={<Protected><Calls /></Protected>} />
@@ -65,7 +73,8 @@ export default function App() {
       <Route path="/agents" element={<Protected><Agents /></Protected>} />
       <Route path="/callers" element={<Protected><Callers /></Protected>} />
       <Route path="/emails" element={<Protected><Emails /></Protected>} />
-      <Route path="/settings" element={<Protected><Settings /></Protected>} />
-    </Routes>
+        <Route path="/settings" element={<Protected><Settings /></Protected>} />
+      </Routes>
+    </SoftphoneProvider>
   );
 }

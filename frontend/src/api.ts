@@ -181,6 +181,12 @@ export const api = {
   // --- Operator WebRTC softphone (Ticket 13) ---
   // Mint short-lived SIP + TURN creds for this operator's browser softphone (app-login gate).
   webrtcCredentials: () => request("/api/telephony/webrtc/credentials", { method: "POST" }),
+  // Enrich a ringing call for the incoming-call popup (Ticket 18): caller -> contact label,
+  // dialed DID -> friendly name. Unknown numbers come back null and the UI shows raw digits.
+  incomingContext: (caller: string, dialed: string) =>
+    request(
+      `/api/telephony/incoming-context?caller=${encodeURIComponent(caller)}&dialed=${encodeURIComponent(dialed)}`,
+    ),
   // Backend-driven control ops (SIP.js NEVER touches ARI): hold / bridge / blind-transfer.
   telephonyHold: (channel_id: string, hold: boolean) =>
     request("/api/telephony/control/hold", {

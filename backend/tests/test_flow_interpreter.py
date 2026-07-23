@@ -65,6 +65,11 @@ class FakeAri:
         self.calls.append(("dial_operator", channel_id, tuple(operators)))
         return self._dial_result
 
+    async def voicemail(self, channel_id, *, greeting, name, max_duration_s, max_silence_s):
+        # Ticket 18: real voicemail is a single blocking op (greeting+beep+record+hangup) —
+        # the interpreter delegates the whole capture to the ARI client.
+        self.calls.append(("voicemail", channel_id, greeting))
+
     async def hangup(self, channel_id):
         self.calls.append(("hangup", channel_id, None))
 
@@ -164,8 +169,8 @@ def test_unwired_digit_falls_to_default_fallback():
                              linkedid=LINKEDID, now=ALWAYS_OPEN, on_start=rec.pin)
     _run(interp)
     check("unwired digit 9 -> default_fallback vm", rec.node_ids() == ["start", "hrs", "greet", "menu", "vm"])
-    check("voicemail played greeting, recorded, and hung up",
-          ari.ops()[-3:] == ["play", "record", "hangup"])
+    check("voicemail captured a message (greeting+beep+record+hangup, one op)",
+          ari.ops()[-1] == "voicemail" and ("voicemail", CHAN, "sound:leave-msg") in ari.calls)
 
 
 def test_errored_node_falls_to_default_fallback():

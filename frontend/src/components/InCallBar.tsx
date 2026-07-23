@@ -23,7 +23,7 @@ import {
   useAudioDevices,
   type AudioKind,
 } from "../lib/audioDevices";
-import { useSoftphone } from "../lib/softphone";
+import { useSoftphoneContext } from "../lib/softphoneContext";
 
 type TransferKind = "did" | "operator" | "ai_agent";
 type FromNumber = { id: string; phone_number: string; friendly_name?: string | null };
@@ -209,7 +209,7 @@ function AudioSettings() {
 // `channelId` is the caller channel to hold/transfer (the selected/active platform call's
 // provider_call_sid). Optional: without one, hold/transfer are disabled with a hint.
 export default function InCallBar({ channelId }: { channelId?: string }) {
-  const { state, setAvailable, answer, hangup } = useSoftphone();
+  const { state, setAvailable, answer, hangup } = useSoftphoneContext();
   const [busy, setBusy] = useState(false);
   const [held, setHeld] = useState(false);
   const [xferKind, setXferKind] = useState<TransferKind>("did");

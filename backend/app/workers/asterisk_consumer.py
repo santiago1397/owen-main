@@ -64,6 +64,19 @@ async def _handle(router: AsteriskEventRouter, raw: str | bytes) -> None:
         dtmf.push_channel_event(channel_id, event)
         # fall through — these same events also feed status ingestion below
 
+    # Ticket 18: PlaybackFinished / RecordingFinished feed the completion-signal registries the
+    # unassigned-number default handler + voicemail node await on (consent-before-ring, greeting-
+    # before-beep, silence-triggered voicemail end). PlaybackFinished carries no call status, so
+    # it is fully handled here; RecordingFinished falls through to the existing pipeline routing.
+    if etype == "PlaybackFinished":
+        pb = event.get("playback") if isinstance(event.get("playback"), dict) else {}
+        dtmf.push_playback(str(pb.get("id") or ""), event)
+        return
+    if etype == "RecordingFinished":
+        rec_obj = event.get("recording") if isinstance(event.get("recording"), dict) else {}
+        dtmf.push_recording(str(rec_obj.get("name") or ""), event)
+        # fall through — route_recording below still registers the row + enqueues the fetch
+
     # Ticket 05: a RecordingFinished routes into the EXISTING recordings pipeline — register
     # the row (idempotent on the recording SID) and enqueue a fetch (a local spool move for
     # Asterisk) which chains into transcribe -> analyze, exactly like a Twilio recording.

@@ -255,9 +255,6 @@ async def run_flow_for_stasis(event: dict, ari: AriControl) -> None:
     try:
         async with SessionLocal() as db:
             assigned, resolved = await _resolve_active_flow_version(db, str(dialed))
-            if not assigned:
-                logger.info("flow runtime: no assigned flow for DID %s (linkedid=%s)", dialed, lid)
-                return
             if resolved is not None:
                 provider = await _get_or_create_provider(db, PROVIDER_NAME)
                 provider_id = provider.id
@@ -266,6 +263,16 @@ async def run_flow_for_stasis(event: dict, ari: AriControl) -> None:
         logger.exception("flow runtime: flow resolution failed for DID %s (linkedid=%s)",
                          dialed, lid)
         assigned, resolved = True, None
+
+    if not assigned:
+        # Ticket 18: the DID has NO flow assigned -> the built-in default call handling
+        # (consent notice -> ring every AVAILABLE operator -> first-answer bridge -> else
+        # voicemail). Run with NO DB session held (it can bridge/record for minutes). A real
+        # assigned flow OVERRIDES this; this is what happens before anything is configured.
+        logger.info("flow runtime: no assigned flow for DID %s (linkedid=%s); default handling",
+                    dialed, lid)
+        await _handle_unassigned(ari, channel_id, lid, str(dialed), caller_number)
+        return
 
     if resolved is None:
         # Ticket 15.6 safety net: the DID is flow-assigned but the flow didn't resolve
@@ -348,6 +355,77 @@ async def run_flow_for_stasis(event: dict, ari: AriControl) -> None:
             "blind-forwarding", fv_id, lid,
         )
         await _fallback_forward(ari, channel_id, lid)
+
+
+async def _handle_unassigned(
+    ari, channel_id: str, lid: str, dialed: str, caller_number: str
+) -> None:
+    """Ticket 18 — the default behavior for a BulkVS/Asterisk DID with NO flow assigned.
+
+    Sequence (never dead air at any step; every ARI op is best-effort in the client):
+      1. answer the caller;
+      2. play the recording-consent notice to completion (FL all-party consent), if configured;
+      3. if ring-operators is enabled AND at least one operator softphone is registered, ring
+         them ALL at once (caller hears ringback), bridge the caller to the first to answer,
+         record the bridged call, and end when either side hangs up;
+      4. otherwise (no operators available, nobody answered in time, or ringing disabled) take
+         a voicemail — greeting, beep, record until hangup/silence, which rides the existing
+         recording pipeline and surfaces in the Inbox.
+
+    `ari` is the concrete AsteriskAriClient (has available_operators / ring_* / voicemail);
+    typed loosely because the pure AriControl protocol doesn't declare those platform ops."""
+    try:
+        await ari.answer(channel_id)
+
+        consent = (settings.INBOUND_CONSENT_MEDIA or "").strip()
+        if consent:
+            await ari.play_and_wait(channel_id, consent)
+
+        if settings.NO_FLOW_RING_OPERATORS:
+            operators = await ari.available_operators()
+            if operators:
+                # Caller-ID on each operator leg: display name = the dialed DID (so the popup can
+                # show "to what number"), number = the caller (who is calling). The frontend
+                # enriches both to contact/campaign names.
+                caller_id = f"{dialed} <{caller_number}>" if caller_number else dialed
+                record_name = f"{lid}-operator-1" if settings.INBOUND_RECORDING_ENABLED else None
+                await ari.ring_start(channel_id)
+                try:
+                    result = await ari.ring_and_bridge(
+                        channel_id,
+                        operators,
+                        caller_id=caller_id,
+                        timeout_s=float(settings.OPERATOR_RING_TIMEOUT_SECONDS),
+                        record_name=record_name,
+                    )
+                finally:
+                    await ari.ring_stop(channel_id)
+                if result == "answered":
+                    await ari.hangup(channel_id)  # bridge ended -> end the call
+                    return
+                logger.info(
+                    "default handling: operators did not answer (%s) for DID %s (linkedid=%s); "
+                    "-> voicemail", result, dialed, lid,
+                )
+            else:
+                logger.info(
+                    "default handling: no operators available for DID %s (linkedid=%s); "
+                    "-> voicemail", dialed, lid,
+                )
+
+        await ari.voicemail(
+            channel_id,
+            greeting=settings.VOICEMAIL_GREETING,
+            name=f"{lid}-vm-1",
+            max_duration_s=float(settings.VOICEMAIL_MAX_DURATION_SECONDS),
+            max_silence_s=float(settings.VOICEMAIL_MAX_SILENCE_SECONDS),
+        )
+    except Exception:  # noqa: BLE001 - the default handler must never raise into the consumer
+        logger.exception("default handling failed for DID %s (linkedid=%s)", dialed, lid)
+        try:
+            await ari.hangup(channel_id)
+        except Exception:  # noqa: BLE001
+            logger.exception("default handling: final hangup failed (linkedid=%s)", lid)
 
 
 async def _fallback_forward(ari: AriControl, channel_id: str, lid: str) -> None:
