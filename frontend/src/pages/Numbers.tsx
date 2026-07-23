@@ -1,8 +1,8 @@
 import { useQuery } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { api } from "../api";
-import { LifecycleBadge, type NumberRow, isPlatformManaged, providerPath } from "../lib/numbers";
+import { LifecycleBadge, type NumberRow, effectiveOwner, isPlatformManaged, providerPath } from "../lib/numbers";
 
 // The Numbers hub is the operator's primary platform surface: one row per DID with its
 // owner→media provider, flow, campaign, SMS-state and lifecycle. Rows open a detail view.
@@ -11,10 +11,26 @@ export default function Numbers() {
   const { data } = useQuery<NumberRow[]>({ queryKey: ["numbers"], queryFn: api.numbers });
   const nav = useNavigate();
   const [q, setQ] = useState("");
+  // Provider filter lives in the URL (?provider=bulkvs) so it survives the
+  // list → detail → back loop and refreshes.
+  const [params, setParams] = useSearchParams();
+  const provider = (params.get("provider") || "").toLowerCase();
+
+  // Effective-owner buckets with counts, derived from whatever the data holds
+  // (ported DIDs count under their platform owner, not the legacy provider row).
+  const providerCounts = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const n of data || []) {
+      const owner = effectiveOwner(n);
+      counts.set(owner, (counts.get(owner) || 0) + 1);
+    }
+    return [...counts.entries()].sort(([a], [b]) => a.localeCompare(b));
+  }, [data]);
 
   const rows = useMemo(() => {
     const term = q.trim().toLowerCase();
     return (data || [])
+      .filter((n) => !provider || effectiveOwner(n) === provider)
       .filter((n) =>
         !term ||
         (n.friendly_name || "").toLowerCase().includes(term) ||
@@ -27,7 +43,7 @@ export default function Numbers() {
           { sensitivity: "base", numeric: true }
         )
       );
-  }, [data, q]);
+  }, [data, q, provider]);
 
   return (
     <div>
@@ -42,6 +58,18 @@ export default function Numbers() {
           value={q}
           onChange={(e) => setQ(e.target.value)}
         />
+        <select
+          value={provider}
+          onChange={(e) => {
+            const v = e.target.value;
+            setParams(v ? { provider: v } : {}, { replace: true });
+          }}
+        >
+          <option value="">All providers ({data?.length ?? 0})</option>
+          {providerCounts.map(([owner, count]) => (
+            <option key={owner} value={owner}>{owner} ({count})</option>
+          ))}
+        </select>
         <span className="muted">{rows.length} of {data?.length ?? 0}</span>
       </div>
       <div className="card">

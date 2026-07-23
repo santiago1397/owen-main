@@ -28,6 +28,12 @@ export function isPlatformManaged(n: NumberRow): boolean {
   return PLATFORM_PROVIDERS.includes(owner) || PLATFORM_PROVIDERS.includes(media);
 }
 
+// Who owns (bills/routes) this DID today: ported numbers report their platform
+// owner_provider even though the legacy provider row still says twilio/signalwire.
+export function effectiveOwner(n: NumberRow): string {
+  return (n.owner_provider || n.provider || "unknown").toLowerCase();
+}
+
 // "owner → media" one-liner, falling back to the legacy provider name.
 export function providerPath(n: NumberRow): string {
   if (isPlatformManaged(n)) {
