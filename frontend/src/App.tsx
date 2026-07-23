@@ -1,4 +1,6 @@
-import { NavLink, Navigate, Route, Routes, useNavigate } from "react-router-dom";
+import { useEffect, useState } from "react";
+import { Menu } from "lucide-react";
+import { NavLink, Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import { clearToken, getToken } from "./api";
 import IncomingCallModal from "./components/IncomingCallModal";
 import { SoftphoneProvider } from "./lib/softphoneContext";
@@ -18,10 +20,40 @@ import Settings from "./pages/Settings";
 
 function Layout({ children }: { children: any }) {
   const nav = useNavigate();
+  const loc = useLocation();
+  // Below 900px the sidebar is an off-canvas drawer (see styles.css "RESPONSIVE"). On desktop
+  // the .open class is inert — the transform that hides the sidebar only exists inside the
+  // media query — so this state has no effect on the desktop layout.
+  const [navOpen, setNavOpen] = useState(false);
+
+  // Close on navigation, otherwise the drawer stays over the page you just moved to.
+  useEffect(() => setNavOpen(false), [loc.pathname]);
+
+  // Escape closes it, and the page behind must not scroll while it's over the top.
+  useEffect(() => {
+    if (!navOpen) return;
+    const onKey = (e: KeyboardEvent) => e.key === "Escape" && setNavOpen(false);
+    window.addEventListener("keydown", onKey);
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      document.body.style.overflow = prev;
+    };
+  }, [navOpen]);
+
   const link = ({ isActive }: { isActive: boolean }) => "navlink" + (isActive ? " active" : "");
   return (
     <div className="layout">
-      <aside className="sidebar">
+      <header className="topbar">
+        <button className="navtoggle" onClick={() => setNavOpen((v) => !v)}
+                aria-label="Menu" aria-expanded={navOpen}>
+          <Menu size={20} />
+        </button>
+        <h1>📞 Call Monitor</h1>
+      </header>
+      {navOpen && <div className="navscrim" onClick={() => setNavOpen(false)} />}
+      <aside className={"sidebar" + (navOpen ? " open" : "")}>
         <h1>📞 Call Monitor</h1>
 
         <div className="navsection">Attribution</div>

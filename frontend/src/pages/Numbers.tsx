@@ -73,7 +73,7 @@ export default function Numbers() {
         <span className="muted">{rows.length} of {data?.length ?? 0}</span>
       </div>
       <div className="card">
-        <table>
+        <div className="tablewrap"><table>
           <thead>
             <tr>
               <th>Number</th><th>Friendly</th><th>Provider</th><th>Flow</th>
@@ -112,7 +112,7 @@ export default function Numbers() {
               </td></tr>
             )}
           </tbody>
-        </table>
+        </table></div>
       </div>
     </div>
   );

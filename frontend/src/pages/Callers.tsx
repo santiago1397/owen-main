@@ -27,7 +27,7 @@ export default function Callers() {
         </select>
       </div>
       <div className="card">
-        <table>
+        <div className="tablewrap"><table>
           <thead>
             <tr><th>Number</th><th>Calls</th><th>First seen</th><th>Last seen</th><th>Spam score</th><th>Label</th><th></th></tr>
           </thead>
@@ -53,7 +53,7 @@ export default function Callers() {
               </tr>
             ))}
           </tbody>
-        </table>
+        </table></div>
       </div>
     </div>
   );

@@ -52,7 +52,7 @@ export default function Flows() {
       </p>
 
       <div className="card">
-        <table>
+        <div className="tablewrap"><table>
           <thead>
             <tr><th>Name</th><th>Status</th><th>Created</th><th></th></tr>
           </thead>
@@ -77,7 +77,7 @@ export default function Flows() {
               </td></tr>
             )}
           </tbody>
-        </table>
+        </table></div>
       </div>
     </div>
   );

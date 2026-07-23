@@ -7,7 +7,10 @@
 body { margin: 0; background: var(--bg); color: var(--text);
   font: 14px/1.5 system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
 a { color: var(--accent); text-decoration: none; }
-.layout { display: flex; min-height: 100vh; }
+/* dvh (not vh) throughout: on iOS Safari 100vh counts the URL bar, so content lands below the
+   fold. The vh line stays first as a fallback for browsers without dvh. On desktop the two are
+   identical, so this is a no-op there. */
+.layout { display: flex; min-height: 100vh; min-height: 100dvh; }
 .sidebar { width: 210px; background: var(--panel); border-right: 1px solid var(--border);
   padding: 18px 12px; display: flex; flex-direction: column; gap: 4px; }
 .sidebar h1 { font-size: 15px; margin: 4px 8px 16px; }
@@ -43,12 +46,12 @@ button.primary { background: var(--accent); border-color: var(--accent); color: 
 .badge.new { background: rgba(55,214,122,.15); color: var(--good); border-color: var(--good); }
 .badge.prov { background: var(--panel2); color: var(--muted); }
 .badge.job { background: rgba(55,214,122,.18); color: var(--good); border-color: var(--good); font-weight: 600; }
-.drawer { position: fixed; top: 0; right: 0; width: 460px; max-width: 92vw; height: 100vh;
+.drawer { position: fixed; top: 0; right: 0; width: 460px; max-width: 92vw; height: 100vh; height: 100dvh;
   background: var(--panel); border-left: 1px solid var(--border); padding: 20px; overflow: auto; z-index: 20; }
 .overlay { position: fixed; inset: 0; background: rgba(0,0,0,.5); z-index: 10; }
 .muted { color: var(--muted); }
 .toolbar { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 14px; align-items: center; }
-.loginwrap { display: grid; place-items: center; min-height: 100vh; }
+.loginwrap { display: grid; place-items: center; min-height: 100vh; min-height: 100dvh; padding: 16px; }
 .timeline li { margin-bottom: 4px; }
 .kv { display: grid; grid-template-columns: 120px 1fr; gap: 6px 12px; margin: 10px 0; }
 .kv .muted { align-self: center; }
@@ -61,8 +64,10 @@ code.mono { background: var(--panel2); padding: 2px 6px; border-radius: 6px; fon
   padding: 8px 10px; margin-bottom: 8px; cursor: grab; }
 .palettenode:hover { border-color: var(--accent); }
 .palettehint { display: block; font-size: 11px; margin-top: 2px; }
-.flowcanvas { flex: 1; min-width: 0; height: calc(100vh - 210px); min-height: 420px; padding: 0; overflow: hidden; }
-.flowside { width: 300px; min-width: 300px; padding: 14px; overflow-y: auto; max-height: calc(100vh - 210px); }
+.flowcanvas { flex: 1; min-width: 0; height: calc(100vh - 210px); height: calc(100dvh - 210px);
+  min-height: 420px; padding: 0; overflow: hidden; }
+.flowside { width: 300px; min-width: 300px; padding: 14px; overflow-y: auto;
+  max-height: calc(100vh - 210px); max-height: calc(100dvh - 210px); }
 .ro-banner { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; padding: 10px 14px;
   border-color: var(--warn); }
 .flownode { background: var(--panel2); border: 1px solid var(--border); border-radius: 10px;
@@ -113,7 +118,8 @@ code.mono { background: var(--panel2); padding: 2px 6px; border-radius: 6px; fon
 /* ---- Quo-style Inbox (/inbox) — self-contained dark look for this page only ---- */
 .quo { --q-bg: #0b0b0e; --q-panel: #111114; --q-panel2: #1a1a20; --q-border: #232329;
   --q-text: #ececf1; --q-muted: #8b8b95; --q-blue: #2f6cf6; --q-bubble: #232329;
-  display: flex; height: calc(100vh - 48px); margin: -24px -28px; background: var(--q-bg);
+  display: flex; height: calc(100vh - 48px); height: calc(100dvh - 48px);
+  margin: -24px -28px; background: var(--q-bg);
   color: var(--q-text); overflow: hidden; }
 .quo * { box-sizing: border-box; }
 .quo input, .quo select, .quo textarea, .quo button { background: var(--q-panel2);
@@ -194,3 +200,106 @@ code.mono { background: var(--panel2); padding: 2px 6px; border-radius: 6px; fon
 .quo-callrow { display: flex; align-items: center; gap: 10px; padding: 10px 14px;
   border-bottom: 1px solid var(--q-border); font-size: 13px; }
 .quo-callrow:hover { background: var(--q-panel2); }
+
+/* =======================================================================
+   RESPONSIVE — iPhone support. See docs/RESPONSIVE_SPEC.md.
+
+   Contract: every rule below lives inside a max-width query, so above
+   900px the app renders EXACTLY as it did before this work. If you add
+   something here, keep it inside a query.
+
+   Breakpoints: 900px = structure (drawer, single-pane, table scroll),
+                560px = phone density (single-column grids, card rows).
+   ======================================================================= */
+
+/* Mobile-only chrome: inert on desktop. */
+.topbar { display: none; }
+.navscrim { display: none; }
+/* Login card keeps its 320px on desktop but may now shrink below it. */
+.logincard { width: 320px; max-width: 100%; }
+
+@media (max-width: 900px) {
+  /* ---- shell: the fixed 210px sidebar becomes an off-canvas drawer ---- */
+  .layout { flex-direction: column; }
+
+  .topbar {
+    display: flex; align-items: center; gap: 10px;
+    position: sticky; top: 0; z-index: 30;
+    background: var(--panel); border-bottom: 1px solid var(--border);
+    padding: 8px 12px;
+    /* keep clear of the notch / Dynamic Island */
+    padding-top: calc(8px + env(safe-area-inset-top));
+    padding-left: calc(12px + env(safe-area-inset-left));
+    padding-right: calc(12px + env(safe-area-inset-right));
+  }
+  .topbar h1 { font-size: 15px; margin: 0; font-weight: 700; }
+  .navtoggle {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 44px; height: 44px; min-height: 44px; padding: 0; font-size: 17px; line-height: 1;
+  }
+
+  .sidebar {
+    position: fixed; top: 0; bottom: 0; left: 0; z-index: 50;
+    width: 264px; max-width: 82vw; overflow-y: auto;
+    padding-top: calc(18px + env(safe-area-inset-top));
+    padding-bottom: calc(18px + env(safe-area-inset-bottom));
+    padding-left: calc(12px + env(safe-area-inset-left));
+    transform: translateX(-100%);
+    transition: transform .22s ease;
+  }
+  .sidebar.open { transform: none; }
+  @media (prefers-reduced-motion: reduce) { .sidebar { transition: none; } }
+
+  .navscrim { display: block; position: fixed; inset: 0; background: rgba(0,0,0,.5); z-index: 40; }
+
+  .main {
+    padding: 16px 14px;
+    padding-left: calc(14px + env(safe-area-inset-left));
+    padding-right: calc(14px + env(safe-area-inset-right));
+    padding-bottom: calc(16px + env(safe-area-inset-bottom));
+  }
+
+  /* ---- iOS: anything under 16px makes Safari zoom the page on field focus ---- */
+  input, select, textarea, button { font-size: 16px; }
+  .quo input, .quo select, .quo textarea, .quo button { font-size: 16px; }
+
+  /* iOS Safari draws its own light chrome for <select> and ignores our dark background —
+     the control comes out white on a dark page. appearance:none opts out, which also removes
+     the native arrow, so we draw one back in. Desktop already renders these correctly, which
+     is why this is scoped to the mobile query. */
+  select {
+    -webkit-appearance: none; appearance: none;
+    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%239aa4b2' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><path d='M6 9l6 6 6-6'/></svg>");
+    background-repeat: no-repeat; background-position: right 10px center; background-size: 14px;
+    padding-right: 34px;
+  }
+  /* Same treatment inside the Inbox, which has its own colour scope. */
+  .quo select { background-position: right 10px center; }
+  /* Date/time inputs get the same native-chrome treatment on iOS. */
+  input[type="date"], input[type="time"] { -webkit-appearance: none; appearance: none; }
+
+  /* ---- 44px minimum tap targets (Apple HIG) ---- */
+  button { min-height: 44px; padding: 10px 14px; }
+  .navlink { min-height: 44px; display: flex; align-items: center; }
+  .tab { min-height: 44px; }
+  .quo-iconbtn { min-width: 44px; min-height: 44px; }
+  .quo-pill { min-height: 38px; padding: 7px 14px; font-size: 13px; }
+  .hoursrange button, .hoursadd { min-height: 38px; }
+
+  /* ---- wide tables scroll inside their own box, never the whole page ---- */
+  .tablewrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  .tablewrap table { min-width: 620px; }
+
+  /* Long unbroken strings (phone numbers, SIDs, URLs) must not widen the page. */
+  .main { overflow-x: hidden; }
+}
+
+@media (max-width: 560px) {
+  .main { padding: 14px 12px;
+    padding-left: calc(12px + env(safe-area-inset-left));
+    padding-right: calc(12px + env(safe-area-inset-right)); }
+  .toolbar { gap: 6px; }
+  /* kv pairs stack rather than squeezing the value into ~200px */
+  .kv { grid-template-columns: 1fr; gap: 2px 0; }
+  .kv .muted { margin-top: 6px; }
+}

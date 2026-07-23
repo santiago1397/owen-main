@@ -264,7 +264,7 @@ export default function Calls() {
       </div>
 
       <div className="card">
-        <table>
+        <div className="tablewrap"><table>
           <thead>
             <tr><th>When</th><th>Caller</th><th>Number</th><th>Campaign</th><th>Status</th><th>Dur</th><th>Flags</th></tr>
           </thead>
@@ -288,7 +288,7 @@ export default function Calls() {
               </tr>
             ))}
           </tbody>
-        </table>
+        </table></div>
         <div className="toolbar" style={{ marginTop: 12 }}>
           <span className="muted">{data?.total ?? 0} calls</span>
           <div style={{ flex: 1 }} />

@@ -11,3 +11,6 @@ node_modules/
 dist/
 *.sqlite3
 data/
+screenshots/
+test-results/
+playwright-report/
