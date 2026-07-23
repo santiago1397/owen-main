@@ -44,7 +44,7 @@ export default function Dashboard() {
       <div className="toolbar" style={{ gap: 12, flexWrap: "wrap", marginTop: 8 }}>
         <label style={{ display: "flex", gap: 6, alignItems: "center", fontSize: 13, cursor: "pointer" }}>
           <input type="checkbox" checked={hideJunk} onChange={(e) => setHideJunk(e.target.checked)} />
-          Hide likely-junk calls (≤3s or never connected)
+          Hide likely-junk calls (≤13s or never connected)
         </label>
       </div>
 

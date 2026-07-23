@@ -17,7 +17,7 @@ SHORT_CALL_MAX_DURATION_SECONDS = 1
 # Dashboard "likely junk" heuristic (distinct from the LLM spam verdict): a call is junk
 # if it lasted this many seconds or fewer, OR it never connected (see JUNK_STATUSES).
 # NULL durations / NULL statuses are treated as NOT junk (call may still be in flight).
-JUNK_CALL_MAX_DURATION_SECONDS = 3
+JUNK_CALL_MAX_DURATION_SECONDS = 13
 JUNK_STATUSES = ("failed", "busy", "no-answer", "canceled")
 
 

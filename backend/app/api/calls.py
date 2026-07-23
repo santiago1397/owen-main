@@ -62,7 +62,7 @@ def _apply_filters(stmt, provider, provider_group, number_id, campaign_id, calle
     if date_to:
         stmt = stmt.where(Call.started_at < date_to)  # half-open: date_to is start-of-next-day
     if hide_junk:
-        # Hide "likely junk": <=3s or never-connected calls (same rule as the dashboard).
+        # Hide "likely junk": <=13s or never-connected calls (same rule as the dashboard).
         # Supersedes the older 0–1s include_short hiding when enabled.
         stmt = stmt.where(NOT_JUNK)
     elif not include_short:
@@ -91,7 +91,7 @@ async def list_calls(
     date_from: datetime | None = None,
     date_to: datetime | None = None,
     include_short: bool = Query(False, description="Include 0–1s misdial/hang-up calls (hidden by default)"),
-    hide_junk: bool = Query(False, description="Hide likely-junk calls (<=3s or never connected)"),
+    hide_junk: bool = Query(False, description="Hide likely-junk calls (<=13s or never connected)"),
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=200),
     _: User = Depends(current_user),

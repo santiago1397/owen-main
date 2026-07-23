@@ -164,7 +164,7 @@ export default function Calls() {
     return () => window.removeEventListener(DIAL_EVENT, onDial);
   }, []);
 
-  // The single "Hide failed & ≤3s" checkbox governs all junk-hiding. When unchecked we must
+  // The single "Hide failed & ≤13s" checkbox governs all junk-hiding. When unchecked we must
   // also opt into 0–1s calls via include_short, otherwise the backend's separate short-call
   // filter keeps hiding them and the checkbox appears to do nothing.
   const query = {
@@ -238,7 +238,7 @@ export default function Calls() {
             checked={hideJunk}
             onChange={(e) => { setHideJunk(e.target.checked); setFilters((f: any) => ({ ...f, page: 1 })); }}
           />
-          Hide failed &amp; ≤3s calls
+          Hide failed &amp; ≤13s calls
         </label>
       </div>
 
