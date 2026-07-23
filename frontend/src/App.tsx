@@ -1,5 +1,12 @@
 import { useEffect, useState } from "react";
-import { Menu } from "lucide-react";
+import {
+  Inbox as InboxIcon,
+  LayoutDashboard,
+  Menu,
+  MessageSquare,
+  MoreHorizontal,
+  Phone,
+} from "lucide-react";
 import { NavLink, Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import { clearToken, getToken } from "./api";
 import IncomingCallModal from "./components/IncomingCallModal";
@@ -43,6 +50,7 @@ function Layout({ children }: { children: any }) {
   }, [navOpen]);
 
   const link = ({ isActive }: { isActive: boolean }) => "navlink" + (isActive ? " active" : "");
+  const tab = ({ isActive }: { isActive: boolean }) => "tabitem" + (isActive ? " active" : "");
   return (
     <div className="layout">
       <header className="topbar">
@@ -76,6 +84,23 @@ function Layout({ children }: { children: any }) {
         <button onClick={() => { clearToken(); nav("/login"); }}>Log out</button>
       </aside>
       <main className="main">{children}</main>
+
+      {/* Bottom tab bar: the four routes this app is actually opened for, within thumb reach.
+          Hidden above 560px, where the sidebar (or the drawer) is already the nav. The other
+          seven routes stay in the drawer, which "More" opens — see docs/RESPONSIVE_SPEC.md §5. */}
+      <nav className="tabbar" aria-label="Primary">
+        <NavLink to="/" end className={tab}><LayoutDashboard size={20} /><span>Dashboard</span></NavLink>
+        <NavLink to="/calls" className={tab}><Phone size={20} /><span>Calls</span></NavLink>
+        <NavLink to="/inbox" className={tab}><InboxIcon size={20} /><span>Inbox</span></NavLink>
+        <NavLink to="/messages" className={tab}><MessageSquare size={20} /><span>Messages</span></NavLink>
+        <button
+          className={"tabitem" + (navOpen ? " active" : "")}
+          onClick={() => setNavOpen((v) => !v)}
+          aria-expanded={navOpen}
+        >
+          <MoreHorizontal size={20} /><span>More</span>
+        </button>
+      </nav>
     </div>
   );
 }
