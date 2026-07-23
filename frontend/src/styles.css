@@ -289,7 +289,9 @@ code.mono { background: var(--panel2); padding: 2px 6px; border-radius: 6px; fon
   .navlink { min-height: 44px; display: flex; align-items: center; }
   .tab { min-height: 44px; }
   .quo-iconbtn { min-width: 44px; min-height: 44px; }
-  .quo-pill { min-height: 38px; padding: 7px 14px; font-size: 13px; }
+  /* 44px, not the 38px this started at: the Inbox filter pills were the only interactive
+     control left under the HIG minimum once everything else was raised. */
+  .quo-pill { min-height: 44px; padding: 10px 14px; font-size: 13px; }
   .hoursrange button, .hoursadd { min-height: 38px; }
 
   /* ---- wide tables scroll inside their own box, never the whole page ---- */
