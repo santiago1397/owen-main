@@ -448,6 +448,12 @@ code.mono { background: var(--panel2); padding: 2px 6px; border-radius: 6px; fon
   /* ---- form grids: inline 2-up / 3-up templates collapse to one column ---- */
   .formgrid { grid-template-columns: 1fr !important; }
 
-  /* ---- charts: inline minWidths were wider than the viewport ---- */
-  .chartcard { min-width: 0 !important; }
+  /* ---- charts: inline minWidths were wider than the viewport ----
+     min-width:0 alone was not enough, and in fact made things worse: with the 360px floor gone,
+     the flex:2 line chart and the flex:1 donut stopped wrapping and shared a 375px row instead,
+     which clipped the donut and overlapped the date axis labels. Forcing a 100% basis puts each
+     chart on its own line. Both need !important — the components set flex and minWidth inline.
+     Deliberately scoped to .chartcard rather than .row: the stat cards share .row and read
+     perfectly well two-up, so stacking those would only make the page longer. */
+  .chartcard { min-width: 0 !important; flex-basis: 100% !important; }
 }
