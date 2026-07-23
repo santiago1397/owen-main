@@ -141,4 +141,13 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ channel_id, kind, target }),
     }),
+  // Manual operator outbound calling (Ticket 14). Owned BulkVS DIDs for the from-number picker,
+  // and the "place outbound call" orchestration (originate + pre-bridge consent + bridge, ARI).
+  outboundFromNumbers: () => request("/api/telephony/outbound/from-numbers"),
+  outboundCall: (callee_number: string, from_number: string) =>
+    request("/api/telephony/outbound/call", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ callee_number, from_number }),
+    }),
 };

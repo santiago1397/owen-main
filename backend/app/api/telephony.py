@@ -14,13 +14,18 @@ Two authenticated surfaces, both gated on ASTERISK_ENABLED (503 when the platfor
 The ARI client is resolved via `get_ari_control()` so tests can substitute a FAKE.
 """
 
+from datetime import datetime, timezone
+
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import current_user
 from app.core.config import settings
-from app.models import User
-from app.telephony import control
+from app.db import get_db
+from app.models import Number, User
+from app.telephony import control, outbound
 from app.telephony.credentials import build_webrtc_credentials
 
 router = APIRouter(prefix="/api/telephony", tags=["telephony"])
@@ -112,3 +117,105 @@ async def control_transfer(body: TransferIn, user: User = Depends(current_user))
     if endpoint is None:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "unresolvable transfer target")
     return {"ok": True, "transferred_to": endpoint}
+
+
+# --- 3. Manual operator OUTBOUND calling (Ticket 14) ---------------------------------------
+
+async def _owned_from_numbers(db: AsyncSession) -> list[Number]:
+    """Owned BulkVS DIDs usable as the caller-ID for an outbound call: active, not soft-
+    released, owner=bulkvs. Foreign/spoofed numbers are out of scope (locked design). Candidates
+    are fetched by owner then filtered with the PURE predicate `outbound.is_owned_bulkvs_did`,
+    so the restriction has one (unit-tested) source of truth."""
+    rows = (
+        await db.execute(
+            select(Number)
+            .where(Number.owner_provider == settings.BULKVS_OWNER_PROVIDER)
+            .order_by(Number.phone_number)
+        )
+    ).scalars().all()
+    return [
+        n for n in rows
+        if outbound.is_owned_bulkvs_did(n, owner_provider=settings.BULKVS_OWNER_PROVIDER)
+    ]
+
+
+@router.get("/outbound/from-numbers")
+async def outbound_from_numbers(
+    _: User = Depends(current_user), db: AsyncSession = Depends(get_db)
+) -> list[dict]:
+    """The owned BulkVS DIDs the operator may place a call FROM (the from-number picker).
+    The remembered default is a lightweight client-side preference (localStorage) — no schema."""
+    _require_enabled()
+    return [
+        {"id": str(n.id), "phone_number": n.phone_number, "friendly_name": n.friendly_name}
+        for n in await _owned_from_numbers(db)
+    ]
+
+
+class OutboundCallIn(BaseModel):
+    callee_number: str          # who to dial (external, E.164)
+    from_number: str            # owned BulkVS DID to present as caller-ID
+    operator_channel_id: str | None = None  # if the operator's live Stasis leg is already known
+
+
+async def _guardrail_warnings(db: AsyncSession, callee_number: str) -> list[str]:
+    """Soft, NON-BLOCKING warnings: outside 8am–9pm (callee tz), and — only if the Ticket-10
+    `sms_opt_outs` table exists — an opt-out hit. Missing table => opt-out check skipped."""
+    warnings: list[str] = []
+    tw = outbound.time_window_warning(callee_number, datetime.now(timezone.utc))
+    if tw:
+        warnings.append(tw)
+
+    model = outbound.resolve_opt_out_model()
+    if model is not None:
+        try:
+            row = (
+                await db.execute(select(model).where(model.phone_number == callee_number).limit(1))
+            ).first()
+            ow = outbound.opt_out_warning(row is not None)
+            if ow:
+                warnings.append(ow)
+        except Exception:  # noqa: BLE001 - table not migrated yet => skip silently (defensive)
+            pass
+    return warnings
+
+
+@router.post("/outbound/call")
+async def outbound_call(
+    body: OutboundCallIn,
+    user: User = Depends(current_user),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Place a manual operator outbound call: validate the from-number is an owned BulkVS DID,
+    compute soft guardrail warnings, then orchestrate originate + pre-bridge consent + bridge
+    over ARI (recording on by default). Guardrails are advisory — the call still proceeds."""
+    _require_enabled()
+
+    owned = {n.phone_number for n in await _owned_from_numbers(db)}
+    if body.from_number not in owned:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            "from_number must be an owned BulkVS DID",
+        )
+    if not body.callee_number.strip():
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "callee_number required")
+
+    warnings = await _guardrail_warnings(db, body.callee_number)
+
+    ari = get_ari_control()
+    result = await control.place_outbound_call(
+        ari,
+        operator_id=user.email,
+        callee_number=body.callee_number,
+        from_number=body.from_number,
+        trunk_name=settings.BULKVS_TRUNK_NAME,
+        consent_media=settings.OUTBOUND_CONSENT_MEDIA or None,
+        record=settings.OUTBOUND_RECORDING_ENABLED,
+        operator_channel_id=body.operator_channel_id,
+    )
+    if not result.get("ok"):
+        raise HTTPException(
+            status.HTTP_502_BAD_GATEWAY,
+            f"could not place call: {result.get('reason', 'unknown')}",
+        )
+    return {**result, "warnings": warnings}

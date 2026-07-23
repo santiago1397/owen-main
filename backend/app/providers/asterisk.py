@@ -119,6 +119,23 @@ def linkedid(event: dict) -> str:
     return str(ch.get("id") or "")
 
 
+def _channelvar(event: dict, key: str) -> str | None:
+    """A named `channel.channelvars.<key>` value, or None. Requires the var be listed in
+    ari.conf `channelvars=` (Linkedid is already; Ticket 14 adds X_OWEN_DIRECTION/X_OWEN_FROM)."""
+    cv = _channel(event).get("channelvars")
+    if isinstance(cv, dict) and cv.get(key):
+        return str(cv[key])
+    return None
+
+
+def _direction(event: dict) -> str:
+    """Call direction for the projection. Manual outbound calls (Ticket 14) stamp the entry
+    leg with X_OWEN_DIRECTION=outbound; absent it (every inbound PSTN call) => 'inbound',
+    preserving the prior hard-coded behaviour exactly."""
+    d = (_channelvar(event, "X_OWEN_DIRECTION") or "").strip().lower()
+    return "outbound" if d == "outbound" else "inbound"
+
+
 def is_entry_channel(event: dict) -> bool:
     """True iff this event's channel is the inbound entry leg (Uniqueid == Linkedid).
     Status is ranked off the entry channel only, so secondary legs never double-count."""
@@ -176,16 +193,25 @@ class AsteriskAdapter(ProviderAdapter):
 
         rank = STATUS_RANK.get(status.lower(), 0) if status else 0
 
+        # Direction: inbound by default; manual outbound calls (Ticket 14) stamp the entry leg
+        # with X_OWEN_DIRECTION=outbound. For outbound, the OWNED BulkVS DID is the from-number
+        # (stamped on X_OWEN_FROM) and the callee the to-number — so campaign attribution keys
+        # on the from-number (the reverse of the inbound to-number match in ingestion).
+        direction = _direction(params)
+        if direction == "outbound":
+            from_number = _channelvar(params, "X_OWEN_FROM") or caller_number
+            to_number = exten
+        else:
+            from_number = caller_number
+            to_number = exten
+
         return NormalizedCallEvent(
             provider_call_sid=lid,
             event_type=params.get("type") or "asterisk",
             status=status,
-            from_number=caller_number,
-            to_number=exten,
-            # Inbound PSTN entry leg. Outbound/agent calls become the same rows later,
-            # distinguished by direction; the reconciler's `_is_inbound` drop stays
-            # Twilio-only and is never applied to asterisk.
-            direction="inbound",
+            from_number=from_number,
+            to_number=to_number,
+            direction=direction,
             started_at=ts if rank == 1 else None,
             answered_at=ts if status == "in-progress" else None,
             ended_at=ts if rank >= 4 else None,

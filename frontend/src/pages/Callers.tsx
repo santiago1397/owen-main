@@ -1,9 +1,12 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { api } from "../api";
+import { requestDial } from "../lib/dialer";
 
 export default function Callers() {
   const qc = useQueryClient();
+  const navigate = useNavigate();
   const [filters, setFilters] = useState<any>({ page: 1, page_size: 50 });
   const { data } = useQuery({ queryKey: ["callers", filters], queryFn: () => api.callers(filters) });
   const label = useMutation({
@@ -26,7 +29,7 @@ export default function Callers() {
       <div className="card">
         <table>
           <thead>
-            <tr><th>Number</th><th>Calls</th><th>First seen</th><th>Last seen</th><th>Spam score</th><th>Label</th></tr>
+            <tr><th>Number</th><th>Calls</th><th>First seen</th><th>Last seen</th><th>Spam score</th><th>Label</th><th></th></tr>
           </thead>
           <tbody>
             {(data?.items || []).map((c: any) => (
@@ -42,6 +45,10 @@ export default function Callers() {
                     <option value="">—</option>
                     {["customer", "vendor", "known-spam", "other"].map((l) => <option key={l} value={l}>{l}</option>)}
                   </select>
+                </td>
+                <td>
+                  {/* Ticket 14: outbound call action — prefills the platform dialer + jumps to it. */}
+                  <button onClick={() => { requestDial(c.phone_number); navigate("/calls"); }}>Call</button>
                 </td>
               </tr>
             ))}

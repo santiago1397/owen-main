@@ -261,6 +261,14 @@ class Settings(BaseSettings):
     def turn_urls(self) -> list[str]:
         return [u.strip() for u in self.TURN_URLS.split(",") if u.strip()]
 
+    # --- Manual operator OUTBOUND calling (Ticket 14, additive, gated on ASTERISK_ENABLED) ---
+    # ARI media URI played to the CALLEE before the operator is bridged in — the outbound
+    # analogue of the inbound flow's entry recording-consent notice (recording is on by
+    # default for outbound calls). A "sound:" prompt provisioned on the Asterisk host.
+    OUTBOUND_CONSENT_MEDIA: str = "sound:owen/outbound-recording-consent"
+    # Recording ON by default for manual outbound calls; flip off only to disable it globally.
+    OUTBOUND_RECORDING_ENABLED: bool = True
+
     @property
     def bulkvs_api_enabled(self) -> bool:
         """The BulkVS inventory sync only runs when the platform flag is on AND REST creds

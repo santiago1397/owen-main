@@ -57,25 +57,35 @@ async def ingest_status_event(
 
     provider = await _get_or_create_provider(db, provider_name)
 
+    # Direction decides which side of the call is the OWNED tracking number vs the external
+    # party. Inbound (default): callee tracking number = to_number, external caller = from_number.
+    # Outbound (Ticket 14, manual operator calls): the owned BulkVS DID we called FROM is the
+    # tracking number, and the external party we dialed is the to_number. The owned DID is looked
+    # up by media_provider (BulkVS DIDs are owned by the 'bulkvs' provider row but carry MEDIA on
+    # 'asterisk'), mirroring flows/runtime — not by the ingest provider_id.
+    is_outbound = (evt.direction or "").lower() == "outbound"
+    tracking_number = evt.from_number if is_outbound else evt.to_number
+    external_number = evt.to_number if is_outbound else evt.from_number
+
     number = None
-    if evt.to_number:
-        number = (
-            await db.execute(
-                select(Number).where(
-                    Number.provider_id == provider.id, Number.phone_number == evt.to_number
-                )
-            )
-        ).scalar_one_or_none()
+    if tracking_number:
+        stmt = select(Number).where(Number.phone_number == tracking_number)
+        if is_outbound:
+            from app.core.config import settings as _settings
+            stmt = stmt.where(Number.media_provider == _settings.BULKVS_MEDIA_PROVIDER)
+        else:
+            stmt = stmt.where(Number.provider_id == provider.id)
+        number = (await db.execute(stmt)).scalar_one_or_none()
         if number is None:
             logger.warning(
-                "ingest_status_event: no registered Number for to=%s (provider=%s, call_sid=%s) "
-                "— call will have no campaign attribution",
-                evt.to_number, provider_name, evt.provider_call_sid,
+                "ingest_status_event: no registered Number for tracking=%s dir=%s (provider=%s, "
+                "call_sid=%s) — call will have no campaign attribution",
+                tracking_number, evt.direction, provider_name, evt.provider_call_sid,
             )
 
     caller = None
-    if evt.from_number:
-        caller = await _get_or_create_caller(db, evt.from_number, seen_at)
+    if external_number:
+        caller = await _get_or_create_caller(db, external_number, seen_at)
 
     campaign_id = number.campaign_id if number else None
 

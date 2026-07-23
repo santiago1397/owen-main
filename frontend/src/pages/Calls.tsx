@@ -4,6 +4,7 @@ import { API_BASE, api } from "../api";
 import DateRangeBar from "../components/DateRangeBar";
 import InCallBar from "../components/InCallBar";
 import { type Range } from "../lib/dates";
+import { DIAL_EVENT, hasPendingDial, requestDial } from "../lib/dialer";
 
 function RecordingPlayer({ recordingId }: { recordingId: string }) {
   const [url, setUrl] = useState<string | null>(null);
@@ -51,6 +52,15 @@ function CallDrawer({ id, onClose }: { id: string; onClose: () => void }) {
   const { data: settings } = useQuery({ queryKey: ["settings"], queryFn: api.settings });
   if (!c) return null;
 
+  // Ticket 14: outbound "call back" from a caller / missed-call record — prefill the platform
+  // dialer with this call's caller number (the parent switches to the Platform tab on the event).
+  const callBack = () => {
+    if (c.caller_number) {
+      requestDial(c.caller_number);
+      onClose();
+    }
+  };
+
   const override = async (body: any) => {
     await api.overrideAnalysis(id, body);
     qc.invalidateQueries({ queryKey: ["call", id] });
@@ -61,9 +71,12 @@ function CallDrawer({ id, onClose }: { id: string; onClose: () => void }) {
     <>
       <div className="overlay" onClick={onClose} />
       <div className="drawer">
-        <div style={{ display: "flex", justifyContent: "space-between" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
           <h3 style={{ margin: 0 }}>Call detail</h3>
-          <button onClick={onClose}>✕</button>
+          <div style={{ display: "flex", gap: 8 }}>
+            {c.caller_number && <button onClick={callBack}>Call back</button>}
+            <button onClick={onClose}>✕</button>
+          </div>
         </div>
         <div className="kv">
           <span className="muted">Provider</span><span>{c.provider}</span>
@@ -138,8 +151,18 @@ export default function Calls() {
   const [selected, setSelected] = useState<string | null>(null);
   // Provider split (Ticket 06): "attribution" = Twilio/SignalWire, "platform" = BulkVS/Asterisk.
   // Backed by the additive ?provider_group= param on /api/calls; the call drawer is reused as-is.
-  const [tab, setTab] = useState<"attribution" | "platform">("attribution");
+  // Open on the Platform tab when arriving via a "call" action (Ticket 14 dialer prefill).
+  const [tab, setTab] = useState<"attribution" | "platform">(
+    hasPendingDial() ? "platform" : "attribution",
+  );
   const { data: campaigns } = useQuery({ queryKey: ["campaigns"], queryFn: api.campaigns });
+
+  // A "call back" action from within the drawer switches to the Platform tab (where the dialer is).
+  useEffect(() => {
+    const onDial = () => setTab("platform");
+    window.addEventListener(DIAL_EVENT, onDial);
+    return () => window.removeEventListener(DIAL_EVENT, onDial);
+  }, []);
 
   // The single "Hide failed & ≤3s" checkbox governs all junk-hiding. When unchecked we must
   // also opt into 0–1s calls via include_short, otherwise the backend's separate short-call
