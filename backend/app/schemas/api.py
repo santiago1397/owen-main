@@ -97,6 +97,21 @@ class NumberStats(BaseModel):
     lifecycle: str = "available"        # DERIVED: available | pending | assigned | released
 
 
+class NumberFlowAssign(BaseModel):
+    """PATCH /api/numbers/{id} body (Ticket 15.5): assign a flow to the number, or null to
+    unassign. Assignment is guarded (asterisk-media numbers + flow with an active version)."""
+
+    flow_id: uuid.UUID | None = None
+
+
+class NumberFlowOut(BaseModel):
+    """Result of a flow (un)assignment — the number's new flow linkage."""
+
+    id: uuid.UUID
+    phone_number: str
+    flow_id: uuid.UUID | None = None
+
+
 class CampaignOut(BaseModel):
     id: uuid.UUID
     name: str

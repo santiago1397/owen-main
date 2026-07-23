@@ -164,6 +164,35 @@ def test_non_entry_and_unmapped_skipped():
           router.route(_evt("ChannelStateChange", ENTRY, state="Down")) is None)
 
 
+def test_flow_dial_leg_never_ingests_or_flow_runs():
+    print("flow-dial outbound legs (Ticket 15.3) are excluded from ingestion + flow runs:")
+    from app.providers.asterisk import FLOW_DIAL_CHANNEL_PREFIX, is_flow_dial_leg
+
+    router = AsteriskEventRouter()
+    dial_id = f"{FLOW_DIAL_CHANNEL_PREFIX}abc123"
+
+    # Normal shape: originator links the leg onto the inbound Linkedid -> not the entry leg.
+    evt = _evt("StasisStart", dial_id)
+    check("marked by channel-id prefix", is_flow_dial_leg(evt) is True)
+    check("router skips the dial leg", router.route(evt) is None)
+
+    # Defense in depth: even if channelvars were missing (Linkedid falls back to the
+    # channel's own id, which would LOOK like an entry leg), the marker still excludes it.
+    bare = _evt("StasisStart", dial_id)
+    del bare["channel"]["channelvars"]
+    check("marker holds without channelvars", is_flow_dial_leg(bare) is True)
+    check("router skips it even without channelvars", router.route(bare) is None)
+
+    # appArgs marker (Stasis app args) also identifies the leg.
+    tagged = _evt("StasisStart", LEG2)
+    tagged["args"] = ["flow-dial"]
+    check("appArgs marker recognized", is_flow_dial_leg(tagged) is True)
+
+    # A plain inbound entry StasisStart is NOT a flow-dial leg (fresh router: no dedup).
+    check("entry leg unaffected", is_flow_dial_leg(_evt("StasisStart", ENTRY)) is False)
+    check("entry leg still ingests", AsteriskEventRouter().route(_evt("StasisStart", ENTRY)) is not None)
+
+
 def main():
     test_vocabulary_is_shared()
     test_noop_signature()
@@ -171,6 +200,7 @@ def main():
     test_dedup_suppresses_repeats()
     test_terminal_cause_mapping()
     test_non_entry_and_unmapped_skipped()
+    test_flow_dial_leg_never_ingests_or_flow_runs()
     print("\nALL ASTERISK INGESTION CHECKS PASSED")
 
 

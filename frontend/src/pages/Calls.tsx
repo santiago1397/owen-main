@@ -46,6 +46,29 @@ function TranscriptThread({ segments }: { segments: Segment[] }) {
   );
 }
 
+// Ticket 15.7: flow.node.* call_events are the flow debugger — render them as a friendly
+// "flow · <type>" badge with the node id/label (from the payload when the API exposes it,
+// else parsed from the event_type) instead of the raw event-type string.
+function TimelineEvent({ e }: { e: any }) {
+  const ts = <span className="muted">— {new Date(e.received_at).toLocaleTimeString()}</span>;
+  const m = /^flow\.node\.(.+)$/.exec(e.event_type || "");
+  if (!m) {
+    return <li>{e.event_type} {ts}</li>;
+  }
+  const ntype = m[1];
+  const flow = e.payload?.flow || e.data?.flow || {};
+  const nodeId = flow.node_label || flow.node_id;
+  return (
+    <li className="tl-flow">
+      <span className="badge prov">flow</span>
+      <span className={`fn-type fn-type-${ntype}`}>{ntype}</span>
+      {nodeId && <span className="tl-nodeid">{nodeId}</span>}
+      {flow.step != null && <span className="muted">#{flow.step}</span>}
+      {ts}
+    </li>
+  );
+}
+
 function CallDrawer({ id, onClose }: { id: string; onClose: () => void }) {
   const qc = useQueryClient();
   const { data: c } = useQuery({ queryKey: ["call", id], queryFn: () => api.call(id) });
@@ -135,9 +158,7 @@ function CallDrawer({ id, onClose }: { id: string; onClose: () => void }) {
         <div className="card">
           <div className="l" style={{ marginBottom: 8 }}>Timeline</div>
           <ul className="timeline" style={{ margin: 0, paddingLeft: 18 }}>
-            {c.events.map((e: any, i: number) => (
-              <li key={i}>{e.event_type} <span className="muted">— {new Date(e.received_at).toLocaleTimeString()}</span></li>
-            ))}
+            {c.events.map((e: any, i: number) => <TimelineEvent key={i} e={e} />)}
           </ul>
         </div>
       </div>

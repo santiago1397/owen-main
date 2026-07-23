@@ -37,8 +37,16 @@ logger = logging.getLogger("flows.runtime")
 PROVIDER_NAME = "asterisk"  # matches asterisk_consumer.PROVIDER_NAME (call row / call_events)
 
 
-async def _resolve_active_flow_version(db, dialed_number: str) -> Optional[tuple[uuid.UUID, dict]]:
-    """(active flow_version_id, graph) for the DID's assigned flow, or None if unassigned."""
+async def _resolve_active_flow_version(
+    db, dialed_number: str
+) -> tuple[bool, Optional[tuple[uuid.UUID, dict]]]:
+    """(assigned, resolved) for the dialed DID.
+
+    `assigned` is True iff the number row carries a flow_id — the operator INTENDED a flow
+    to answer this DID. `resolved` is (active flow_version_id, graph) when that intent is
+    runnable, else None. The split matters for the Ticket 15.6 safety net: an unassigned
+    number is a silent no-op, but an ASSIGNED number whose flow fails to resolve must
+    blind-forward rather than dead-air."""
     number = (
         await db.execute(
             select(Number).where(
@@ -48,20 +56,20 @@ async def _resolve_active_flow_version(db, dialed_number: str) -> Optional[tuple
         )
     ).scalar_one_or_none()
     if number is None or number.flow_id is None:
-        return None
+        return False, None
 
     flow = (
         await db.execute(select(Flow).where(Flow.id == number.flow_id))
     ).scalar_one_or_none()
     if flow is None or flow.active_version_id is None:
-        return None
+        return True, None
 
     fv = (
         await db.execute(select(FlowVersion).where(FlowVersion.id == flow.active_version_id))
     ).scalar_one_or_none()
     if fv is None or not isinstance(fv.graph, dict):
-        return None
-    return fv.id, fv.graph
+        return True, None
+    return True, (fv.id, fv.graph)
 
 
 async def _pin_flow_version(db, provider_id: int, provider_call_sid: str, fv_id: uuid.UUID) -> None:
@@ -143,15 +151,33 @@ async def run_flow_for_stasis(event: dict, ari: AriControl) -> None:
     if not channel_id or not lid or not dialed:
         return
 
-    async with SessionLocal() as db:
-        resolved = await _resolve_active_flow_version(db, str(dialed))
-        if resolved is None:
-            logger.info("flow runtime: no assigned flow for DID %s (linkedid=%s)", dialed, lid)
-            return
-        fv_id, graph = resolved
-        provider = await _get_or_create_provider(db, PROVIDER_NAME)
-        provider_id = provider.id
-        await db.commit()  # ensure the 'asterisk' provider row exists before the flow runs
+    try:
+        async with SessionLocal() as db:
+            assigned, resolved = await _resolve_active_flow_version(db, str(dialed))
+            if not assigned:
+                logger.info("flow runtime: no assigned flow for DID %s (linkedid=%s)", dialed, lid)
+                return
+            if resolved is not None:
+                provider = await _get_or_create_provider(db, PROVIDER_NAME)
+                provider_id = provider.id
+                await db.commit()  # ensure the 'asterisk' provider row exists before the flow runs
+    except Exception:  # noqa: BLE001 - a DB hiccup on an assigned DID must not dead-air
+        logger.exception("flow runtime: flow resolution failed for DID %s (linkedid=%s)",
+                         dialed, lid)
+        assigned, resolved = True, None
+
+    if resolved is None:
+        # Ticket 15.6 safety net: the DID is flow-assigned but the flow didn't resolve
+        # (deleted flow / no active version / malformed graph / DB error). Never dead
+        # air: blind-forward to the global fallback number if configured. (Called with no
+        # session held open — the forward may bridge for minutes.)
+        logger.error(
+            "FLOW FALLBACK: DID %s has a flow assigned but no runnable active version "
+            "(linkedid=%s); blind-forwarding", dialed, lid,
+        )
+        await _fallback_forward(ari, channel_id, lid)
+        return
+    fv_id, graph = resolved
 
     async def pin() -> None:
         # StasisStart pin (interpreter on_start hook): pin-once, own short session.
@@ -201,4 +227,43 @@ async def run_flow_for_stasis(event: dict, ari: AriControl) -> None:
         run_agent=run_agent,
     )
     logger.info("flow runtime: running flow_version=%s on linkedid=%s DID=%s", fv_id, lid, dialed)
-    await interpreter.run()
+    try:
+        await interpreter.run()
+    except Exception:  # noqa: BLE001 - Ticket 15.6: an interpreter crash must never dead-air
+        # The interpreter absorbs per-node failures itself, so reaching here means it blew
+        # up before/at the entry node (bad graph shape, infrastructure failure). Loudly
+        # blind-forward the caller instead of leaving dead air.
+        logger.exception(
+            "FLOW FALLBACK: interpreter crashed for flow_version=%s (linkedid=%s); "
+            "blind-forwarding", fv_id, lid,
+        )
+        await _fallback_forward(ari, channel_id, lid)
+
+
+async def _fallback_forward(ari: AriControl, channel_id: str, lid: str) -> None:
+    """Ticket 15.6 safety net: blind-forward a flow-assigned call whose flow failed.
+
+    Answer the channel and dial+bridge `FLOW_FALLBACK_FORWARD_NUMBER` (reusing the Ticket
+    15.3 dial machinery — `dial_number` blocks until either leg hangs up), then hang up.
+    With no fallback number configured the best we can do is a clean hangup — still never
+    dead air. Best-effort throughout; never raises into the consumer."""
+    fallback = (settings.FLOW_FALLBACK_FORWARD_NUMBER or "").strip()
+    try:
+        if not fallback:
+            logger.error(
+                "FLOW FALLBACK: no FLOW_FALLBACK_FORWARD_NUMBER configured; hanging up "
+                "(linkedid=%s)", lid,
+            )
+            await ari.hangup(channel_id)
+            return
+        logger.error("FLOW FALLBACK: forwarding linkedid=%s to %s", lid, fallback)
+        await ari.answer(channel_id)
+        result = await ari.dial_number(channel_id, fallback, caller_id=None, timeout_s=25.0)
+        logger.error("FLOW FALLBACK: forward of linkedid=%s ended with '%s'", lid, result)
+    except Exception:  # noqa: BLE001 - the safety net itself must never raise
+        logger.exception("FLOW FALLBACK: forward failed (linkedid=%s)", lid)
+    finally:
+        try:
+            await ari.hangup(channel_id)
+        except Exception:  # noqa: BLE001
+            logger.exception("FLOW FALLBACK: final hangup failed (linkedid=%s)", lid)

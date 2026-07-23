@@ -123,6 +123,21 @@ class Settings(BaseSettings):
     # flow's default_fallback/voicemail). Design decision is exactly ONE retry.
     VOICE_AGENT_WS_RECONNECTS: int = 1
 
+    # Flow-prompt TTS (Ticket 15.2). Flow graphs store prompts as plain text; the backend
+    # synthesizes them with OpenAI TTS (reusing OPENAI_API_KEY above) into 8kHz-mono WAVs
+    # cached under <RECORDINGS_DIR>/tts/ (content-addressed by sha256(text|voice)), which
+    # Asterisk plays via absolute-path sound: URIs (see asterisk/README.md for the shared
+    # host path requirement). Synthesized at flow activation (best-effort prewarm) and
+    # lazily at call time on a cache miss; a TTS failure skips playback, never dead-airs.
+    TTS_MODEL: str = "tts-1"
+    TTS_VOICE: str = "alloy"
+
+    # Flow safety net (Ticket 15.6). When a flow-ASSIGNED number's flow fails to resolve
+    # (deleted / no active version) or the interpreter crashes at the top of the call, the
+    # caller is blind-forwarded (answer + dial + bridge) to this number instead of dead
+    # air. E.164. Empty = no forward (the call is hung up cleanly instead).
+    FLOW_FALLBACK_FORWARD_NUMBER: str = ""
+
     ANALYSIS_ENGINE: str = "dummy"  # dummy | claude | minimax
     ANTHROPIC_API_KEY: str = ""
     ANALYSIS_MODEL: str = "claude-haiku-4-5-20251001"

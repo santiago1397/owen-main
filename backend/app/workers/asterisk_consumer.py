@@ -21,7 +21,8 @@ import logging
 
 from app.core.config import settings
 from app.db import SessionLocal
-from app.providers.asterisk import AsteriskEventRouter, is_entry_channel
+from app.flows import dtmf
+from app.providers.asterisk import AsteriskEventRouter, is_entry_channel, is_flow_dial_leg
 from app.services import queue
 from app.services.ingestion import ingest_status_event
 from app.services.recordings import ingest_recording_event
@@ -48,6 +49,20 @@ async def _handle(router: AsteriskEventRouter, raw: str | bytes) -> None:
         return
     if not isinstance(event, dict):
         return
+
+    # Ticket 15: feed the per-channel correlation registries (app/flows/dtmf) BEFORE any
+    # routing. DTMF digits go to the flow run awaiting them (read_digit); channel lifecycle
+    # events fan out to any dial-in-progress watcher. Both pushes are non-blocking no-ops
+    # when nothing is registered, so this costs a dict lookup on the hot path.
+    etype = event.get("type")
+    ch = event.get("channel") if isinstance(event.get("channel"), dict) else {}
+    channel_id = str(ch.get("id") or "")
+    if etype == "ChannelDtmfReceived":
+        dtmf.push_digit(channel_id, str(event.get("digit") or ""))
+        return  # DTMF never maps onto the status vocabulary; nothing else to do
+    if etype in dtmf.CHANNEL_EVENT_TYPES and channel_id:
+        dtmf.push_channel_event(channel_id, event)
+        # fall through — these same events also feed status ingestion below
 
     # Ticket 05: a RecordingFinished routes into the EXISTING recordings pipeline — register
     # the row (idempotent on the recording SID) and enqueue a fetch (a local spool move for
@@ -77,14 +92,24 @@ async def _handle(router: AsteriskEventRouter, raw: str | bytes) -> None:
 
     # Ticket 07: on the entry channel's (freshly-routed) StasisStart, hand the call to the
     # flow interpreter. Fire-and-forget so the WS read loop keeps draining events while the
-    # (possibly minutes-long) flow runs. Only reached with ASTERISK_ENABLED on.
-    if event.get("type") == "StasisStart" and is_entry_channel(event):
+    # (possibly minutes-long) flow runs. Only reached with ASTERISK_ENABLED on. A flow-dial
+    # outbound leg (Ticket 15.3) also StasisStarts into our app — it must NEVER start a
+    # second flow run (its interpreter is already driving it).
+    if event.get("type") == "StasisStart" and is_entry_channel(event) and not is_flow_dial_leg(event):
         asyncio.create_task(_run_flow(event))
 
 
 async def _run_flow(event: dict) -> None:
     """Best-effort flow-interpreter handoff; a failure here must never kill the consumer.
-    Imports are lazy so the interpreter's DB/httpx deps aren't pulled in at module load."""
+    Imports are lazy so the interpreter's DB/httpx deps aren't pulled in at module load.
+
+    Registers the entry channel's DTMF queue for the duration of the run (Ticket 15.1) so
+    `read_digit` can await ChannelDtmfReceived events; the finally guarantees the queue is
+    unregistered however the flow ends — the registry never leaks."""
+    ch = event.get("channel") if isinstance(event.get("channel"), dict) else {}
+    channel_id = str(ch.get("id") or "")
+    if channel_id:
+        dtmf.register_digits(channel_id)
     try:
         from app.flows.runtime import run_flow_for_stasis
         from app.providers.asterisk_client import AsteriskAriClient
@@ -92,6 +117,9 @@ async def _run_flow(event: dict) -> None:
         await run_flow_for_stasis(event, AsteriskAriClient())
     except Exception:  # noqa: BLE001 - flow failures are isolated from ingestion
         logger.exception("asterisk_consumer: flow interpreter failed")
+    finally:
+        if channel_id:
+            dtmf.unregister_digits(channel_id)
 
 
 async def run_consumer() -> None:

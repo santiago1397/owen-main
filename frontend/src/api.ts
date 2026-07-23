@@ -70,6 +70,15 @@ export const api = {
       body: JSON.stringify(body),
     }),
   numbers: () => request("/api/numbers"),
+  // Ticket 15.5: assign/unassign a call flow on a platform number. Contract is exactly
+  // {flow_id: string|null}; the backend 400s (detail message) when the flow has no active
+  // version or the number is not asterisk-managed.
+  updateNumber: (id: string, body: { flow_id: string | null }) =>
+    request(`/api/numbers/${id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }),
   flows: () => request("/api/flows"),
   flow: (id: string) => request(`/api/flows/${id}`),
   createFlow: (name: string) =>
@@ -78,6 +87,7 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ name }),
     }),
+  flowVersions: (flowId: string) => request(`/api/flows/${flowId}/versions`),
   saveFlowVersion: (flowId: string, graph: any) =>
     request(`/api/flows/${flowId}/versions`, {
       method: "POST",

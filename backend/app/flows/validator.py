@@ -39,7 +39,9 @@ ALLOWED_PORTS: dict[str, frozenset[str]] = {
     "menu": _MENU_PORTS,
     "dial": frozenset({"answered", "noanswer", "busy", "failed"}),
     "voicemail": frozenset({"default"}),
-    "ai_agent": frozenset({"default", "transfer", "complete"}),
+    # Ticket 15.4: aligned with the engine's exit vocabulary — the engine's "end_call"
+    # result is mapped to the "complete" port at the interpreter seam.
+    "ai_agent": frozenset({"default", "transfer", "complete", "failed"}),
     "hangup": frozenset(),
 }
 
@@ -51,7 +53,7 @@ EXPECTED_PORTS: dict[str, frozenset[str]] = {
     "play": frozenset({"default"}),
     "hours": frozenset({"open", "closed"}),
     "dial": frozenset({"answered"}),
-    "ai_agent": frozenset({"default"}),
+    "ai_agent": frozenset({"default", "transfer", "complete", "failed"}),
 }
 
 

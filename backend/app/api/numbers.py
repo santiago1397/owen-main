@@ -1,11 +1,15 @@
-from fastapi import APIRouter, Depends
+import uuid
+
+from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import current_user
+from app.core.config import settings
 from app.db import get_db
-from app.models import Call, Campaign, Number, Provider, User
-from app.schemas.api import NumberStats
+from app.flows.service import flow_assignment_error
+from app.models import Call, Campaign, Flow, Number, Provider, User
+from app.schemas.api import NumberFlowAssign, NumberFlowOut, NumberStats
 from app.services.number_sync import derive_lifecycle
 
 router = APIRouter(prefix="/api/numbers", tags=["numbers"])
@@ -57,3 +61,38 @@ async def list_numbers(
         )
         out.append(NumberStats(**d))
     return out
+
+
+@router.patch("/{number_id}", response_model=NumberFlowOut)
+async def assign_flow(
+    number_id: uuid.UUID,
+    body: NumberFlowAssign,
+    _: User = Depends(current_user),
+    db: AsyncSession = Depends(get_db),
+) -> NumberFlowOut:
+    """Assign a flow to a number (Ticket 15.5), or unassign with `{"flow_id": null}`.
+
+    Guards (the pure kernel is app.flows.service.flow_assignment_error):
+    - 400 unless the number's media rides on the Asterisk platform
+      (`media_provider == settings.BULKVS_MEDIA_PROVIDER`) — the runtime resolves flows by
+      (phone_number, media_provider), so a flow anywhere else could never execute;
+    - 400 unless the flow exists AND has an active version (activation is the go-live gate).
+    Unassignment is always allowed."""
+    number = await db.get(Number, number_id)
+    if number is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "number not found")
+
+    if body.flow_id is not None:
+        flow = await db.get(Flow, body.flow_id)
+        error = flow_assignment_error(
+            number_media_provider=number.media_provider,
+            expected_media_provider=settings.BULKVS_MEDIA_PROVIDER,
+            flow_exists=flow is not None,
+            flow_active_version_id=flow.active_version_id if flow is not None else None,
+        )
+        if error is not None:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, error)
+
+    number.flow_id = body.flow_id
+    await db.commit()
+    return NumberFlowOut(id=number.id, phone_number=number.phone_number, flow_id=number.flow_id)

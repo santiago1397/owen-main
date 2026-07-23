@@ -1,15 +1,37 @@
+import {
+  Background,
+  Controls,
+  MiniMap,
+  ReactFlow,
+  ReactFlowProvider,
+  useEdgesState,
+  useNodesState,
+  useReactFlow,
+  type Connection,
+  type Edge,
+  type NodeTypes,
+} from "@xyflow/react";
+import "@xyflow/react/dist/style.css";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { ApiError, api } from "../api";
+import FlowNodeCard from "../components/FlowNodeCard";
+import FlowNodePanel from "../components/FlowNodePanel";
 import {
-  MENU_DIGITS,
-  type FlowForm,
-  type MenuOption,
-  buildGraph,
-  emptyForm,
-  parseGraph,
-} from "../lib/flowGraph";
+  NODE_TITLES,
+  PALETTE,
+  type CanvasNode,
+  type NodeType,
+  canvasToGraph,
+  emptyCanvas,
+  graphToCanvas,
+  makeEdge,
+  makeNode,
+  uniqueId,
+  unwiredPorts,
+} from "../lib/canvasGraph";
+import { type NumberRow } from "../lib/numbers";
 
 type FlowVersion = { id: string; version: number; graph: any; created_at?: string | null };
 type FlowDetail = {
@@ -19,47 +41,182 @@ type FlowDetail = {
   versions: FlowVersion[];
 };
 
-type Feedback = { kind: "errors" | "warnings" | "ok"; errors: string[]; warnings: string[] } | null;
+type Feedback = {
+  kind: "errors" | "warnings" | "ok";
+  errors: string[];
+  warnings: string[];
+  message?: string;
+} | null;
 
-// Rule-form flow authoring (Ticket 08). The operator fills a linear 5-section form; on save
-// it is serialized (lib/flowGraph.buildGraph) into a Ticket-02 graph and appended as a new
-// immutable flow version. "Save draft" never validates; "Activate" saves then runs the
-// backend activation checks, surfacing hard errors (block) vs warnings (allow). The visual
-// builder is a disabled "later" tab. Reached from the Call Flows library (new + open).
+const nodeTypes: NodeTypes = { flowNode: FlowNodeCard };
+
+// Visual flow builder (Ticket 16). The React Flow canvas replaces the Ticket-08 rule form
+// entirely: the operator drags nodes from the palette, wires validator ports as edges, and
+// configures the selected node in the side panel. The canvas serializes to the exact
+// Ticket-02 graph JSON (origin: "canvas", additive `layout` for positions). Save draft
+// appends an immutable version; Activate saves then runs backend validation, surfacing
+// hard errors (block) vs warnings (allow). The version history panel opens old versions
+// read-only and can restore one as a new version.
 export default function FlowEditor() {
+  return (
+    <ReactFlowProvider>
+      <Editor />
+    </ReactFlowProvider>
+  );
+}
+
+function Editor() {
   const { id } = useParams();
   const qc = useQueryClient();
   const { data } = useQuery<FlowDetail>({ queryKey: ["flow", id], queryFn: () => api.flow(id!) });
+  const { data: versions } = useQuery<FlowVersion[]>({
+    queryKey: ["flowVersions", id],
+    queryFn: () => api.flowVersions(id!),
+  });
+  const { data: agents } = useQuery<any[]>({ queryKey: ["agents"], queryFn: api.agents });
+  const { data: numbers } = useQuery<NumberRow[]>({ queryKey: ["numbers"], queryFn: api.numbers });
 
-  const [form, setForm] = useState<FlowForm>(emptyForm());
+  const [nodes, setNodes, onNodesChange] = useNodesState<CanvasNode>([]);
+  const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([]);
+  const [defaultFallback, setDefaultFallback] = useState<string | null>(null);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
   const [loaded, setLoaded] = useState(false);
-  const [tab, setTab] = useState<"form" | "visual">("form");
   const [busy, setBusy] = useState(false);
   const [feedback, setFeedback] = useState<Feedback>(null);
   const [savedVersion, setSavedVersion] = useState<number | null>(null);
+  const [showVersions, setShowVersions] = useState(false);
+  // Non-null while viewing an OLD version read-only (banner + editing disabled).
+  const [viewing, setViewing] = useState<FlowVersion | null>(null);
 
-  // Load the latest version's graph into the form once (round-trip if form-authored).
+  const rf = useReactFlow();
+  const wrapRef = useRef<HTMLDivElement>(null);
+
+  const loadGraph = useCallback(
+    (graph: any) => {
+      const state = graph ? graphToCanvas(graph) : emptyCanvas();
+      setNodes(state.nodes);
+      setEdges(state.edges);
+      setDefaultFallback(state.defaultFallback);
+      setSelectedId(null);
+      window.setTimeout(() => rf.fitView({ padding: 0.15 }), 30);
+    },
+    [rf, setEdges, setNodes]
+  );
+
+  // Load the latest version's graph onto the canvas once.
   useEffect(() => {
     if (!data || loaded) return;
     const latest = data.versions[data.versions.length - 1];
-    if (latest) {
-      const parsed = parseGraph(latest.graph);
-      if (parsed) setForm(parsed);
-    }
+    loadGraph(latest ? latest.graph : null);
     setLoaded(true);
-  }, [data, loaded]);
+  }, [data, loaded, loadGraph]);
 
-  const graph = useMemo(() => buildGraph(form), [form]);
-  const set = <K extends keyof FlowForm>(k: K, v: FlowForm[K]) =>
-    setForm((f) => ({ ...f, [k]: v }));
+  const readOnly = viewing != null;
+  const graph = useMemo(
+    () => canvasToGraph(nodes, edges, defaultFallback),
+    [nodes, edges, defaultFallback]
+  );
+  const lint = useMemo(() => unwiredPorts(nodes, edges), [nodes, edges]);
+  const selected = nodes.find((n) => n.id === selectedId) || null;
+  const assignedNumbers = (numbers || []).filter((n) => n.flow_id === id);
 
-  async function saveDraft(): Promise<string | null> {
+  // --- canvas interactions ---
+
+  const onConnect = useCallback(
+    (c: Connection) => {
+      if (!c.source || !c.target) return;
+      const port = c.sourceHandle || "default";
+      // One edge per output port: rewiring a port replaces its previous edge.
+      setEdges((eds) => [
+        ...eds.filter((e) => !(e.source === c.source && e.sourceHandle === port)),
+        makeEdge(c.source, port, c.target),
+      ]);
+    },
+    [setEdges]
+  );
+
+  const addNode = useCallback(
+    (ntype: NodeType, position?: { x: number; y: number }) => {
+      setNodes((nds) => {
+        const nid = uniqueId(ntype, nds);
+        const pos =
+          position ||
+          // Click-to-add: drop right of the current right-most node.
+          {
+            x: Math.max(40, ...nds.map((n) => n.position.x)) + 270,
+            y: 120,
+          };
+        setSelectedId(nid);
+        return [...nds, { ...makeNode(nid, ntype, pos, {}), selected: true }].map((n) =>
+          n.id === nid ? n : { ...n, selected: false }
+        );
+      });
+    },
+    [setNodes]
+  );
+
+  const onDrop = useCallback(
+    (e: React.DragEvent) => {
+      e.preventDefault();
+      const ntype = e.dataTransfer.getData("application/flownode") as NodeType;
+      if (!ntype || readOnly) return;
+      addNode(ntype, rf.screenToFlowPosition({ x: e.clientX, y: e.clientY }));
+    },
+    [addNode, readOnly, rf]
+  );
+
+  const onNodesDelete = useCallback(
+    (deleted: { id: string }[]) => {
+      const gone = new Set(deleted.map((n) => n.id));
+      if (selectedId && gone.has(selectedId)) setSelectedId(null);
+      setDefaultFallback((fb) => (fb && gone.has(fb) ? null : fb));
+    },
+    [selectedId]
+  );
+
+  const patchConfig = useCallback(
+    (nid: string, patch: Record<string, any>) => {
+      setNodes((nds) =>
+        nds.map((n) => {
+          if (n.id !== nid) return n;
+          const config = { ...n.data.config };
+          for (const [k, v] of Object.entries(patch)) {
+            if (v === undefined) delete config[k];
+            else config[k] = v;
+          }
+          return { ...n, data: { ...n.data, config } };
+        })
+      );
+      // Disabling a menu digit must drop that port's edge too.
+      if ("digits" in patch && Array.isArray(patch.digits)) {
+        const keep = new Set([...patch.digits, "timeout", "invalid"]);
+        setEdges((eds) =>
+          eds.filter((e) => e.source !== nid || keep.has(e.sourceHandle || "default"))
+        );
+      }
+    },
+    [setEdges, setNodes]
+  );
+
+  const deleteNode = useCallback(
+    (nid: string) => {
+      setNodes((nds) => nds.filter((n) => n.id !== nid));
+      setEdges((eds) => eds.filter((e) => e.source !== nid && e.target !== nid));
+      onNodesDelete([{ id: nid }]);
+    },
+    [onNodesDelete, setEdges, setNodes]
+  );
+
+  // --- save / activate / versions ---
+
+  async function saveDraft(g: any = graph): Promise<string | null> {
     setBusy(true);
     setFeedback(null);
     try {
-      const v = await api.saveFlowVersion(id!, graph);
+      const v = await api.saveFlowVersion(id!, g);
       setSavedVersion(v.version);
       qc.invalidateQueries({ queryKey: ["flow", id] });
+      qc.invalidateQueries({ queryKey: ["flowVersions", id] });
       qc.invalidateQueries({ queryKey: ["flows"] });
       return v.id;
     } catch (e: any) {
@@ -71,21 +228,17 @@ export default function FlowEditor() {
   }
 
   async function activate() {
+    const versionId = await saveDraft();
+    if (!versionId) return;
     setBusy(true);
-    setFeedback(null);
-    let versionId: string;
-    try {
-      const v = await api.saveFlowVersion(id!, graph);
-      setSavedVersion(v.version);
-      versionId = v.id;
-    } catch (e: any) {
-      setBusy(false);
-      setFeedback({ kind: "errors", errors: [`Save failed: ${e?.message || e}`], warnings: [] });
-      return;
-    }
     try {
       const res = await api.activateFlowVersion(id!, versionId);
-      setFeedback({ kind: "ok", errors: [], warnings: res.warnings || [] });
+      setFeedback({
+        kind: "ok",
+        errors: [],
+        warnings: res.warnings || [],
+        message: "Flow activated.",
+      });
       qc.invalidateQueries({ queryKey: ["flow", id] });
       qc.invalidateQueries({ queryKey: ["flows"] });
     } catch (e: any) {
@@ -110,330 +263,279 @@ export default function FlowEditor() {
     }
   }
 
+  const latestVersion = versions && versions.length ? versions[versions.length - 1] : null;
+
+  function openVersion(v: FlowVersion) {
+    if (latestVersion && v.id === latestVersion.id) {
+      backToLatest();
+      return;
+    }
+    setViewing(v);
+    loadGraph(v.graph);
+  }
+
+  function backToLatest() {
+    setViewing(null);
+    loadGraph(latestVersion ? latestVersion.graph : null);
+  }
+
+  async function restoreVersion(v: FlowVersion) {
+    const versionId = await saveDraft(v.graph);
+    if (!versionId) return;
+    setViewing(null);
+    loadGraph(v.graph); // switch to editing the restored graph
+    setFeedback({
+      kind: "ok",
+      errors: [],
+      warnings: [],
+      message: `Restored v${v.version} as a new draft version.`,
+    });
+  }
+
   if (!data) return <div className="muted">Loading…</div>;
 
   return (
-    <div>
+    <div className="floweditor">
       <Link to="/flows">← Call Flows</Link>
       <div className="toolbar" style={{ marginTop: 10 }}>
-        <h2 style={{ margin: 0, flex: 1 }}>{data.name}</h2>
+        <h2 style={{ margin: 0 }}>{data.name}</h2>
         {data.active_version_id ? (
           <span className="badge new">active</span>
         ) : (
           <span className="badge">draft</span>
         )}
-      </div>
-
-      <div className="tabs">
-        <button className={"tab" + (tab === "form" ? " active" : "")} onClick={() => setTab("form")}>
-          Rule form
-        </button>
-        <button className="tab" disabled title="The visual flow builder arrives in a later ticket">
-          Visual builder (coming soon)
-        </button>
-      </div>
-
-      {tab === "form" && (
-        <>
-          {/* (1) Business hours */}
-          <Section title="1 · Business hours" hint="Route calls differently in and out of hours.">
-            <label className="chk">
-              <input
-                type="checkbox"
-                checked={form.hoursEnabled}
-                onChange={(e) => set("hoursEnabled", e.target.checked)}
-              />{" "}
-              Apply a business-hours schedule
-            </label>
-            {form.hoursEnabled && (
-              <div style={{ marginTop: 10 }}>
-                <Field label="Open schedule">
-                  <input
-                    style={{ width: "100%" }}
-                    placeholder="e.g. Mon–Fri 9:00–17:00"
-                    value={form.hoursSchedule}
-                    onChange={(e) => set("hoursSchedule", e.target.value)}
-                  />
-                </Field>
-                <p className="muted" style={{ margin: "6px 0 0" }}>
-                  During open hours the greeting plays; outside them callers go straight to the
-                  fallback voicemail.
-                </p>
-              </div>
-            )}
-          </Section>
-
-          {/* (2) Greeting + record */}
-          <Section title="2 · Greeting" hint="What callers hear first.">
-            <Field label="Greeting">
-              <textarea
-                style={{ width: "100%", minHeight: 60 }}
-                value={form.greeting}
-                onChange={(e) => set("greeting", e.target.value)}
-              />
-            </Field>
-            <label className="chk" style={{ marginTop: 8 }}>
-              <input
-                type="checkbox"
-                checked={form.record}
-                onChange={(e) => set("record", e.target.checked)}
-              />{" "}
-              Record this call
-            </label>
-            {form.record && (
-              <div style={{ marginTop: 8 }}>
-                <Field label="Consent notice">
-                  <input
-                    style={{ width: "100%" }}
-                    placeholder="e.g. This call may be recorded for quality."
-                    value={form.consentNotice}
-                    onChange={(e) => set("consentNotice", e.target.value)}
-                  />
-                </Field>
-              </div>
-            )}
-          </Section>
-
-          {/* (3) IVR menu (optional) */}
-          <Section title="3 · Menu (optional)" hint="Offer callers digit options.">
-            <label className="chk">
-              <input
-                type="checkbox"
-                checked={form.menuEnabled}
-                onChange={(e) => set("menuEnabled", e.target.checked)}
-              />{" "}
-              Present a keypad menu
-            </label>
-            {form.menuEnabled && (
-              <div style={{ marginTop: 10 }}>
-                <Field label="Menu prompt">
-                  <input
-                    style={{ width: "100%" }}
-                    placeholder="e.g. Press 1 for sales, 2 for support."
-                    value={form.menuPrompt}
-                    onChange={(e) => set("menuPrompt", e.target.value)}
-                  />
-                </Field>
-                <table style={{ marginTop: 10 }}>
-                  <thead>
-                    <tr>
-                      <th style={{ width: 70 }}>Digit</th>
-                      <th style={{ width: 130 }}>Destination</th>
-                      <th>Number / label</th>
-                      <th />
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {form.menuOptions.map((opt, i) => (
-                      <MenuRow
-                        key={i}
-                        opt={opt}
-                        onChange={(next) =>
-                          set(
-                            "menuOptions",
-                            form.menuOptions.map((o, j) => (j === i ? next : o))
-                          )
-                        }
-                        onRemove={() =>
-                          set(
-                            "menuOptions",
-                            form.menuOptions.filter((_, j) => j !== i)
-                          )
-                        }
-                      />
-                    ))}
-                    {form.menuOptions.length === 0 && (
-                      <tr>
-                        <td colSpan={4} className="muted">
-                          No options yet.
-                        </td>
-                      </tr>
-                    )}
-                  </tbody>
-                </table>
-                <button
-                  style={{ marginTop: 8 }}
-                  onClick={() =>
-                    set("menuOptions", [
-                      ...form.menuOptions,
-                      { digit: nextFreeDigit(form.menuOptions), kind: "dial", number: "", label: "" },
-                    ])
-                  }
-                >
-                  + Add option
-                </button>
-              </div>
-            )}
-          </Section>
-
-          {/* (4) Default routing */}
-          <Section
-            title="4 · Default routing"
-            hint="Where the greeting leads when there is no menu (or on menu timeout)."
+        <div style={{ flex: 1 }} />
+        <label className="muted" style={{ display: "flex", alignItems: "center", gap: 6 }}>
+          default fallback
+          <select
+            disabled={readOnly}
+            value={defaultFallback || ""}
+            onChange={(e) => setDefaultFallback(e.target.value || null)}
           >
-            <Field label="On answer">
-              <select
-                value={form.defaultRouting}
-                onChange={(e) => set("defaultRouting", e.target.value as FlowForm["defaultRouting"])}
-              >
-                <option value="voicemail">Send to voicemail</option>
-                <option value="dial">Dial a number</option>
-              </select>
-            </Field>
-            {form.defaultRouting === "dial" && (
-              <div style={{ marginTop: 8 }}>
-                <Field label="Dial number">
-                  <input
-                    style={{ width: "100%" }}
-                    placeholder="+15555550123"
-                    value={form.defaultDialNumber}
-                    onChange={(e) => set("defaultDialNumber", e.target.value)}
-                  />
-                </Field>
+            <option value="">— none —</option>
+            {nodes
+              .filter((n) => n.data.ntype !== "entry")
+              .map((n) => (
+                <option key={n.id} value={n.id}>
+                  {NODE_TITLES[n.data.ntype]} · {n.data.config.label || n.id}
+                </option>
+              ))}
+          </select>
+        </label>
+        <button
+          className={showVersions ? "primary" : ""}
+          onClick={() => setShowVersions((s) => !s)}
+        >
+          Versions
+        </button>
+        <button disabled={busy || readOnly} onClick={() => saveDraft()}>
+          Save draft
+        </button>
+        <button className="primary" disabled={busy || readOnly} onClick={activate}>
+          Activate
+        </button>
+      </div>
+
+      {viewing && (
+        <div className="card ro-banner">
+          <span>
+            Viewing <b>v{viewing.version}</b> — read only.
+          </span>
+          <button onClick={() => restoreVersion(viewing)} disabled={busy}>
+            Restore as new version
+          </button>
+          <button onClick={backToLatest}>Back to latest</button>
+        </div>
+      )}
+
+      {feedback && (
+        <div className="card" style={{ marginBottom: 10, padding: 12 }}>
+          {feedback.kind === "ok" && (
+            <div style={{ color: "var(--good)", fontWeight: 600 }}>
+              ✓ {feedback.message || "Saved."}
+            </div>
+          )}
+          {feedback.errors.length > 0 && (
+            <div style={{ marginBottom: feedback.warnings.length ? 10 : 0 }}>
+              <div style={{ color: "var(--danger)", fontWeight: 600, marginBottom: 4 }}>
+                Errors (must fix before activating)
               </div>
-            )}
-          </Section>
+              <ul style={{ margin: 0, paddingLeft: 18 }}>
+                {feedback.errors.map((e, i) => (
+                  <li key={i} style={{ color: "var(--danger)" }}>
+                    {e}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+          {feedback.warnings.length > 0 && (
+            <div>
+              <span className="badge" style={{ color: "var(--warn)", borderColor: "var(--warn)" }}>
+                warnings
+              </span>
+              <ul style={{ margin: "6px 0 0", paddingLeft: 18 }}>
+                {feedback.warnings.map((w, i) => (
+                  <li key={i} style={{ color: "var(--warn)" }}>
+                    {w}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+        </div>
+      )}
 
-          {/* (5) Fallback */}
-          <Section title="5 · Fallback" hint="The flow-level catch-all when nothing else answers.">
-            <Field label="Voicemail prompt">
-              <textarea
-                style={{ width: "100%", minHeight: 50 }}
-                value={form.fallbackPrompt}
-                onChange={(e) => set("fallbackPrompt", e.target.value)}
-              />
-            </Field>
-          </Section>
+      <div className="flowgrid">
+        {/* Node palette */}
+        <div className="card flowpalette">
+          <div className="l" style={{ marginBottom: 8 }}>
+            Nodes
+          </div>
+          {PALETTE.map((p) => (
+            <div
+              key={p.type}
+              className="palettenode"
+              draggable={!readOnly}
+              title={p.hint + " — drag onto the canvas or click to add"}
+              onDragStart={(e) => e.dataTransfer.setData("application/flownode", p.type)}
+              onClick={() => !readOnly && addNode(p.type)}
+            >
+              <span className={`fn-type fn-type-${p.type}`}>{p.title}</span>
+              <span className="muted palettehint">{p.hint}</span>
+            </div>
+          ))}
+          {lint.length > 0 && (
+            <div style={{ marginTop: 12 }}>
+              <span className="badge" style={{ color: "var(--warn)", borderColor: "var(--warn)" }}>
+                {lint.length} unwired port{lint.length > 1 ? "s" : ""}
+              </span>
+              <ul className="muted" style={{ margin: "6px 0 0", paddingLeft: 16, fontSize: 12 }}>
+                {lint.slice(0, 6).map((w) => (
+                  <li key={w}>{w}</li>
+                ))}
+                {lint.length > 6 && <li>…and {lint.length - 6} more</li>}
+              </ul>
+            </div>
+          )}
+        </div>
 
-          {feedback && (
-            <div className="card" style={{ marginBottom: 12 }}>
-              {feedback.kind === "ok" && (
-                <div style={{ color: "var(--good)", fontWeight: 600 }}>✓ Flow activated.</div>
-              )}
-              {feedback.errors.length > 0 && (
-                <div style={{ marginBottom: feedback.warnings.length ? 10 : 0 }}>
-                  <div style={{ color: "var(--danger)", fontWeight: 600, marginBottom: 4 }}>
-                    Errors (must fix before activating)
-                  </div>
-                  <ul style={{ margin: 0, paddingLeft: 18 }}>
-                    {feedback.errors.map((e, i) => (
-                      <li key={i} style={{ color: "var(--danger)" }}>
-                        {e}
-                      </li>
-                    ))}
-                  </ul>
-                </div>
-              )}
-              {feedback.warnings.length > 0 && (
-                <div>
-                  <div style={{ color: "var(--warn)", fontWeight: 600, marginBottom: 4 }}>
-                    Warnings (allowed)
-                  </div>
-                  <ul style={{ margin: 0, paddingLeft: 18 }}>
-                    {feedback.warnings.map((w, i) => (
-                      <li key={i} style={{ color: "var(--warn)" }}>
-                        {w}
-                      </li>
-                    ))}
-                  </ul>
-                </div>
+        {/* Canvas */}
+        <div className="flowcanvas card" ref={wrapRef} onDrop={onDrop} onDragOver={(e) => e.preventDefault()}>
+          <ReactFlow
+            nodes={nodes}
+            edges={edges}
+            nodeTypes={nodeTypes}
+            onNodesChange={onNodesChange}
+            onEdgesChange={onEdgesChange}
+            onConnect={onConnect}
+            onNodesDelete={onNodesDelete}
+            onSelectionChange={({ nodes: sel }) => setSelectedId(sel[0]?.id || null)}
+            nodesDraggable={!readOnly}
+            nodesConnectable={!readOnly}
+            edgesReconnectable={!readOnly}
+            deleteKeyCode={readOnly ? null : ["Backspace", "Delete"]}
+            colorMode="dark"
+            fitView
+            proOptions={{ hideAttribution: true }}
+            defaultEdgeOptions={{ style: { strokeWidth: 1.5 } }}
+          >
+            <Background gap={18} />
+            <Controls showInteractive={false} />
+            <MiniMap pannable zoomable />
+          </ReactFlow>
+        </div>
+
+        {/* Right panel: version history or the selected node's config */}
+        <div className="card flowside">
+          {showVersions ? (
+            <VersionList
+              versions={versions || data.versions}
+              activeId={data.active_version_id || null}
+              viewingId={viewing?.id || null}
+              onOpen={openVersion}
+              onRestore={restoreVersion}
+              busy={busy}
+            />
+          ) : selected ? (
+            <FlowNodePanel
+              node={selected}
+              agents={agents || []}
+              readOnly={readOnly}
+              onChange={(patch) => patchConfig(selected.id, patch)}
+              onDelete={() => deleteNode(selected.id)}
+            />
+          ) : (
+            <div className="muted" style={{ fontSize: 13 }}>
+              Select a node to configure it, or add one from the palette.
+              {savedVersion != null && (
+                <p style={{ marginTop: 10 }}>Last saved as version {savedVersion}.</p>
               )}
             </div>
           )}
 
-          <div className="toolbar">
-            <button disabled={busy} onClick={saveDraft}>
-              Save draft
+          {assignedNumbers.length > 0 && (
+            <div style={{ marginTop: 18, borderTop: "1px solid var(--border)", paddingTop: 12 }}>
+              <div className="l" style={{ marginBottom: 6 }}>
+                Assigned numbers
+              </div>
+              {assignedNumbers.map((n) => (
+                <div key={n.id} style={{ marginBottom: 4, fontSize: 13 }}>
+                  <Link to={`/numbers/${n.id}`}>{n.friendly_name || n.phone_number}</Link>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function VersionList({
+  versions,
+  activeId,
+  viewingId,
+  onOpen,
+  onRestore,
+  busy,
+}: {
+  versions: FlowVersion[];
+  activeId: string | null;
+  viewingId: string | null;
+  onOpen: (v: FlowVersion) => void;
+  onRestore: (v: FlowVersion) => void;
+  busy: boolean;
+}) {
+  const latest = versions[versions.length - 1];
+  const list = [...versions].reverse();
+  return (
+    <div>
+      <div className="l" style={{ marginBottom: 8 }}>
+        Version history
+      </div>
+      {list.length === 0 && <div className="muted">No versions saved yet.</div>}
+      {list.map((v) => {
+        const isLatest = latest && v.id === latest.id;
+        const isViewing = viewingId === v.id || (isLatest && !viewingId);
+        return (
+          <div key={v.id} className={"versionrow" + (isViewing ? " sel" : "")}>
+            <button className="versionopen" onClick={() => onOpen(v)}>
+              v{v.version}
             </button>
-            <button className="primary" disabled={busy} onClick={activate}>
-              Activate
-            </button>
-            {savedVersion != null && (
-              <span className="muted">Saved as version {savedVersion}.</span>
+            <span className="muted" style={{ flex: 1, fontSize: 12 }}>
+              {v.created_at ? new Date(v.created_at).toLocaleString() : ""}
+            </span>
+            {v.id === activeId && <span className="badge new">active</span>}
+            {isLatest && <span className="badge">latest</span>}
+            {!isLatest && (
+              <button disabled={busy} onClick={() => onRestore(v)} title="Save this graph as a new version and edit it">
+                Restore
+              </button>
             )}
           </div>
-        </>
-      )}
+        );
+      })}
     </div>
   );
-}
-
-function Section({ title, hint, children }: { title: string; hint?: string; children: any }) {
-  return (
-    <div className="card" style={{ marginBottom: 12 }}>
-      <div className="l" style={{ marginBottom: hint ? 2 : 8 }}>
-        {title}
-      </div>
-      {hint && (
-        <p className="muted" style={{ margin: "0 0 10px" }}>
-          {hint}
-        </p>
-      )}
-      {children}
-    </div>
-  );
-}
-
-function Field({ label, children }: { label: string; children: any }) {
-  return (
-    <label style={{ display: "block", marginBottom: 4 }}>
-      <span className="muted" style={{ display: "block", fontSize: 12, marginBottom: 4 }}>
-        {label}
-      </span>
-      {children}
-    </label>
-  );
-}
-
-function MenuRow({
-  opt,
-  onChange,
-  onRemove,
-}: {
-  opt: MenuOption;
-  onChange: (o: MenuOption) => void;
-  onRemove: () => void;
-}) {
-  return (
-    <tr>
-      <td>
-        <select value={opt.digit} onChange={(e) => onChange({ ...opt, digit: e.target.value })}>
-          {MENU_DIGITS.map((d) => (
-            <option key={d} value={d}>
-              {d}
-            </option>
-          ))}
-        </select>
-      </td>
-      <td>
-        <select
-          value={opt.kind}
-          onChange={(e) => onChange({ ...opt, kind: e.target.value as MenuOption["kind"] })}
-        >
-          <option value="dial">Dial</option>
-          <option value="voicemail">Voicemail</option>
-        </select>
-      </td>
-      <td>
-        {opt.kind === "dial" ? (
-          <input
-            style={{ width: "100%" }}
-            placeholder="+15555550123"
-            value={opt.number}
-            onChange={(e) => onChange({ ...opt, number: e.target.value })}
-          />
-        ) : (
-          <span className="muted">→ fallback voicemail</span>
-        )}
-      </td>
-      <td style={{ textAlign: "right" }}>
-        <button onClick={onRemove}>Remove</button>
-      </td>
-    </tr>
-  );
-}
-
-function nextFreeDigit(opts: MenuOption[]): string {
-  const used = new Set(opts.map((o) => o.digit));
-  return MENU_DIGITS.find((d) => !used.has(d)) || "0";
 }

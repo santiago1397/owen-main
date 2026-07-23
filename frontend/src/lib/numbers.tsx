@@ -16,6 +16,7 @@ export type NumberRow = {
   media_provider?: string | null;
   released_at?: string | null;
   provider_status?: string | null; // carrier-reported (BulkVS /tnRecord Status): "Active" | "SUBMITTED" | …
+  flow_id?: string | null; // assigned call flow (Ticket 15.5); null/absent = unassigned
   lifecycle: string; // available | pending | assigned | released
 };
 

@@ -29,7 +29,7 @@ def _valid_graph():
             "greet": {"type": "play", "consent_notice": True, "next": {"default": "menu"}},
             "menu": {"type": "menu", "next": {"1": "sales", "2": "agent"}},
             "sales": {"type": "dial", "record": True, "next": {"answered": "bye", "noanswer": "vm", "busy": "vm", "failed": "vm"}},
-            "agent": {"type": "ai_agent", "next": {"default": "bye", "transfer": "sales", "complete": "bye"}},
+            "agent": {"type": "ai_agent", "next": {"default": "bye", "transfer": "sales", "complete": "bye", "failed": "vm"}},
             "vm": {"type": "voicemail", "next": {"default": "bye"}},
             "bye": {"type": "hangup"},
         },
@@ -87,6 +87,15 @@ def main():
     res = validate_graph(g)
     check("unknown node type -> error", any("unknown type" in e for e in res.errors) and not res.ok)
 
+    # Ticket 15.4: the ai_agent GRAPH port vocabulary is {default, transfer, complete,
+    # failed}; the engine-side "end_call" is mapped to "complete" at the interpreter seam
+    # and is NOT a valid graph port.
+    g = _valid_graph()
+    g["nodes"]["agent"]["next"]["end_call"] = "bye"
+    res = validate_graph(g)
+    check("'end_call' port on ai_agent -> error",
+          any("invalid port 'end_call'" in e for e in res.errors) and not res.ok)
+
     # Empty graph.
     res = validate_graph({"nodes": {}})
     check("empty graph -> error", not res.ok)
@@ -106,6 +115,13 @@ def main():
     res = validate_graph(g)
     check("unwired port -> warning", any("unwired port 'closed'" in w for w in res.warnings))
     check("unwired port still activatable", res.ok is True)
+
+    # Ticket 15.4: every ai_agent port is EXPECTED — an unwired 'failed' warns, never blocks.
+    g = _valid_graph()
+    del g["nodes"]["agent"]["next"]["failed"]
+    res = validate_graph(g)
+    check("unwired ai_agent 'failed' -> warning", any("unwired port 'failed'" in w for w in res.warnings))
+    check("unwired ai_agent 'failed' still activatable", res.ok is True)
 
     # Cycle (greet -> menu already; make menu -> greet to form a cycle).
     g = _valid_graph()

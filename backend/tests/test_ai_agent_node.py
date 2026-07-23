@@ -7,7 +7,8 @@ client and an injected `run_agent` seam that uses the REAL dummy VoiceAgentSessi
 sandbox; here the pin is proven at the seam by a recorder the fake run_agent writes to.
 
 Asserts:
-- the node runs a session and EXITS by the returned port for each of transfer/end_call/default;
+- the node runs a session and EXITS by the returned port for each of transfer/end_call/default
+  (Ticket 15.4: the engine's "end_call" result maps to the GRAPH port "complete");
 - a `failed` port that is unwired falls through to default_fallback (never dead air);
 - a run_agent that RAISES routes to `failed` -> fallback (the agent never dead-airs);
 - the agent NEVER bridges — no dial/bridge op is issued by the node itself;
@@ -35,14 +36,15 @@ def check(name, cond):
 
 
 def _graph(want):
-    # entry -> ai_agent(agent A1). The node wires transfer/end_call/default; `failed` is left
+    # entry -> ai_agent(agent A1). The node wires transfer/complete/default (Ticket 15.4
+    # port vocabulary — the engine's "end_call" maps to "complete"); `failed` is left
     # UNWIRED so a failure falls through to default_fallback (vm). `_want` scripts the dummy.
     return {
         "default_fallback": "vm",
         "nodes": {
             "start": {"type": "entry", "next": {"default": "agent"}},
             "agent": {"type": "ai_agent", "agent_id": "A1", "_want": want,
-                      "next": {"transfer": "xfer", "end_call": "endc", "default": "dflt"}},
+                      "next": {"transfer": "xfer", "complete": "endc", "default": "dflt"}},
             "xfer": {"type": "hangup"},
             "endc": {"type": "hangup"},
             "dflt": {"type": "hangup"},
@@ -82,7 +84,8 @@ def _run(graph, run_agent=None):
 
 
 def test_exits_by_each_port_and_pins():
-    print("ai_agent node exits by the dummy's returned port + pins the version on entry:")
+    print("ai_agent node exits by the dummy's returned port + pins the version on entry")
+    print("(engine 'end_call' -> graph port 'complete', Ticket 15.4):")
     for want, dest in (("transfer", "xfer"), ("end_call", "endc"), ("default", "dflt")):
         pins = []
         ari, rec = _run(_graph(want), _make_run_agent(pins))

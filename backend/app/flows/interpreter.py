@@ -304,7 +304,7 @@ class FlowInterpreter:
 
     async def _h_dial(self, node: dict) -> Optional[str]:
         kind = node.get("target_kind") or node.get("kind")
-        timeout_s = float(node.get("timeout", 30))
+        timeout_s = float(node.get("timeout", 25))
         caller_id = node.get("caller_id")
         if node.get("record"):
             await self.ari.record(self.channel_id, self._rec_name("dial"))
@@ -344,10 +344,13 @@ class FlowInterpreter:
     async def _h_ai_agent(self, node: dict) -> Optional[str]:
         # Run a VoiceAgentSession via the injected `run_agent` seam (Ticket 11): it resolves +
         # PINS the node's agent_version, runs the session (dummy engine for now), and returns
-        # the exit PORT + any tool data. The agent NEVER bridges — we just route by the port
-        # ("transfer"|"end_call"|"default"|"failed"), which _resolve wires to the node's `next`
-        # (unwired/`failed` falls through to default_fallback). Any failure -> `failed`.
-        # When no seam is injected the node keeps its legacy stub (route to `default`).
+        # the exit PORT + any tool data. The agent NEVER bridges — we just route by the port,
+        # which _resolve wires to the node's `next` (unwired/`failed` falls through to
+        # default_fallback). Any failure -> `failed`. The engine vocabulary says "end_call"
+        # (the tool name) but the GRAPH port is "complete" (Ticket 15.4) — mapped here, at
+        # the engine↔graph seam, so validator and engine stay aligned on
+        # {default, transfer, complete, failed}. When no seam is injected the node keeps its
+        # legacy stub (route to `default`).
         if self.run_agent is None:
             return "default"
         try:
@@ -355,6 +358,8 @@ class FlowInterpreter:
         except Exception:  # noqa: BLE001 - an agent failure must take the `failed` port, not dead-air
             logger.exception("interpreter %s: ai_agent session failed", self.linkedid)
             return "failed"
+        if port == "end_call":
+            return "complete"
         return port or "failed"
 
     _HANDLERS: ClassVar[dict[str, Callable[["FlowInterpreter", dict], Awaitable[Optional[str]]]]] = {

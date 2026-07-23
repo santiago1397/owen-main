@@ -144,6 +144,29 @@ def is_entry_channel(event: dict) -> bool:
     return bool(cid) and cid == linkedid(event)
 
 
+# Flow-dial leg markers (Ticket 15.3). The interpreter's `dial_number` originates the
+# outbound leg into OUR OWN Stasis app (so its lifecycle events arrive on the same WS the
+# consumer already reads); these markers let every layer tell that leg apart from a fresh
+# inbound call: the Stasis appArgs carry FLOW_DIAL_APP_ARG, and the client pre-assigns the
+# channel id with FLOW_DIAL_CHANNEL_PREFIX (so events WITHOUT args — ChannelStateChange /
+# ChannelDestroyed — are still identifiable, even if `channelvars=Linkedid` were missing).
+FLOW_DIAL_APP_ARG = "flow-dial"
+FLOW_DIAL_CHANNEL_PREFIX = "flow-dial-"
+
+
+def is_flow_dial_leg(event: dict) -> bool:
+    """True iff this event belongs to an outbound leg the flow interpreter originated.
+
+    Primary structural guard is `is_entry_channel` (the dial leg inherits the inbound call's
+    Linkedid via `originator`, so it is never the entry leg); this marker check is defense
+    in depth so a flow-dial leg can NEVER start a new flow run or ingest as a new call, even
+    under an ari.conf misconfiguration that drops channelvars."""
+    args = event.get("args")
+    if isinstance(args, list) and FLOW_DIAL_APP_ARG in args:
+        return True
+    return str(_channel(event).get("id") or "").startswith(FLOW_DIAL_CHANNEL_PREFIX)
+
+
 def _status_for(event: dict) -> str | None:
     etype = event.get("type")
     mapped = _ARI_TO_STATUS.get(etype)
@@ -278,6 +301,11 @@ class AsteriskEventRouter:
         if not evt.provider_call_sid or evt.status is None:
             return None
         if not is_entry_channel(event):
+            return None
+        # Ticket 15.3: a flow-dial outbound leg must never ingest as a call of its own.
+        # Structurally it already isn't the entry leg (it inherits the inbound Linkedid via
+        # `originator`); this marker check keeps that true even without channelvars.
+        if is_flow_dial_leg(event):
             return None
         key = evt.provider_sequence or f"{evt.provider_call_sid}:{evt.status}"
         if key in self._seen:

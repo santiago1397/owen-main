@@ -9,6 +9,8 @@ never mutates a prior row. Validation (app.flows.validator) GATES ACTIVATION onl
 drafts save freely; activation is refused (HTTP 400) on hard errors and returns warnings.
 """
 
+import asyncio
+import logging
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -28,7 +30,21 @@ from app.schemas.api import (
     FlowVersionSave,
 )
 
+logger = logging.getLogger("api.flows")
+
 router = APIRouter(prefix="/api/flows", tags=["flows"])
+
+
+def _schedule_tts_prewarm(graph: dict) -> None:
+    """Fire-and-forget TTS synthesis of every static prompt in an activated graph (Ticket
+    15.2). Strictly best-effort: scheduling or synthesis failures are logged and NEVER
+    block or fail activation — call-time lazy synthesis is the backstop."""
+    try:
+        from app.services.tts import prewarm_graph_prompts
+
+        asyncio.create_task(prewarm_graph_prompts(graph))
+    except Exception:  # noqa: BLE001 - prewarm must never affect activation
+        logger.exception("flow activation: could not schedule TTS prompt prewarm")
 
 
 def _flow_out(flow: Flow) -> FlowOut:
@@ -156,6 +172,9 @@ async def activate_version(
 
     flow.active_version_id = version.id
     await db.commit()
+    # Ticket 15.2: pre-synthesize TTS for every static prompt so the first live call plays
+    # from cache. Best-effort background task — never blocks or fails the activation.
+    _schedule_tts_prewarm(version.graph or {})
     return ActivationResult(
         activated=True, version_id=version.id, errors=[], warnings=result.warnings
     )

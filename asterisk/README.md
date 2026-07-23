@@ -93,6 +93,41 @@ The `RecordingFinished` ARI event carries the recording `name` (which the interp
 the identical transcribe/analyze chain runs. (Asterisk's default recording dir is
 `/var/spool/asterisk/recording`; if yours differs, mount that dir instead.)
 
+## Flow prompt TTS (Ticket 15) — shared sounds path
+
+Flow graphs store prompts as plain **text**; the backend synthesizes them with OpenAI TTS
+(`TTS_MODEL`/`TTS_VOICE`, reusing `OPENAI_API_KEY`) into 8kHz-mono 16-bit WAVs cached at
+`<RECORDINGS_DIR>/tts/<sha256(text|voice)>.wav` — synthesized at flow activation
+(best-effort prewarm) and lazily at call time on a cache miss.
+
+Playback uses an **absolute-path `sound:` URI**: per Asterisk's media-URI rules a sound URI
+may carry a full filesystem path **without the extension** (`sound:/data/recordings/tts/
+<sha256>`), and Asterisk resolves the codec extension itself — this is what OWEN sends, so
+no `sounds` directory registration or `extensions.conf` change is needed. What IS needed:
+**Asterisk (native, on the host) must be able to read that exact path.**
+
+`RECORDINGS_DIR=/data/recordings` is a **named docker volume** (`recordings` in
+`docker-compose.prod.yml`, mounted into the app + worker containers at `/data/recordings`).
+On the host that volume's data lives at
+`/var/lib/docker/volumes/callmon_recordings/_data`, so the host must expose it at the SAME
+absolute path the containers use. One-time setup:
+
+```bash
+# Make the container path exist on the host, pointing at the volume's data:
+mkdir -p /data
+ln -s /var/lib/docker/volumes/callmon_recordings/_data /data/recordings
+# (a bind mount works too: mount --bind /var/lib/docker/volumes/callmon_recordings/_data /data/recordings)
+
+# Asterisk (runs as the asterisk user) needs read access to the tts/ subdir:
+ls -l /data/recordings/tts/    # after the first activation prewarm; ensure o+r or asterisk-group readable
+```
+
+Verify: activate a flow with a text prompt, confirm a `<sha256>.wav` appears under
+`/data/recordings/tts/`, call the DID and hear it. If playback is silent, check the
+Asterisk CLI for "file does not exist" — that means the host path mapping above is missing
+or unreadable by the `asterisk` user. A TTS/playback failure never dead-airs a call: the
+flow simply continues without that prompt.
+
 ## CDR reconcile (Ticket 05) — Asterisk CDR → Postgres
 
 The live ARI-WebSocket consumer can miss a call's terminal event (worker restart mid-call,
