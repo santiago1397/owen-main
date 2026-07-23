@@ -127,6 +127,47 @@ export const api = {
       body: JSON.stringify(body),
     }),
 
+  // --- Quo-style per-contact Inbox (/inbox) ---
+  // One thread per CONTACT across all BulkVS DIDs; messages + calls in one timeline.
+  inboxThreads: () => request("/api/inbox/threads"),
+  inboxThread: (callerId: string) => request(`/api/inbox/thread/${callerId}`),
+  inboxMarkRead: (callerId: string) =>
+    request(`/api/inbox/thread/${callerId}/read`, { method: "POST" }),
+  inboxSetClosed: (callerId: string, closed: boolean) =>
+    request(`/api/inbox/thread/${callerId}/state`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ closed }),
+    }),
+  inboxUpdateContact: (callerId: string, body: { name?: string | null; company?: string | null; role?: string | null }) =>
+    request(`/api/inbox/contacts/${callerId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }),
+  inboxAddNote: (callerId: string, body: string) =>
+    request(`/api/inbox/contacts/${callerId}/notes`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ body }),
+    }),
+  inboxDeleteNote: (noteId: string) =>
+    request(`/api/inbox/notes/${noteId}`, { method: "DELETE" }),
+  inboxSettings: () => request("/api/inbox/settings"),
+  inboxSetDefaultNumber: (number_id: string | null) =>
+    request("/api/inbox/settings/default-number", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ number_id }),
+    }),
+  // Send resolving the from-DID server-side (override > sticky > default; 10DLC-gated).
+  inboxSend: (body: { contact: string; body: string; number_id?: string }) =>
+    request("/api/inbox/send", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }),
+
   // --- Operator WebRTC softphone (Ticket 13) ---
   // Mint short-lived SIP + TURN creds for this operator's browser softphone (app-login gate).
   webrtcCredentials: () => request("/api/telephony/webrtc/credentials", { method: "POST" }),

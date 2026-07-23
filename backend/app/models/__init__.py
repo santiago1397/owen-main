@@ -1,5 +1,6 @@
 from app.models.models import (
     Agent,
+    AppSetting,
     AgentVersion,
     Base,
     Caller,
@@ -7,6 +8,8 @@ from app.models.models import (
     CallAnalysis,
     CallEvent,
     Campaign,
+    ContactNote,
+    ContactThreadState,
     Flow,
     FlowVersion,
     InboundEmail,
@@ -22,6 +25,7 @@ from app.models.models import (
 
 __all__ = [
     "Agent",
+    "AppSetting",
     "AgentVersion",
     "Base",
     "Caller",
@@ -29,6 +33,8 @@ __all__ = [
     "CallAnalysis",
     "CallEvent",
     "Campaign",
+    "ContactNote",
+    "ContactThreadState",
     "Flow",
     "FlowVersion",
     "InboundEmail",

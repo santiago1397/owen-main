@@ -14,6 +14,7 @@ from app.api import dashboard as dashboard_api
 from app.api import emails as emails_api
 from app.api import flows as flows_api
 from app.api import health as health_api
+from app.api import inbox as inbox_api
 from app.api import numbers as numbers_api
 from app.api import recordings as recordings_api
 from app.api import settings as settings_api
@@ -58,6 +59,7 @@ app.include_router(agents_api.router)
 app.include_router(recordings_api.router)
 app.include_router(settings_api.router)
 app.include_router(messages_api.router)
+app.include_router(inbox_api.router)
 app.include_router(health_api.router)
 app.include_router(telephony_api.router)
 app.include_router(twilio_webhooks.router)

@@ -103,7 +103,10 @@ class Caller(Base):
     total_calls: Mapped[int] = mapped_column(Integer, default=0)
     spam_score: Mapped[float | None] = mapped_column(Numeric)  # from transcript analysis (Phase 6)
     spam_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    label: Mapped[str | None] = mapped_column(String)  # manual override
+    label: Mapped[str | None] = mapped_column(String)  # manual override / display name (Inbox)
+    # Inbox contact panel (Quo-style inbox): free-form CRM-ish fields, operator-edited.
+    company: Mapped[str | None] = mapped_column(String)
+    role: Mapped[str | None] = mapped_column(String)
 
 
 class Call(Base):
@@ -286,6 +289,52 @@ class SmsOptOut(Base):
     state: Mapped[str] = mapped_column(String)  # 'opted_out' | 'opted_in'
     last_keyword: Mapped[str | None] = mapped_column(String)  # 'stop' | 'start' (audit)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
+class ContactThreadState(Base):
+    """Per-CONTACT inbox state (Quo-style Inbox): one row per caller, shared by all users
+    (global read/open state — single-operator reality). Only user ACTIONS write here
+    (open thread => last_read_at, ✓ => closed_at); "unread" and "auto-reopen on new
+    activity" are DERIVED against these timestamps (services/inbox_threads.py), so the
+    ingestion webhooks never touch this table. Absence of a row = never read, never closed.
+    """
+
+    __tablename__ = "contact_thread_state"
+
+    caller_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("callers.id"), primary_key=True
+    )
+    last_read_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
+class ContactNote(Base):
+    """Free-form timestamped note on a contact (Inbox contact panel). Append + delete only."""
+
+    __tablename__ = "contact_notes"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_uuid)
+    caller_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("callers.id"), index=True)
+    body: Mapped[str] = mapped_column(Text)
+    created_by_user_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class AppSetting(Base):
+    """Tiny global key/value store for operator-editable app settings (first use: the
+    Inbox default outbound DID, key 'inbox_default_number_id'). JSONB value so future
+    settings need no migration."""
+
+    __tablename__ = "app_settings"
+
+    key: Mapped[str] = mapped_column(String, primary_key=True)
+    value: Mapped[dict | None] = mapped_column(JSONB)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
