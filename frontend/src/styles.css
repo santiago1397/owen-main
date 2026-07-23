@@ -215,6 +215,9 @@ code.mono { background: var(--panel2); padding: 2px 6px; border-radius: 6px; fon
 /* Mobile-only chrome: inert on desktop. */
 .topbar { display: none; }
 .navscrim { display: none; }
+/* Mobile-only Inbox/Messages controls. Declared BEFORE the media queries so the show-rules
+   inside them win on source order — putting this after would silently kill the back button. */
+.quo-back, .quo-contacttoggle, .quo-sideclose, .msgback { display: none; }
 /* Login card keeps its 320px on desktop but may now shrink below it. */
 .logincard { width: 320px; max-width: 100%; }
 
@@ -292,6 +295,46 @@ code.mono { background: var(--panel2); padding: 2px 6px; border-radius: 6px; fon
 
   /* Long unbroken strings (phone numbers, SIDs, URLs) must not widen the page. */
   .main { overflow-x: hidden; }
+
+  /* ---- Inbox: three panes become one screen at a time ----
+     list  ->  conversation  ->  (contact as a slide-over)
+     Selection is in the URL, so Back / iOS edge-swipe move between these. */
+  .quo { margin: -16px -14px; height: calc(100dvh - 61px); }
+  .quo-list { width: 100%; min-width: 0; border-right: none; }
+  .quo.has-active .quo-list { display: none; }
+  .quo:not(.has-active) .quo-convo { display: none; }
+  .quo-convo { width: 100%; min-width: 0; }
+
+  /* Contact rail slides over the conversation instead of sitting beside it. */
+  .quo-side {
+    position: fixed; top: 0; right: 0; bottom: 0; z-index: 60;
+    width: 320px; max-width: 88vw; border-left: 1px solid var(--q-border);
+    transform: translateX(100%); transition: transform .22s ease;
+    padding-top: calc(20px + env(safe-area-inset-top));
+    padding-bottom: calc(20px + env(safe-area-inset-bottom));
+  }
+  .quo-side.open { transform: none; }
+  .quo-sidescrim { position: fixed; inset: 0; background: rgba(0,0,0,.5); z-index: 55; }
+  .quo-sideclose { display: inline-flex; position: absolute; top: 8px; right: 8px; }
+  @media (prefers-reduced-motion: reduce) { .quo-side { transition: none; } }
+
+  /* Header: keep it one row. The name and the "· via <did>" caption both wrapped, turning the
+     header into a three-line block that ate the top of the conversation. */
+  .quo-chead { gap: 6px; padding: 8px 10px; }
+  .quo-chead > div > div { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+  /* Composer must clear the home indicator. */
+  .quo-composer { padding-bottom: calc(14px + env(safe-area-inset-bottom)); }
+  /* Bubbles can use more of a narrow screen than the desktop 68%. */
+  .quo-msgrow { max-width: 86%; }
+
+  /* ---- Messages: same single-pane switch, simpler layout ---- */
+  .msgsplit { height: calc(100dvh - 200px) !important; }
+  .msglist { width: 100% !important; border-right: none !important; }
+  .msgsplit.has-active .msglist { display: none; }
+  .msgsplit:not(.has-active) .msgconvo { display: none; }
+  .msgback { display: inline-block; margin-bottom: 10px; }
+  .quo-back, .quo-contacttoggle { display: inline-flex; }
 }
 
 @media (max-width: 560px) {

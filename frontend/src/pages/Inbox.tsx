@@ -1,8 +1,10 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
+  ArrowLeft,
   Check,
   Headphones,
+  Info,
   MessageSquarePlus,
   Paperclip,
   Phone,
@@ -14,6 +16,7 @@ import {
   Settings,
   X,
 } from "lucide-react";
+import { useSearchParams } from "react-router-dom";
 import { API_BASE, api, ApiError } from "../api";
 import InCallBar from "../components/InCallBar";
 
@@ -210,7 +213,17 @@ function Timeline({ items }: { items: TimelineItem[] }) {
 
 // --- contact side panel ------------------------------------------------------------------
 
-function ContactPanel({ detail, onCall }: { detail: ThreadDetail; onCall: () => void }) {
+function ContactPanel({
+  detail,
+  onCall,
+  open,
+  onClose,
+}: {
+  detail: ThreadDetail;
+  onCall: () => void;
+  open?: boolean;
+  onClose?: () => void;
+}) {
   const qc = useQueryClient();
   const c = detail.contact;
   const [name, setName] = useState(c.name || "");
@@ -239,7 +252,12 @@ function ContactPanel({ detail, onCall }: { detail: ThreadDetail; onCall: () => 
   };
 
   return (
-    <div className="quo-side">
+    <div className={"quo-side" + (open ? " open" : "")}>
+      {/* Close control for the mobile slide-over; hidden on desktop. */}
+      <button className="quo-iconbtn quo-sideclose" title="Close" aria-label="Close contact details"
+              onClick={onClose}>
+        <X size={18} />
+      </button>
       <div style={{ display: "flex", justifyContent: "center" }}>
         <Avatar name={c.name} number={c.phone_number} size={64} />
       </div>
@@ -311,7 +329,25 @@ export default function Inbox() {
   const [openFilter, setOpenFilter] = useState<OpenFilter>("open");
   const [unreadOnly, setUnreadOnly] = useState(false);
   const [unrespondedOnly, setUnrespondedOnly] = useState(false);
-  const [selected, setSelected] = useState<string | null>(null);
+  // Selection lives in the URL (?c=<caller_id>), not component state. Below 900px the list and
+  // the conversation are separate screens, so iOS edge-swipe-back and the browser back button
+  // have to move between them — they can only do that if the pane is a history entry. It also
+  // makes a conversation deep-linkable. Desktop is unaffected: both panes render regardless.
+  const [params, setParams] = useSearchParams();
+  const selected = params.get("c");
+  const setSelected = (id: string | null) => {
+    setParams(
+      (prev) => {
+        const next = new URLSearchParams(prev);
+        if (id) next.set("c", id);
+        else next.delete("c");
+        return next;
+      },
+      // Opening a thread pushes, so Back returns to the list; closing replaces so you don't
+      // have to press Back twice to leave the Inbox.
+      { replace: !id }
+    );
+  };
   const [showPhone, setShowPhone] = useState(false);
   const [showNewChat, setShowNewChat] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
@@ -359,7 +395,10 @@ export default function Inbox() {
   };
 
   return (
-    <div className="quo">
+    // has-active drives the below-900px single-pane switch: with a thread open the list is
+    // hidden and the conversation fills the screen; with none open, the reverse. Desktop shows
+    // both either way — the rule only exists inside the media query.
+    <div className={"quo" + (active ? " has-active" : "")}>
       {/* left rail: tabs + filters + thread list / call log */}
       <div className="quo-list">
         <div className="quo-listhead">
@@ -438,6 +477,7 @@ export default function Inbox() {
             key={active.caller_id}
             thread={active}
             onCall={() => void placeCall(active)}
+            onBack={() => setSelected(null)}
           />
         ) : (
           <div style={{ flex: 1, display: "grid", placeItems: "center", color: "var(--q-muted)" }}>
@@ -466,9 +506,22 @@ export default function Inbox() {
 
 // --- conversation (center pane + side panel) ---------------------------------------------
 
-function Conversation({ thread, onCall }: { thread: Thread; onCall: () => void }) {
+function Conversation({
+  thread,
+  onCall,
+  onBack,
+}: {
+  thread: Thread;
+  onCall: () => void;
+  onBack?: () => void;
+}) {
   const qc = useQueryClient();
   const [draft, setDraft] = useState("");
+  // The 300px contact rail can't sit beside the conversation on a phone, so below 900px it
+  // becomes a slide-over opened from the header. Closed by default; inert on desktop, where
+  // the panel is always in the flow.
+  const [showContact, setShowContact] = useState(false);
+  useEffect(() => setShowContact(false), [thread.caller_id]);
   const { data: detail } = useQuery<ThreadDetail>({
     queryKey: ["inboxThread", thread.caller_id],
     queryFn: () => api.inboxThread(thread.caller_id),
@@ -510,6 +563,13 @@ function Conversation({ thread, onCall }: { thread: Thread; onCall: () => void }
       <div style={{ display: "flex", flex: 1, minHeight: 0 }}>
         <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column" }}>
           <div className="quo-chead">
+            {/* Back to the thread list — only rendered as a control below 900px. */}
+            {onBack && (
+              <button className="quo-iconbtn quo-back" title="Back" aria-label="Back to conversations"
+                      onClick={onBack}>
+                <ArrowLeft size={18} />
+              </button>
+            )}
             <Avatar name={thread.contact_name} number={thread.contact_number} size={32} />
             <div style={{ minWidth: 0 }}>
               <div style={{ fontWeight: 700, fontSize: 14 }}>{displayName(thread)}</div>
@@ -521,6 +581,11 @@ function Conversation({ thread, onCall }: { thread: Thread; onCall: () => void }
               </div>
             </div>
             <div style={{ flex: 1 }} />
+            {/* Opens the contact slide-over; hidden on desktop where the panel is always shown. */}
+            <button className="quo-iconbtn quo-contacttoggle" title="Contact details"
+                    aria-label="Contact details" onClick={() => setShowContact(true)}>
+              <Info size={16} />
+            </button>
             <button className="quo-iconbtn" title="Call" onClick={onCall}><Phone size={16} /></button>
             <button className="quo-iconbtn" title={thread.open ? "Mark done (close)" : "Reopen"}
                     onClick={toggleClosed}>
@@ -566,7 +631,16 @@ function Conversation({ thread, onCall }: { thread: Thread; onCall: () => void }
           </div>
         </div>
 
-        {detail && <ContactPanel detail={detail} onCall={onCall} />}
+        {/* Scrim only exists below 900px (styles.css), where the panel slides over. */}
+        {showContact && <div className="quo-sidescrim" onClick={() => setShowContact(false)} />}
+        {detail && (
+          <ContactPanel
+            detail={detail}
+            onCall={onCall}
+            open={showContact}
+            onClose={() => setShowContact(false)}
+          />
+        )}
       </div>
     </>
   );

@@ -100,6 +100,19 @@ const main = async () => {
       hasTouch: !size.desktop,
     });
 
+    // HARD SAFETY RAIL: this harness points at the PRODUCTION API, so nothing it does may ever
+    // mutate live data. Anything that isn't a GET/HEAD is aborted in the browser before it
+    // leaves the machine. Rendering a page can fire writes you don't expect — opening an Inbox
+    // thread POSTs a mark-read, for one — so "I only navigate" is not sufficient on its own.
+    // Scoped to /api/** deliberately: a **/* catch-all also intercepts every Vite dev module
+    // request, which slows page loads enough to break the waits. Writes only ever go to the API.
+    await ctx.route("**/api/**", (route) => {
+      const m = route.request().method();
+      if (m === "GET" || m === "HEAD") return route.fallback();
+      console.log(`  blocked ${m} ${new URL(route.request().url()).pathname}`);
+      return route.abort();
+    });
+
     // Seed the JWT before any app code runs, so <Protected> doesn't bounce us to /login.
     if (TOKEN) {
       await ctx.addInitScript((t) => {
