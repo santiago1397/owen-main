@@ -302,4 +302,55 @@ code.mono { background: var(--panel2); padding: 2px 6px; border-radius: 6px; fon
   /* kv pairs stack rather than squeezing the value into ~200px */
   .kv { grid-template-columns: 1fr; gap: 2px 0; }
   .kv .muted { margin-top: 6px; }
+
+  /* ---- comms tables become stacked cards (Calls, Callers) ----
+     Header row hides and every cell prints its own data-label, so one piece of markup serves
+     both the desktop table and the phone card. Config tables keep the scroll wrapper instead. */
+  /* Must out-specify `.tablewrap table { min-width: 620px }` from the 900px block (0,1,1),
+     otherwise the card layout is still forced to 620px and overflows the screen. */
+  .tablewrap:has(.cardtable) { overflow-x: visible; }
+  .tablewrap .cardtable { min-width: 0; width: 100%; }
+  .cardtable thead { display: none; }
+  .cardtable, .cardtable tbody, .cardtable tr, .cardtable td { display: block; width: 100%; }
+  .cardtable tr {
+    display: flex; flex-direction: column; gap: 2px;
+    border: 1px solid var(--border); border-radius: 12px;
+    background: var(--panel2); padding: 10px 12px; margin-bottom: 10px;
+  }
+  /* The label is absolutely positioned rather than a flex sibling, so the value keeps the full
+     remaining width and can wrap — including nested elements like the number's caption line.
+     A fixed-width flex label overflowed the card on long values. */
+  .cardtable td {
+    border: none; position: relative;
+    padding: 2px 0 2px 96px; min-height: 20px;
+    overflow-wrap: anywhere;
+  }
+  .cardtable td::before {
+    content: attr(data-label); position: absolute; left: 0; top: 4px; width: 88px;
+    color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: .04em;
+  }
+  /* Headline: who called, then when. Both drop their labels — they're self-evident. */
+  .cardtable td[data-label="Caller"], .cardtable td[data-label="Number"]:first-child {
+    order: -2; font-size: 16px; font-weight: 600;
+  }
+  .cardtable td[data-label="When"] { order: -1; color: var(--muted); font-size: 12px; }
+  .cardtable td[data-label="Caller"],
+  .cardtable td[data-label="Number"]:first-child,
+  .cardtable td[data-label="When"],
+  .cardtable td[data-label=""] { padding-left: 0; }
+  .cardtable td[data-label="Caller"]::before,
+  .cardtable td[data-label="Number"]:first-child::before,
+  .cardtable td[data-label="When"]::before,
+  .cardtable td[data-label=""]::before { display: none; }
+  /* Row actions sit on their own line at the foot of the card. */
+  .cardtable td[data-label=""] { margin-top: 8px; }
+  .cardtable td[data-label=""] button { width: 100%; }
+  /* Full-width controls read better than ones stranded at a random width. */
+  .cardtable td select { width: 100%; }
+
+  /* ---- form grids: inline 2-up / 3-up templates collapse to one column ---- */
+  .formgrid { grid-template-columns: 1fr !important; }
+
+  /* ---- charts: inline minWidths were wider than the viewport ---- */
+  .chartcard { min-width: 0 !important; }
 }

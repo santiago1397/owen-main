@@ -264,23 +264,25 @@ export default function Calls() {
       </div>
 
       <div className="card">
-        <div className="tablewrap"><table>
+        {/* data-label drives the below-560px card layout (styles.css .cardtable): the header row
+            hides and each cell prints its own label. Caller + When become the card headline. */}
+        <div className="tablewrap"><table className="cardtable">
           <thead>
             <tr><th>When</th><th>Caller</th><th>Number</th><th>Campaign</th><th>Status</th><th>Dur</th><th>Flags</th></tr>
           </thead>
           <tbody>
             {(data?.items || []).map((c: any) => (
               <tr key={c.id} className="clickable" onClick={() => setSelected(c.id)}>
-                <td>{c.started_at ? new Date(c.started_at).toLocaleString() : "—"}</td>
-                <td>{c.caller_number || "—"}</td>
-                <td>
+                <td data-label="When">{c.started_at ? new Date(c.started_at).toLocaleString() : "—"}</td>
+                <td data-label="Caller">{c.caller_number || "—"}</td>
+                <td data-label="Number">
                   {c.dialed_number || "—"}
                   {c.dialed_number_label && <div className="muted">{c.dialed_number_label}</div>}
                 </td>
-                <td>{c.campaign_name || "—"}</td>
-                <td>{c.status || "—"}</td>
-                <td>{c.duration_seconds ?? "—"}</td>
-                <td>
+                <td data-label="Campaign">{c.campaign_name || "—"}</td>
+                <td data-label="Status">{c.status || "—"}</td>
+                <td data-label="Dur">{c.duration_seconds ?? "—"}</td>
+                <td data-label="Flags">
                   {c.is_new_for_campaign && <span className="badge new">new</span>}{" "}
                   {c.is_spam && <span className="badge spam">spam</span>}{" "}
                   {c.has_recording && <span className="badge">🎧</span>}
