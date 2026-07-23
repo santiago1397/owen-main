@@ -14,3 +14,6 @@ data/
 screenshots/
 test-results/
 playwright-report/
+
+# Local Claude Code session config, not shared
+.claude/
