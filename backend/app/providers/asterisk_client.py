@@ -604,12 +604,15 @@ class AsteriskAriClient:
         return isinstance(data, dict) and bool(data.get("id"))
 
     async def _await_channel_up(
-        self, queue: asyncio.Queue, channel_id: str, timeout_s: float
+        self, queue: asyncio.Queue, channel_id: str, timeout_s: float, *, abort_ids=(),
     ) -> bool:
         """Block until `channel_id` ANSWERS (its StasisStart, or ChannelStateChange->Up); return
-        False if it is destroyed first (declined/busy/no-answer) or the timeout elapses."""
+        False if it is destroyed first (declined/busy/no-answer), the timeout elapses, OR any
+        channel in `abort_ids` leaves (e.g. the operator hangs up while the callee is ringing —
+        stop waiting and tear the call down immediately instead of ringing dead air)."""
         loop = asyncio.get_running_loop()
         deadline = loop.time() + timeout_s + _DIAL_ANSWER_GRACE_S
+        abort = set(abort_ids)
         while True:
             remaining = deadline - loop.time()
             if remaining <= 0:
@@ -619,15 +622,65 @@ class AsteriskAriClient:
             except asyncio.TimeoutError:
                 return False
             ch = event.get("channel") if isinstance(event.get("channel"), dict) else {}
-            if str(ch.get("id") or "") != channel_id:
-                continue
+            cid = str(ch.get("id") or "")
             etype = event.get("type")
+            if cid in abort and etype in _LEG_GONE_EVENTS:
+                return False
+            if cid != channel_id:
+                continue
             if etype == "ChannelDestroyed":
                 return False
             if etype == "StasisStart":
                 return True
             if etype == "ChannelStateChange" and str(ch.get("state") or "").lower() == "up":
                 return True
+
+    async def _play_consent_or_leg_gone(
+        self, queue: asyncio.Queue, channel_id: str, media: str, leg_ids: set, *,
+        timeout_s: float = 30.0,
+    ) -> bool:
+        """Play the consent notice on `channel_id` and wait for it to FINISH — but abort the
+        moment any leg in `leg_ids` leaves. Returns True to proceed (finished / unplayable /
+        overran the cap), False if a party hung up during the notice (-> tear the call down).
+
+        This is why the old blocking play_and_wait was wrong for outbound: if the callee hung up
+        during the notice, it waited the full timeout for a PlaybackFinished that never came, so
+        the operator's leg (and modal) lingered on dead air for ~30s before teardown."""
+        uri = await self._resolve_media(str(media))
+        if not uri:
+            return True
+        data = await self._post_json(f"/ari/channels/{channel_id}/play", params={"media": uri})
+        pb_id = data.get("id") if isinstance(data, dict) else None
+        if not pb_id:
+            return True
+        pb_queue = dtmf.register_playback(str(pb_id))
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout_s
+        try:
+            while True:
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    return True  # notice overran the cap; proceed rather than abort
+                getters = {
+                    asyncio.ensure_future(pb_queue.get()),
+                    asyncio.ensure_future(queue.get()),
+                }
+                done, pending = await asyncio.wait(
+                    getters, timeout=remaining, return_when=asyncio.FIRST_COMPLETED
+                )
+                for fut in pending:
+                    fut.cancel()
+                if not done:
+                    return True  # timed out waiting
+                event = next(iter(done)).result()
+                etype = event.get("type") if isinstance(event, dict) else None
+                if etype == "PlaybackFinished":
+                    return True
+                ch = event.get("channel") if isinstance(event.get("channel"), dict) else {}
+                if str(ch.get("id") or "") in leg_ids and etype in _LEG_GONE_EVENTS:
+                    return False  # a party hung up during the notice — abort
+        finally:
+            dtmf.unregister_playback(str(pb_id))
 
     async def run_outbound_call(
         self, *, operator_id: str, callee_number: str, from_number: str, trunk_name: str,
@@ -672,15 +725,27 @@ class AsteriskAriClient:
                 clog(logger, "outbound.fail", linkedid=lid, reason="callee_originate_failed",
                      level=logging.WARNING)
                 return
-            if not await self._await_channel_up(queue, callee_channel_id, answer_timeout_s):
+            # Abort if the OPERATOR hangs up while the callee is still ringing (don't ring on).
+            if not await self._await_channel_up(
+                queue, callee_channel_id, answer_timeout_s, abort_ids=(op_channel_id,)
+            ):
                 clog(logger, "outbound.fail", linkedid=lid, reason="callee_no_answer",
                      level=logging.WARNING)
                 return
             clog(logger, "outbound.callee_up", linkedid=lid, channel=callee_channel_id)
 
             # 3. Consent to the callee BEFORE the operator is bridged in (FL all-party consent).
+            #    Interruptible: if EITHER party hangs up during the notice, abort at once so the
+            #    operator's leg (and modal) tears down immediately instead of lingering on dead
+            #    air until the playback times out.
             if consent_media:
-                await self.play_and_wait(callee_channel_id, consent_media)
+                if not await self._play_consent_or_leg_gone(
+                    queue, callee_channel_id, consent_media,
+                    {op_channel_id, callee_channel_id},
+                ):
+                    clog(logger, "outbound.fail", linkedid=lid, reason="hangup_during_consent",
+                         level=logging.WARNING)
+                    return
 
             # 4. Bridge both answered legs.
             bridge_id = await self.create_bridge()
