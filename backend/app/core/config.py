@@ -297,6 +297,23 @@ class Settings(BaseSettings):
     # Poll cadence for the inventory sync (well within a portal-mirrored latency need).
     BULKVS_SYNC_POLL_SECONDS: int = 300
 
+    # --- OpenPhone (READ-ONLY) — see docs/GHL_SYNC_SPEC.md D11 + D16 ---------------------
+    # OpenPhone is the account the team makes OUTBOUND customer calls from. OWEN reads those
+    # call logs to record follow-up TOUCHES on existing leads (never as leads themselves).
+    #
+    # HARD CONSTRAINT (owner-mandated): OWEN performs GET requests ONLY against OpenPhone.
+    # It never sends a message, never places a call, never writes a contact — anything that
+    # could incur a charge. This is enforced structurally: app/providers/openphone_client.py
+    # implements no write methods at all. Do not add one.
+    #
+    # Empty key => the integration is a no-op (nothing polls, nothing is read).
+    OPENPHONE_API_KEY: str = ""
+    OPENPHONE_API_BASE: str = "https://api.openphone.com/v1"
+
+    @property
+    def openphone_enabled(self) -> bool:
+        return bool(self.OPENPHONE_API_KEY)
+
     # --- Operator WebRTC softphone (Ticket 13, additive, gated on ASTERISK_ENABLED) -------
     # The operator answers platform calls in the browser via a per-operator chan_pjsip
     # WebRTC endpoint (SIP.js, wss + DTLS-SRTP). Signalling wss is fronted by Traefik; media
