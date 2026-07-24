@@ -10,6 +10,7 @@ import os
 import shutil
 import tempfile
 import uuid
+import wave
 from datetime import datetime, timezone
 
 import httpx
@@ -190,6 +191,22 @@ async def _transcribe_stereo(engine, audio_path: str) -> tuple[str, list] | None
         shutil.rmtree(tmpdir, ignore_errors=True)
 
 
+def _wav_duration_seconds(path: str) -> "float | None":
+    """Duration of a WAV, or None if it isn't a WAV we can inspect (leave those to the engine)."""
+    try:
+        with wave.open(path, "rb") as w:
+            rate = w.getframerate()
+            return (w.getnframes() / rate) if rate else 0.0
+    except (wave.Error, EOFError, OSError):
+        return None
+
+
+# Below this an Asterisk WAV holds no speech worth sending. A caller who hangs up during the
+# voicemail greeting leaves a 44-byte header-only file; OpenAI answers 400, and since the
+# queue retries failures that 400 would repeat forever. Short-circuit instead.
+_MIN_TRANSCRIBABLE_SECONDS = 0.4
+
+
 async def handle_transcribe(db: AsyncSession, payload: dict) -> None:
     rec = await db.get(Recording, uuid.UUID(payload["recording_id"]))
     if rec is None:
@@ -199,6 +216,20 @@ async def handle_transcribe(db: AsyncSession, payload: dict) -> None:
         raise RuntimeError(f"transcribe: audio missing for {rec.provider_recording_sid}")
 
     engine = get_transcription_engine()
+
+    duration = _wav_duration_seconds(rec.storage_path)
+    if duration is not None and duration < _MIN_TRANSCRIBABLE_SECONDS:
+        # Silent/empty capture: store the empty transcript so the pipeline is done with it,
+        # and skip analyze — there is nothing to classify.
+        db.add(Transcription(
+            call_id=rec.call_id, recording_id=rec.id, engine=engine.name,
+            text="", status="completed",
+        ))
+        rec.transcribed = True
+        await db.commit()
+        logger.info("transcribe: %s skipped — %.2fs of audio (empty recording)",
+                    rec.provider_recording_sid, duration)
+        return
 
     stereo = await _transcribe_stereo(engine, rec.storage_path)
     if stereo is not None:
