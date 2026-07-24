@@ -17,6 +17,18 @@
     <meta name="mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="black" />
     <meta name="apple-mobile-web-app-title" content="OWEN" />
+
+    <!-- Inter, used by the Inbox (/inbox). Loaded as a VARIABLE font on purpose: the body
+         weight there is 425, a value only a variable face can hit — a static 400/500/600
+         load would silently round it to 400 and lose the weight the design depends on.
+         display=swap so a slow font never blocks first paint; the CSS falls back to the
+         system stack, so the page is fully usable if this request fails. -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      rel="stylesheet"
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@100..900&display=swap"
+    />
   </head>
   <body>
     <div id="root"></div>

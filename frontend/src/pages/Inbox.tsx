@@ -212,7 +212,11 @@ function AudioPlayer({ recordingId }: { recordingId: string }) {
         max={1000}
         value={dur ? (cur / dur) * 1000 : 0}
         onChange={onSeek}
-        style={{ background: `linear-gradient(90deg, #fff ${pct}%, rgba(255,255,255,.18) ${pct}%)` }}
+        style={{
+          // Filled portion tracks the thumb colour (Quo's primary.strong) rather than plain
+          // white, so the played/unplayed split reads as one control in both bubble fills.
+          background: `linear-gradient(90deg, currentColor ${pct}%, rgba(255,255,255,.18) ${pct}%)`,
+        }}
       />
       <span className="quo-time">
         {fmtClock(cur)}
@@ -319,7 +323,7 @@ function Timeline({ items, contact }: { items: TimelineItem[]; contact: ThreadDe
         return (
           <div key={`${it.type}-${it.id}`} style={{ display: "contents" }}>
             {divider && <div className="quo-day">{day}</div>}
-            <div className={"quo-row " + (out ? "out" : "in") + (runStart ? " runstart" : "")}>
+            <div className={"quo-row " + (out ? "out" : "in") + (runStart ? " runstart" : "") + (runEnd ? " runend" : "")}>
               <div className="quo-rowava">
                 {runEnd && <Avatar name={out ? "Owen" : contact?.name || null} number={out ? null : contact?.phone_number || null} size={28} />}
               </div>
@@ -765,7 +769,7 @@ export default function Inbox() {
             <div className="quo-threads">
               {filtered.map((t) => (
                 <div key={t.caller_id}
-                     className={"quo-thread" + (t.caller_id === selected ? " sel" : "")}
+                     className={"quo-thread" + (t.caller_id === selected ? " sel" : "") + (t.unread_count > 0 ? " unread" : "")}
                      onClick={() => setSelected(t.caller_id)}
                      onContextMenu={(e) => {
                        e.preventDefault();

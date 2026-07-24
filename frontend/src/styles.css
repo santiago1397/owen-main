@@ -115,55 +115,119 @@ code.mono { background: var(--panel2); padding: 2px 6px; border-radius: 6px; fon
 .timeline .tl-flow { display: inline-flex; align-items: center; gap: 6px; }
 .timeline .tl-nodeid { color: var(--text); }
 
-/* ---- Quo-style Inbox (/inbox) — self-contained dark look for this page only ---- */
-.quo { --q-bg: #0b0b0e; --q-panel: #111114; --q-panel2: #1a1a20; --q-border: #232329;
-  --q-text: #ececf1; --q-muted: #8b8b95; --q-blue: #2f6cf6; --q-bubble: #232329;
+/* ---- Quo-style Inbox (/inbox) — self-contained dark look for this page only ----
+   Colours, type scale and metrics below are Quo's own dark theme, not an approximation:
+   they come from its design-system source (theme/themes/dark/palette.ts, Typography.css.ts,
+   feed/item/{bubble,row,call,audio}.css.ts). Token names are kept in the --q-* shape this
+   file already used so every existing selector — including the responsive block further
+   down — keeps working unchanged. Raw rgb triplets are Quo's; the hex in each comment is
+   the same value for readability. */
+.quo {
+  /* surfaces — palette.background */
+  --q-bg: #16161a;              /* background.default  22,22,26  — conversation canvas */
+  --q-panel: #111114;           /* background.sideMenu 17,17,20  — list + contact rail */
+  --q-panel2: #1a1a1f;          /* background.modal    26,26,31  — raised surfaces     */
+  /* text — palette.gray 1..3 */
+  --q-text: #f1f1f2;            /* gray.1  241,241,242 */
+  --q-muted: #a9a9b2;           /* gray.2  169,169,178 */
+  --q-faint: #7f7f89;           /* gray.3  127,127,137 — timestamps, sender names */
+  /* Quo has no solid divider colour: every rule is a 6%-alpha tint of gray.1 over the
+     surface, which is why its panels read as separated without any visible grey line. */
+  --q-border: rgba(241, 241, 242, 0.06);
+  --q-border-strong: rgba(241, 241, 242, 0.12);
+  /* accents — palette.primary */
+  --q-blue: #1f75ff;            /* primary.default     31,117,255  */
+  --q-blue-strong: #99c0ff;     /* primary.strong     153,192,255  — player controls */
+  --q-blue-subtle: rgba(8, 121, 255, 0.17);   /* primary.subtle */
+  /* bubbles — incoming is gray.5; outgoing in a *shared inbox* is primary.activity with
+     primary.extraStrong text. Solid blue is Quo's direct-message (DM) treatment only, so
+     it would be the wrong colour here: /inbox is a shared business inbox. */
+  --q-bubble: #27272e;          /* gray.5             39,39,46    */
+  --q-bubble-out: #15233b;      /* primary.activity   21,35,59    */
+  --q-bubble-outtext: #d1e3ff;  /* primary.extraStrong 209,227,255 */
+  /* interaction — palette.overlay */
+  --q-hover: rgba(83, 83, 97, 0.17);   /* overlay.default  */
+  --q-sel: rgba(55, 145, 255, 0.10);   /* overlay.selected */
+  /* Inter is Quo's UI face. 425 (not 400) is its body weight — an intentionally slightly
+     heavier regular that only a variable Inter can render; see index.html for the load. */
+  --q-font: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Apple Color Emoji",
+    "Segoe UI Emoji", Helvetica, Arial, sans-serif;
+  --q-w-regular: 425; --q-w-medium: 500; --q-w-semibold: 600; --q-w-bold: 700;
+
   display: flex; height: calc(100vh - 48px); height: calc(100dvh - 48px);
   margin: -24px -28px; background: var(--q-bg);
-  color: var(--q-text); overflow: hidden; }
+  color: var(--q-text); overflow: hidden;
+  font-family: var(--q-font); font-weight: var(--q-w-regular);
+  font-size: 13px; line-height: 16px;   /* Typography "footnote", Quo's default UI size */
+  -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale;
+  /* Inter ships proportional figures; Quo runs it with tabular numerals so timestamps and
+     durations don't jitter as the digits change. */
+  font-variant-numeric: tabular-nums;
+}
 .quo * { box-sizing: border-box; }
 .quo input, .quo select, .quo textarea, .quo button { background: var(--q-panel2);
-  color: var(--q-text); border: 1px solid var(--q-border); }
-.quo ::placeholder { color: var(--q-muted); }
+  color: var(--q-text); border: 1px solid var(--q-border); font-family: inherit; }
+.quo ::placeholder { color: var(--q-faint); }
 .quo-list { width: 330px; min-width: 330px; border-right: 1px solid var(--q-border);
   display: flex; flex-direction: column; background: var(--q-panel); }
-.quo-listhead { padding: 12px 14px 8px; display: flex; align-items: center; gap: 12px; }
-.quo-listhead .qtab { background: none; border: none; padding: 2px 0; font-size: 15px;
-  font-weight: 700; color: var(--q-muted); cursor: pointer; }
+.quo-listhead { padding: 14px 14px 10px; display: flex; align-items: center; gap: 12px; }
+/* "title3" in Quo's scale, set in the header face with its tighter tracking. */
+.quo-listhead .qtab { background: none; border: none; padding: 2px 0; font-size: 21px;
+  line-height: 24px; letter-spacing: -0.01em; font-weight: var(--q-w-semibold);
+  color: var(--q-faint); cursor: pointer; transition: color 120ms ease; }
+.quo-listhead .qtab:hover { color: var(--q-muted); }
 .quo-listhead .qtab.active { color: var(--q-text); }
 .quo-iconbtn { background: none; border: none; color: var(--q-muted); cursor: pointer;
-  font-size: 15px; padding: 4px 6px; border-radius: 8px;
-  display: inline-flex; align-items: center; justify-content: center; }
-.quo-iconbtn:hover { background: var(--q-panel2); color: var(--q-text); }
-.quo-pills { display: flex; gap: 6px; padding: 4px 12px 10px; flex-wrap: wrap; }
-.quo-pill { border: 1px solid var(--q-border); background: var(--q-panel2); color: var(--q-text);
-  border-radius: 999px; padding: 4px 12px; font-size: 12px; cursor: pointer; }
-.quo-pill.on { background: #2a2a33; border-color: #3a3a45; }
-.quo-threads { flex: 1; overflow-y: auto; }
-.quo-thread { display: flex; gap: 10px; padding: 10px 14px; cursor: pointer; align-items: center; }
-.quo-thread:hover { background: var(--q-panel2); }
-.quo-thread.sel { background: var(--q-panel2); }
+  font-size: 15px; padding: 6px; border-radius: 6px;
+  display: inline-flex; align-items: center; justify-content: center;
+  transition: background 120ms ease, color 120ms ease; }
+.quo-iconbtn:hover { background: var(--q-hover); color: var(--q-text); }
+.quo-pills { display: flex; gap: 6px; padding: 0 12px 10px; flex-wrap: wrap; }
+/* Quo's filter chips: no fill at rest, only a hairline ring — the surface stays flat until
+   a filter is actually engaged, which is what makes an active filter read at a glance. */
+.quo-pill { border: 1px solid var(--q-border-strong); background: none; color: var(--q-muted);
+  border-radius: 999px; padding: 4px 12px; font-size: 12px; line-height: 14px;
+  font-weight: var(--q-w-medium); cursor: pointer;
+  transition: background 120ms ease, color 120ms ease, border-color 120ms ease; }
+.quo-pill:hover { background: var(--q-hover); color: var(--q-text); }
+.quo-pill.on { background: var(--q-blue-subtle); border-color: transparent; color: #d1e3ff; }
+.quo-threads { flex: 1; overflow-y: auto; padding: 0 8px 8px; }
+/* Rows are inset from the panel edge and rounded, so hover/selection paint as a contained
+   card rather than a full-bleed band. */
+.quo-thread { display: flex; gap: 10px; padding: 8px 10px; cursor: pointer; align-items: center;
+  border-radius: 8px; position: relative; }
+.quo-thread:hover { background: var(--q-hover); }
+.quo-thread.sel { background: var(--q-sel); }
 .quo-avatar { width: 36px; height: 36px; min-width: 36px; border-radius: 50%; display: grid;
-  place-items: center; font-weight: 700; font-size: 14px; color: #fff; }
-.quo-tmain { flex: 1; min-width: 0; }
-.quo-tname { font-weight: 600; font-size: 13.5px; white-space: nowrap; overflow: hidden;
-  text-overflow: ellipsis; }
-.quo-tprev { color: var(--q-muted); font-size: 12.5px; white-space: nowrap; overflow: hidden;
-  text-overflow: ellipsis; }
-.quo-tside { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; }
-.quo-ttime { color: var(--q-muted); font-size: 11px; white-space: nowrap; }
+  place-items: center; font-weight: var(--q-w-semibold); font-size: 13px; color: #fff; }
+.quo-tmain { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+/* Both lines are "footnote" (13/16). Quo separates them by weight and colour, not by size —
+   the two-size treatment this replaced is what made the list look busier than Quo's. */
+.quo-tname { font-weight: var(--q-w-medium); font-size: 13px; line-height: 16px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.quo-tprev { color: var(--q-faint); font-size: 13px; line-height: 16px; white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis; }
+.quo-tside { display: flex; flex-direction: column; align-items: flex-end; gap: 5px;
+  align-self: flex-start; padding-top: 1px; }
+.quo-ttime { color: var(--q-faint); font-size: 11px; line-height: 14px; white-space: nowrap; }
+/* Unread threads lift both lines to full-strength text and thicken the name — the badge is
+   the marker you notice, the contrast shift is what you read. */
+.quo-thread.unread .quo-tname { font-weight: var(--q-w-semibold); }
+.quo-thread.unread .quo-tprev { color: var(--q-text); }
+.quo-thread.unread .quo-ttime { color: var(--q-blue-strong); }
 .quo-unread { background: var(--q-blue); color: #fff; border-radius: 999px; min-width: 18px;
-  height: 18px; display: grid; place-items: center; font-size: 11px; font-weight: 700; padding: 0 5px; }
+  height: 18px; display: grid; place-items: center; font-size: 11px; line-height: 14px;
+  font-weight: var(--q-w-semibold); padding: 0 5px; }
 
 /* Right-click / long-press thread context menu (Quo-style) */
 .quo-menuscrim { position: fixed; inset: 0; z-index: 60; }
 .quo-menu { position: fixed; z-index: 61; min-width: 210px; padding: 5px;
-  background: var(--q-panel); border: 1px solid var(--q-border); border-radius: 12px;
+  background: var(--q-panel2); border: 1px solid var(--q-border-strong); border-radius: 12px;
   box-shadow: 0 12px 32px rgba(0,0,0,.5); display: flex; flex-direction: column; }
 .quo-menuitem { display: flex; align-items: center; gap: 10px; width: 100%;
   background: none; border: none; color: var(--q-text); cursor: pointer; text-align: left;
-  padding: 8px 10px; border-radius: 8px; font-size: 13px; }
-.quo-menuitem:hover { background: var(--q-panel2); }
+  padding: 7px 10px; border-radius: 6px; font-size: 13px; line-height: 16px; }
+.quo-menuitem:hover { background: var(--q-hover); }
 .quo-menuitem.danger { color: var(--danger); }
 .quo-menuitem svg { flex: 0 0 auto; color: inherit; }
 .quo-menusep { height: 1px; background: var(--q-border); margin: 5px 6px; }
@@ -171,95 +235,148 @@ code.mono { background: var(--panel2); padding: 2px 6px; border-radius: 6px; fon
 /* Undo toast for block/delete/restore */
 .quo-toast { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); z-index: 70;
   display: flex; align-items: center; gap: 14px; padding: 10px 14px;
-  background: var(--q-panel2); color: var(--q-text); border: 1px solid var(--q-border);
-  border-radius: 10px; box-shadow: 0 8px 24px rgba(0,0,0,.45); font-size: 13px; }
-.quo-toastundo { background: none; border: none; color: var(--q-blue); font-weight: 700;
-  cursor: pointer; font-size: 13px; }
+  background: var(--q-panel2); color: var(--q-text); border: 1px solid var(--q-border-strong);
+  border-radius: 10px; box-shadow: 0 8px 24px rgba(0,0,0,.45); font-size: 13px; line-height: 16px; }
+.quo-toastundo { background: none; border: none; color: var(--q-blue-strong);
+  font-weight: var(--q-w-semibold); cursor: pointer; font-size: 13px; }
 .quo-convo { flex: 1; min-width: 0; display: flex; flex-direction: column; background: var(--q-bg); }
-.quo-chead { display: flex; align-items: center; gap: 10px; padding: 10px 16px;
+.quo-chead { display: flex; align-items: center; gap: 10px; padding: 12px 24px;
   border-bottom: 1px solid var(--q-border); }
-.quo-timeline { flex: 1; overflow-y: auto; padding: 16px 20px; display: flex;
-  flex-direction: column; gap: 8px; }
-.quo-day { text-align: center; color: var(--q-muted); font-size: 11.5px; margin: 10px 0 2px; }
-/* Timeline rows: consecutive same-direction items share an avatar (bottom of run) and a
-   sender name (top of run), Quo-style. Outbound flips the row so the avatar sits on the right. */
+/* 24px gutters and a 1000px ceiling are Quo's conversation constants
+   (conversationPaddingPx / maxConversationWidthPx): on a wide monitor the thread stays a
+   readable column instead of stretching the full pane.
+   NB: the rows are not direct children of this scroller — each item is wrapped in a
+   display:contents element, so the column has to be produced by padding here rather than by
+   a max-width on a child, which would land on a box that generates no layout. */
+.quo-timeline { flex: 1; overflow-y: auto; padding: 16px 24px 8px; display: flex;
+  flex-direction: column; gap: 2px;
+  padding-inline: max(24px, (100% - 1000px) / 2); }
+.quo-day { text-align: center; color: var(--q-faint); font-size: 11px; line-height: 14px;
+  font-weight: var(--q-w-medium); margin: 18px 0 8px; }
+/* Timeline rows: consecutive same-direction items form a "run" that shares one avatar (at the
+   bottom) and one sender name (at the top), Quo-style. Outbound flips the row so the avatar
+   sits on the right. Runs are tight (2px) and separated by a larger gap at the run start. */
 .quo-row { display: flex; align-items: flex-end; gap: 8px; max-width: 78%; }
 .quo-row.in { align-self: flex-start; }
 .quo-row.out { align-self: flex-end; flex-direction: row-reverse; }
-.quo-row.runstart { margin-top: 12px; }
+.quo-row.runstart { margin-top: 14px; }
 .quo-rowava { width: 28px; min-width: 28px; }
 .quo-rowbody { min-width: 0; display: flex; flex-direction: column; }
 .quo-row.out .quo-rowbody { align-items: flex-end; }
-.quo-rowname { color: var(--q-muted); font-size: 11px; margin: 0 4px 3px; }
-.quo-bubble { padding: 8px 12px; border-radius: 16px; font-size: 13.5px; white-space: pre-wrap;
-  word-break: break-word; }
-.quo-row.in .quo-bubble { background: var(--q-bubble); border-bottom-left-radius: 4px; }
-.quo-row.out .quo-bubble { background: var(--q-blue); color: #fff; border-bottom-right-radius: 4px; }
-.quo-msgmeta { color: var(--q-muted); font-size: 10.5px; margin-top: 2px; }
+.quo-rowname { color: var(--q-faint); font-size: 11px; line-height: 14px; margin: 0 4px 3px; }
+/* radius 18 with 4px "notched" corners on the joined edges of a run — Quo's bubble.css
+   position=top|middle|bottom variants, expressed here through the run classes. */
+.quo-bubble { padding: 8px 12px; border-radius: 18px; font-size: 15px; line-height: 20px;
+  white-space: pre-wrap; word-break: break-word; position: relative;
+  transition: background 120ms ease; }
+.quo-row.in .quo-bubble { background: var(--q-bubble); color: var(--q-text); }
+/* primary.activity + primary.extraStrong, not solid blue: see the token block above. */
+.quo-row.out .quo-bubble { background: var(--q-bubble-out); color: var(--q-bubble-outtext); }
+.quo-row.in:not(.runend) .quo-bubble { border-bottom-left-radius: 4px; }
+.quo-row.in:not(.runstart) .quo-bubble { border-top-left-radius: 4px; }
+.quo-row.out:not(.runend) .quo-bubble { border-bottom-right-radius: 4px; }
+.quo-row.out:not(.runstart) .quo-bubble { border-top-right-radius: 4px; }
+.quo-bubble:hover { background-image: linear-gradient(var(--q-hover), var(--q-hover)); }
+.quo-msgmeta { color: var(--q-faint); font-size: 11px; line-height: 14px; margin-top: 2px; }
 .quo-row.out .quo-msgmeta { text-align: right; }
+/* Quo keeps timestamps out of the way until you look for them, revealing them on row hover.
+   Gated on (hover: hover) so touch devices — which never hover — keep them always visible. */
+@media (hover: hover) {
+  .quo-msgmeta { opacity: 0; transition: opacity 120ms ease; }
+  .quo-row:hover .quo-msgmeta, .quo-row:focus-within .quo-msgmeta { opacity: 1; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .quo-bubble, .quo-msgmeta, .quo-pill, .quo-iconbtn, .quo-listhead .qtab { transition: none; }
+}
 
-/* Quo-style call card — coloured status circle, title/subtitle, optional player. */
-.quo-call { background: var(--q-panel2); border-radius: 16px; padding: 10px 12px; min-width: 236px; }
-.quo-row.out .quo-call { background: #17233d; }
-.quo-callhead { display: flex; align-items: center; gap: 10px; }
+/* Quo-style call card — coloured status circle, title/subtitle, optional player.
+   Metrics are call.css.ts: 9px/11px padding, 10px stack gap, 36px minimum header height.
+   It shares the bubble radius and both bubble fills so a call reads as the same object as a
+   message, just with a richer body. */
+.quo-call { background: var(--q-bubble); border-radius: 18px; padding: 9px 11px; min-width: 236px;
+  display: flex; flex-direction: column; gap: 10px; user-select: none; }
+.quo-row.out .quo-call { background: var(--q-bubble-out); color: var(--q-bubble-outtext); }
+.quo-row.in:not(.runend) .quo-call { border-bottom-left-radius: 4px; }
+.quo-row.in:not(.runstart) .quo-call { border-top-left-radius: 4px; }
+.quo-row.out:not(.runend) .quo-call { border-bottom-right-radius: 4px; }
+.quo-row.out:not(.runstart) .quo-call { border-top-right-radius: 4px; }
+.quo-callhead { display: flex; align-items: center; gap: 10px; min-height: 36px; }
 .quo-callicon { width: 34px; height: 34px; min-width: 34px; border-radius: 50%;
   display: grid; place-items: center; color: #fff; }
-.quo-callicon.gray { background: #6c6c78; }
+/* Status colours are Quo's secondary palette rather than ad-hoc hexes:
+   stone (missed/neutral), primary (answered), red (failed). */
+.quo-callicon.gray { background: #a0adbf; color: #16161a; }
 .quo-callicon.blue { background: var(--q-blue); }
-.quo-callicon.red { background: #ef4444; }
+.quo-callicon.red { background: #fa320a; }
 .quo-callmeta { min-width: 0; }
-.quo-calltitle { font-weight: 700; font-size: 13.5px; }
-.quo-callsub { color: var(--q-muted); font-size: 12px; margin-top: 1px; }
+.quo-calltitle { font-weight: var(--q-w-semibold); font-size: 14px; line-height: 18px; }
+.quo-callsub { color: var(--q-faint); font-size: 12px; line-height: 14px; margin-top: 1px; }
+.quo-row.out .quo-callsub { color: rgba(209, 227, 255, 0.65); }
 
-/* Custom dark audio player (call recordings). */
-.quo-player { display: flex; align-items: center; gap: 9px; margin-top: 10px; }
+/* Custom dark audio player (call recordings). 38px row and 10px column gap are audio.css.ts;
+   the controls take primary.strong, which is how Quo tints player chrome in both bubbles. */
+.quo-player { display: flex; align-items: center; gap: 10px; height: 38px; padding: 0 3px;
+  margin-top: 0; color: var(--q-blue-strong); }
 .quo-playbtn { width: 30px; height: 30px; min-width: 30px; border-radius: 50%; border: none;
-  background: rgba(255,255,255,.1); color: var(--q-text); cursor: pointer;
-  display: grid; place-items: center; }
+  background: rgba(255,255,255,.1); color: currentColor; cursor: pointer;
+  display: grid; place-items: center; transition: background 120ms ease; }
 .quo-playbtn:hover { background: rgba(255,255,255,.18); }
 .quo-playbtn:disabled { cursor: default; }
 .quo-seek { flex: 1; min-width: 60px; -webkit-appearance: none; appearance: none; height: 4px;
-  border-radius: 4px; background: rgba(255,255,255,.18); cursor: pointer; }
+  border-radius: 4px; background: rgba(255,255,255,.18); cursor: pointer; border: none;
+  padding: 0; }
 .quo-seek::-webkit-slider-thumb { -webkit-appearance: none; width: 12px; height: 12px;
-  border-radius: 50%; background: #fff; }
-.quo-seek::-moz-range-thumb { width: 12px; height: 12px; border: none; border-radius: 50%; background: #fff; }
-.quo-time { color: var(--q-muted); font-size: 11px; white-space: nowrap;
+  border-radius: 50%; background: currentColor; }
+.quo-seek::-moz-range-thumb { width: 12px; height: 12px; border: none; border-radius: 50%;
+  background: currentColor; }
+.quo-time { color: var(--q-muted); font-size: 11px; line-height: 14px; white-space: nowrap;
   font-variant-numeric: tabular-nums; }
-.quo-rate { background: none; border: none; color: var(--q-muted); font-size: 11.5px;
-  cursor: pointer; padding: 2px 3px; min-width: 26px; }
+.quo-rate { background: none; border: none; color: var(--q-muted); font-size: 11px;
+  font-weight: var(--q-w-medium); cursor: pointer; padding: 2px 3px; min-width: 26px; }
 .quo-rate:hover { color: var(--q-text); }
 .quo-spin { width: 14px; height: 14px; border: 2px solid rgba(255,255,255,.3); border-top-color: #fff;
   border-radius: 50%; animation: quospin 0.7s linear infinite; }
 @keyframes quospin { to { transform: rotate(360deg); } }
-.quo-composer { border-top: 1px solid var(--q-border); padding: 10px 16px 14px; }
+/* No top rule on the composer: Quo separates it from the thread with space and a raised
+   surface rather than a divider, which is what keeps the bottom of the pane feeling open. */
+.quo-composer { padding: 0 24px 16px;
+  padding-inline: max(24px, (100% - 1000px) / 2); }
 .quo-composer .box { display: flex; align-items: flex-end; gap: 8px; background: var(--q-panel2);
-  border: 1px solid var(--q-border); border-radius: 14px; padding: 8px 10px; }
+  border: 1px solid var(--q-border-strong); border-radius: 12px; padding: 8px 10px;
+  transition: border-color 120ms ease; }
+.quo-composer .box:focus-within { border-color: var(--q-blue); }
 .quo-composer textarea { flex: 1; background: none; border: none; resize: none; outline: none;
-  font: inherit; color: var(--q-text); max-height: 120px; }
-.quo-send { background: var(--q-blue); border: none; color: #fff; border-radius: 10px;
-  padding: 6px 12px; cursor: pointer; font-weight: 600;
+  font: inherit; font-size: 15px; line-height: 20px; color: var(--q-text); max-height: 120px; }
+.quo-send { background: var(--q-blue); border: none; color: #fff; border-radius: 8px;
+  padding: 6px 12px; cursor: pointer; font-weight: var(--q-w-semibold);
   display: inline-flex; align-items: center; justify-content: center; gap: 4px; }
 .quo-send:disabled { opacity: .4; cursor: default; }
 .quo-side { width: 300px; min-width: 300px; border-left: 1px solid var(--q-border);
   background: var(--q-panel); overflow-y: auto; padding: 20px 16px; }
-.quo-side h3 { margin: 10px 0 2px; text-align: center; font-size: 17px; }
-.quo-sec { color: var(--q-muted); font-size: 11px; text-transform: uppercase;
-  letter-spacing: .06em; margin: 18px 0 8px; }
-.quo-kv { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; font-size: 13px; }
-.quo-kv .k { color: var(--q-muted); width: 84px; min-width: 84px; }
+.quo-side h3 { margin: 10px 0 2px; text-align: center; font-size: 17px; line-height: 24px;
+  font-weight: var(--q-w-semibold); }
+/* Section labels: Quo uses caption3 (10/11) in medium with wide tracking, not uppercase 11px. */
+.quo-sec { color: var(--q-faint); font-size: 10px; line-height: 11px; text-transform: uppercase;
+  letter-spacing: .08em; font-weight: var(--q-w-semibold); margin: 20px 0 8px; }
+.quo-kv { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; font-size: 13px;
+  line-height: 16px; }
+.quo-kv .k { color: var(--q-faint); width: 84px; min-width: 84px; }
 .quo-kv input { flex: 1; min-width: 0; background: none; border: none; outline: none;
-  color: var(--q-text); font: inherit; padding: 2px 4px; border-radius: 6px; }
-.quo-kv input:hover, .quo-kv input:focus { background: var(--q-panel2); }
+  color: var(--q-text); font: inherit; padding: 3px 6px; border-radius: 6px;
+  transition: background 120ms ease; }
+.quo-kv input:hover { background: var(--q-hover); }
+.quo-kv input:focus { background: var(--q-panel2); box-shadow: inset 0 0 0 1px var(--q-blue); }
 .quo-note { background: var(--q-panel2); border: 1px solid var(--q-border); border-radius: 10px;
-  padding: 8px 10px; font-size: 13px; margin-bottom: 8px; }
-.quo-modal { position: fixed; inset: 0; background: rgba(0,0,0,.55); z-index: 40;
+  padding: 8px 10px; font-size: 13px; line-height: 16px; margin-bottom: 8px; }
+.quo-modal { position: fixed; inset: 0; background: rgba(0,0,0,.40); z-index: 40;
   display: grid; place-items: center; }
-.quo-modal .inner { background: var(--q-panel); border: 1px solid var(--q-border);
+.quo-modal .inner { background: var(--q-panel2); border: 1px solid var(--q-border-strong);
   border-radius: 14px; padding: 20px; width: 380px; max-width: 92vw; display: flex;
-  flex-direction: column; gap: 10px; color: var(--q-text); }
+  flex-direction: column; gap: 10px; color: var(--q-text);
+  box-shadow: 0 16px 48px rgba(0,0,0,.5); }
 .quo-callrow { display: flex; align-items: center; gap: 10px; padding: 10px 14px;
-  border-bottom: 1px solid var(--q-border); font-size: 13px; }
-.quo-callrow:hover { background: var(--q-panel2); }
+  border-bottom: 1px solid var(--q-border); font-size: 13px; line-height: 16px; }
+.quo-callrow:hover { background: var(--q-hover); }
 
 /* =======================================================================
    RESPONSIVE — iPhone support. See docs/RESPONSIVE_SPEC.md.
@@ -388,8 +505,13 @@ code.mono { background: var(--panel2); padding: 2px 6px; border-radius: 6px; fon
   .quo-chead { gap: 6px; padding: 8px 10px; }
   .quo-chead > div > div { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
-  /* Composer must clear the home indicator. */
-  .quo-composer { padding-bottom: calc(14px + env(safe-area-inset-bottom)); }
+  /* The desktop centring gutter (max(24px, (100% - 1000px)/2)) is dead weight on a phone —
+     there is no surplus width to absorb, and 24px of it is screen the thread could use. */
+  .quo-timeline { padding-inline: 12px; }
+  .quo-composer { padding-inline: 12px; }
+  /* Composer must clear the home indicator. Declared after the padding-inline above so the
+     shorthand-free longhands don't clobber each other. */
+  .quo-composer { padding-bottom: calc(14px + env(safe-area-inset-bottom)); padding-top: 0; }
   /* Bubbles can use more of a narrow screen than the desktop 68%. */
   .quo-row { max-width: 90%; }
 
