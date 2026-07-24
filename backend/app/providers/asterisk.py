@@ -249,8 +249,13 @@ class AsteriskAdapter(ProviderAdapter):
         # on the from-number (the reverse of the inbound to-number match in ingestion).
         direction = _direction(params)
         if direction == "outbound":
+            # The outbound ENTRY leg is the OPERATOR's own channel, whose dialplan `exten` is
+            # Asterisk's default "s" — NOT the callee. Using it filed every outbound call under a
+            # junk contact "s". The number we actually dialed rides the operator leg's caller-ID
+            # (run_outbound_call originates it with callerId=<callee> so the softphone shows who
+            # it's calling), so the callee = caller_number. The owned DID is X_OWEN_FROM.
             from_number = _channelvar(params, "X_OWEN_FROM") or caller_number
-            to_number = exten
+            to_number = caller_number
         else:
             from_number = caller_number
             to_number = exten
