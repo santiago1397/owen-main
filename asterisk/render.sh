@@ -12,9 +12,42 @@
 # envsubst takes an explicit SHELL-FORMAT allowlist; anything not listed is left verbatim.
 # That is the whole fix — keep DEPLOY_VARS in sync when a template gains a new ${VAR}.
 #
-# Usage:  set -a; . /opt/santiagoproperties/owen-main/.env.prod; set +a
-#         asterisk/render.sh extensions > /tmp/extensions.conf
+# Usage:  asterisk/render.sh --env-file /opt/santiagoproperties/owen-main/.env.prod extensions \
+#           > /tmp/extensions.conf
+#
+# NOTE the --env-file form: do NOT `set -a; . .env.prod`. That file is Docker-Compose
+# syntax, not shell — Compose parses it itself, so values are unquoted and may contain
+# characters the shell acts on. A real password in .env.prod contains `>`, which makes
+# sourcing it die with a syntax error (and, with different content, could REDIRECT INTO A
+# FILE). --env-file parses KEY=VALUE literally: no evaluation, no expansion, no redirects.
 set -euo pipefail
+
+load_env_file() {
+  local f="$1" line key val
+  test -f "$f" || { echo "render.sh: no such env file: $f" >&2; exit 1; }
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in ''|'#'*) continue ;; esac
+    case "$line" in *=*) ;; *) continue ;; esac
+    key="${line%%=*}"
+    val="${line#*=}"
+    # Only real identifiers; skip `export FOO=` and anything malformed.
+    case "$key" in
+      [A-Za-z_]*) ;; *) continue ;;
+    esac
+    case "$key" in *[!A-Za-z0-9_]*) continue ;; esac
+    # Compose strips one layer of matching surrounding quotes; mirror that.
+    case "$val" in
+      \"*\") val="${val#\"}"; val="${val%\"}" ;;
+      \'*\') val="${val#\'}"; val="${val%\'}" ;;
+    esac
+    export "$key=$val"
+  done < "$f"
+}
+
+if [ "${1:-}" = "--env-file" ]; then
+  load_env_file "${2:?--env-file needs a path}"
+  shift 2
+fi
 
 # Deploy-time substitutions ONLY. Asterisk runtime variables (EXTEN, CALLERID(num),
 # BULKVS_FROM, and any other dialplan variable) MUST NOT appear here.

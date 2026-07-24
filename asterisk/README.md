@@ -236,12 +236,12 @@ the host cert), and `systemctl enable --now coturn`.
 2. **Render** the templates from `.env.prod` and **rsync** into `/etc/asterisk/`
    (plus `turnserver.conf` into `/etc/coturn/`):
    ```bash
-   set -a; . /opt/santiagoproperties/owen-main/.env.prod; set +a
+   ENVF=/opt/santiagoproperties/owen-main/.env.prod
    for f in pjsip ari http rtp extensions cdr cdr_pgsql; do
-     asterisk/render.sh $f > /tmp/$f.conf
+     asterisk/render.sh --env-file "$ENVF" $f > /tmp/$f.conf
    done
    rsync -a /tmp/{pjsip,ari,http,rtp,extensions,cdr,cdr_pgsql}.conf /etc/asterisk/
-   asterisk/render.sh turnserver > /tmp/turnserver.conf
+   asterisk/render.sh --env-file "$ENVF" turnserver > /tmp/turnserver.conf
    rsync -a /tmp/turnserver.conf /etc/coturn/turnserver.conf
    ```
 
@@ -249,7 +249,9 @@ the host cert), and `systemctl enable --now coturn`.
    > `${...}` it can resolve, including Asterisk's own runtime variables — it blanked
    > `${EXTEN}` and `${BULKVS_FROM}` in the deployed dialplan, leaving `Dial(PJSIP/@bulkvs,60)`
    > and `Set(CALLERID(num)=)`. `render.sh` passes an explicit allowlist so runtime variables
-   > survive verbatim. Add any new `${VAR}` to its `DEPLOY_VARS`.
+   > survive verbatim. Add any new `${VAR}` to its `DEPLOY_VARS`. It also parses `.env.prod`
+   > literally rather than sourcing it — that file is Compose syntax, and one real password
+   > in it contains `>`, so `set -a; . .env.prod` (the old instruction here) fails outright.
 
    > **`pjsip.conf` is NOT safe to blind-rsync.** Per-operator endpoint/aor/auth trios are
    > appended by hand to the *deployed* file (see the operator section below), so overwriting
