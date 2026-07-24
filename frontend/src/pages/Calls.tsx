@@ -195,12 +195,6 @@ export default function Calls() {
     include_short: hideJunk ? undefined : true,
   };
   const { data } = useQuery({ queryKey: ["calls", query], queryFn: () => api.calls(query) });
-  // The in-call bar (Ticket 13) hold/transfer act on the CALLER channel, keyed by Linkedid
-  // (== provider_call_sid). Use the selected platform call's sid as the active channel.
-  const activeChannel: string | undefined =
-    tab === "platform"
-      ? (data?.items || []).find((c: any) => c.id === selected)?.provider_call_sid
-      : undefined;
   const set = (k: string, v: any) => setFilters((f: any) => ({ ...f, [k]: v, page: 1 }));
   const onRange = (r: Range | null) =>
     setFilters((f: any) => ({
@@ -233,7 +227,7 @@ export default function Calls() {
           hold/blind-transfer) fills ticket-06's reserved slot on the Platform sub-tab. */}
       {tab === "platform" && (
         <div style={{ marginTop: 8 }}>
-          <InCallBar channelId={activeChannel} />
+          <InCallBar />
         </div>
       )}
       <div className="toolbar" style={{ flexWrap: "wrap", gap: 8, marginTop: 8 }}>

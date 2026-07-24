@@ -1,3 +1,4 @@
+import { setActiveCall } from "./lib/activeCall";
 import { clearOutboundIntent, markOutboundIntent } from "./lib/outboundIntent";
 
 export const API_BASE = (import.meta as any).env?.VITE_API_BASE || "";
@@ -279,11 +280,20 @@ export const api = {
   outboundCall: async (callee_number: string, from_number: string) => {
     markOutboundIntent();
     try {
-      return await request("/api/telephony/outbound/call", {
+      const res = await request("/api/telephony/outbound/call", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ callee_number, from_number }),
       });
+      // The backend originate returns the callee's channel id — the exact channel the in-call
+      // panel holds / blind-transfers over ARI (no correlation needed for outbound). Stamp it,
+      // plus the from-number as this call's "line", for the panel to read.
+      setActiveCall({
+        channelId: (res as any)?.callee_channel ?? null,
+        line: from_number,
+        direction: "outbound",
+      });
+      return res;
     } catch (e) {
       clearOutboundIntent(); // the call was never placed; no INVITE is coming
       throw e;

@@ -11,6 +11,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Web } from "sip.js";
 import { api } from "../api";
+import { clearActiveCall, setActiveCall } from "./activeCall";
 import { applySink, micConstraints, startRingtone, stopRingtone } from "./audioDevices";
 import { consumeOutboundIntent } from "./outboundIntent";
 
@@ -154,9 +155,13 @@ export function useSoftphone() {
                 /* fall through to the normal incoming handling */
               }
             }
+            // Stamp the "line" (the dialed DID) for the in-call panel header; the channel id for
+            // hold/transfer is correlated there from the peer number (no id on the INVITE).
+            setActiveCall({ line: dialed, direction: "inbound" });
             patch({ status: "ringing", incoming: { caller, dialed }, peer: caller });
           },
           onCallHangup: () => {
+            clearActiveCall();
             patch({
               status: idleStatus(),
               incoming: null,
@@ -195,6 +200,7 @@ export function useSoftphone() {
       /* best-effort teardown */
     }
     availableRef.current = false;
+    clearActiveCall();
     patch({ status: "offline", available: false, peer: null, answeredAt: null, muted: false });
   }, []);
 
@@ -223,6 +229,7 @@ export function useSoftphone() {
     } catch {
       /* no pending invite */
     }
+    clearActiveCall();
     patch({ status: idleStatus(), incoming: null, peer: null, answeredAt: null, muted: false });
   }, []);
 
@@ -230,6 +237,7 @@ export function useSoftphone() {
     const user = userRef.current;
     if (!user) return;
     await user.hangup();
+    clearActiveCall();
     patch({ status: idleStatus(), incoming: null, peer: null, answeredAt: null, muted: false });
   }, []);
 
