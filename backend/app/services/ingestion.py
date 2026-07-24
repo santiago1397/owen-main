@@ -11,7 +11,7 @@ Correctness rules (ARCHITECTURE.md #6):
 import logging
 from datetime import datetime, timezone
 
-from sqlalchemy import select, update
+from sqlalchemy import or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -74,7 +74,13 @@ async def ingest_status_event(
             from app.core.config import settings as _settings
             stmt = stmt.where(Number.media_provider == _settings.BULKVS_MEDIA_PROVIDER)
         else:
-            stmt = stmt.where(Number.provider_id == provider.id)
+            # Match the OWNING provider (Twilio/SignalWire, whose media_provider is NULL) OR the
+            # provider carrying the MEDIA. A BulkVS DID is owned by the 'bulkvs' provider row but
+            # its calls ingest under 'asterisk', so a provider_id-only match found nothing and
+            # every inbound BulkVS call lost its number and campaign attribution.
+            stmt = stmt.where(
+                or_(Number.provider_id == provider.id, Number.media_provider == provider.name)
+            )
         number = (await db.execute(stmt)).scalar_one_or_none()
         if number is None:
             logger.warning(
