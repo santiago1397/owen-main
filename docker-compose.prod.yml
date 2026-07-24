@@ -16,6 +16,11 @@ services:
     expose: ["8888"]
     volumes:
       - recordings:/data/recordings
+      # Asterisk runs NATIVELY on the host and writes ARI recordings (voicemail, bridge
+      # recordings) here. recording_fetch copies from ASTERISK_SPOOL_DIR into
+      # RECORDINGS_DIR — read-only is enough, it never deletes the source.
+      # Without this mount EVERY Asterisk recording fails to fetch. See asterisk/README.md.
+      - /var/spool/asterisk/recording:/data/asterisk-spool:ro
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:8888/health"]
       interval: 10s
@@ -54,6 +59,7 @@ services:
       - "host.docker.internal:host-gateway"
     volumes:
       - recordings:/data/recordings
+      - /var/spool/asterisk/recording:/data/asterisk-spool:ro   # see app service above
     networks: [callmon-net]           # NOT traefik-public — no inbound routing
     security_opt: ["no-new-privileges:true"]
     restart: unless-stopped
