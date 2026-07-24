@@ -12,6 +12,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Web } from "sip.js";
 import { api } from "../api";
 import { applySink, micConstraints, startRingtone, stopRingtone } from "./audioDevices";
+import { consumeOutboundIntent } from "./outboundIntent";
 
 export type SoftphoneStatus =
   | "offline" // not registered (availability toggle off, or connect failed)
@@ -72,27 +73,6 @@ export function useSoftphone() {
     incoming: null,
   });
   const userRef = useRef<Web.SimpleUser | null>(null);
-
-  // Set the moment the operator asks the backend to place an outbound call, and cleared by the
-  // first INVITE that arrives (or on expiry). Held in a ref, not state, because onCallReceived
-  // is a SIP.js callback captured at connect() time and would otherwise read a stale value.
-  const outboundIntentRef = useRef<number>(0);
-
-  // How long after clicking "call" an arriving INVITE is treated as our own outbound leg.
-  // Generous enough for trunk setup, short enough that a real inbound call minutes later is
-  // never auto-answered.
-  const OUTBOUND_INTENT_TTL_MS = 45_000;
-
-  const expectOutbound = useCallback(() => {
-    outboundIntentRef.current = Date.now();
-  }, []);
-
-  // Single-shot: reading it clears it, so exactly one INVITE can ever be claimed per click.
-  const consumeOutboundIntent = (): boolean => {
-    const at = outboundIntentRef.current;
-    outboundIntentRef.current = 0;
-    return at > 0 && Date.now() - at < OUTBOUND_INTENT_TTL_MS;
-  };
 
   const patch = (p: Partial<SoftphoneState>) => setState((s) => ({ ...s, ...p }));
 
@@ -236,7 +216,7 @@ export function useSoftphone() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  return { state, setAvailable, answer, decline, hangup, expectOutbound };
+  return { state, setAvailable, answer, decline, hangup };
 }
 
 export type SoftphoneApi = ReturnType<typeof useSoftphone>;

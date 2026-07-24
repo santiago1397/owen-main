@@ -1,3 +1,5 @@
+import { clearOutboundIntent, markOutboundIntent } from "./lib/outboundIntent";
+
 export const API_BASE = (import.meta as any).env?.VITE_API_BASE || "";
 
 const TOKEN_KEY = "callmon_token";
@@ -270,10 +272,21 @@ export const api = {
   // Manual operator outbound calling (Ticket 14). Owned BulkVS DIDs for the from-number picker,
   // and the "place outbound call" orchestration (originate + pre-bridge consent + bridge, ARI).
   outboundFromNumbers: () => request("/api/telephony/outbound/from-numbers"),
-  outboundCall: (callee_number: string, from_number: string) =>
-    request("/api/telephony/outbound/call", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ callee_number, from_number }),
-    }),
+  // The backend rings THIS operator's softphone first and then bridges it to the callee, so
+  // our own outgoing call arrives as an ordinary incoming INVITE. Mark the intent here — the
+  // one place every caller goes through — so the softphone auto-answers that leg into the
+  // in-call UI instead of popping "Incoming call" for the number we just dialed.
+  outboundCall: async (callee_number: string, from_number: string) => {
+    markOutboundIntent();
+    try {
+      return await request("/api/telephony/outbound/call", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ callee_number, from_number }),
+      });
+    } catch (e) {
+      clearOutboundIntent(); // the call was never placed; no INVITE is coming
+      throw e;
+    }
+  },
 };

@@ -19,7 +19,6 @@ import {
 import { useSearchParams } from "react-router-dom";
 import { API_BASE, api, ApiError } from "../api";
 import InCallBar from "../components/InCallBar";
-import { useSoftphoneContext } from "../lib/softphoneContext";
 
 // Quo-style per-contact Inbox: one thread per CONTACT across all BulkVS DIDs, messages AND
 // calls interleaved in one timeline. Scope = platform (bulkvs/asterisk) only; the legacy
@@ -349,7 +348,6 @@ export default function Inbox() {
       { replace: !id }
     );
   };
-  const { expectOutbound } = useSoftphoneContext();
   const [showPhone, setShowPhone] = useState(false);
   const [showNewChat, setShowNewChat] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
@@ -386,9 +384,6 @@ export default function Inbox() {
     setShowPhone(true);
     setCallNote(null);
     try {
-      // Claim the INVITE the backend is about to send us: our own outbound leg must open the
-      // in-call UI, not the "Incoming call" popup (which would show the number we just dialed).
-      expectOutbound();
       const res = await api.outboundCall(to, from);
       setCallNote(
         `Calling ${fmtPhone(to)} from ${fmtPhone(from)} — your softphone will ring.` +
