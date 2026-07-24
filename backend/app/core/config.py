@@ -41,7 +41,11 @@ class Settings(BaseSettings):
     # Auth
     SECRET_KEY: str = "change-me"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
-    REFRESH_TOKEN_EXPIRE_DAYS: int = 14
+    # The refresh token is what keeps an installed phone app signed in. It is ROTATED on
+    # every /api/auth/refresh, so this is a sliding window: anyone opening OWEN at least
+    # once in this many days never sees the login screen again. Sized for an internal
+    # tool used from a phone; shorten it if OWEN is ever opened to outside users.
+    REFRESH_TOKEN_EXPIRE_DAYS: int = 60
     JWT_ALGORITHM: str = "HS256"
 
     # Business timezone for all daily/weekly/monthly bucketing

@@ -1,6 +1,7 @@
 export const API_BASE = (import.meta as any).env?.VITE_API_BASE || "";
 
 const TOKEN_KEY = "callmon_token";
+const REFRESH_KEY = "callmon_refresh";
 
 export function getToken(): string | null {
   return localStorage.getItem(TOKEN_KEY);
@@ -8,8 +9,60 @@ export function getToken(): string | null {
 export function setToken(t: string) {
   localStorage.setItem(TOKEN_KEY, t);
 }
+function getRefreshToken(): string | null {
+  return localStorage.getItem(REFRESH_KEY);
+}
+/** Persist BOTH halves of the pair. The access token is short-lived (30 min); the refresh
+ *  token is the one that keeps a phone signed in across days. */
+function setTokens(access: string, refresh?: string) {
+  setToken(access);
+  if (refresh) localStorage.setItem(REFRESH_KEY, refresh);
+}
 export function clearToken() {
   localStorage.removeItem(TOKEN_KEY);
+  localStorage.removeItem(REFRESH_KEY);
+}
+
+/** Flat rather than a discriminated union: this project compiles with `strict: false`,
+ *  where narrowing on a literal `ok` discriminant is unreliable. */
+type RefreshResult = { ok: boolean; token?: string; reason?: "rejected" | "network" };
+
+let refreshing: Promise<RefreshResult> | null = null;
+
+/** Single-flight refresh: if several requests 401 at once (the dashboard fires many in
+ *  parallel), they all await ONE /refresh call instead of stampeding it — and, since the
+ *  backend rotates the refresh token on every use, racing calls would otherwise redeem a
+ *  token that a sibling call had already replaced. */
+function refreshAccessToken(): Promise<RefreshResult> {
+  if (!refreshing) {
+    const p = (async (): Promise<RefreshResult> => {
+      const rt = getRefreshToken();
+      if (!rt) return { ok: false, reason: "rejected" as const };
+      try {
+        const res = await fetch(`${API_BASE}/api/auth/refresh`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ refresh_token: rt }),
+        });
+        // Only a definitive answer from the server ends the session. A 5xx is the server's
+        // problem, not proof the token is bad, so it must not sign the user out.
+        if (!res.ok) {
+          return { ok: false, reason: res.status >= 500 ? ("network" as const) : ("rejected" as const) };
+        }
+        const data = await res.json();
+        setTokens(data.access_token, data.refresh_token);
+        return { ok: true, token: data.access_token as string };
+      } catch {
+        // Phone dropped signal mid-refresh. Keep the tokens — retrying later may well work.
+        return { ok: false, reason: "network" as const };
+      }
+    })();
+    refreshing = p;
+    void p.finally(() => {
+      if (refreshing === p) refreshing = null;
+    });
+  }
+  return refreshing;
 }
 
 export class ApiError extends Error {
@@ -20,12 +73,19 @@ export class ApiError extends Error {
   }
 }
 
-async function request(path: string, opts: RequestInit = {}): Promise<any> {
+async function request(path: string, opts: RequestInit = {}, allowRetry = true): Promise<any> {
   const headers: Record<string, string> = { ...(opts.headers as any) };
   const token = getToken();
   if (token) headers["Authorization"] = `Bearer ${token}`;
   const res = await fetch(`${API_BASE}${path}`, { ...opts, headers });
   if (res.status === 401) {
+    // The access token lasts 30 min; the refresh token lasts far longer and is rotated on
+    // every use. So an expired access token is a silent, invisible refresh — NOT a logout.
+    if (allowRetry) {
+      const r = await refreshAccessToken();
+      if (r.ok) return request(path, opts, false);
+      if (r.reason === "network") throw new ApiError(401, "could not reach the server");
+    }
     clearToken();
     if (!location.pathname.startsWith("/login")) location.href = "/login";
     throw new ApiError(401, "unauthorized");
@@ -44,7 +104,8 @@ export async function login(email: string, password: string): Promise<string> {
   });
   if (!res.ok) throw new ApiError(res.status, "login failed");
   const data = await res.json();
-  setToken(data.access_token);
+  // Keep the refresh token too — it is what spares the user a daily re-login on mobile.
+  setTokens(data.access_token, data.refresh_token);
   return data.access_token;
 }
 

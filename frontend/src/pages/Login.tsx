@@ -24,9 +24,29 @@ export default function Login() {
       <form className="card logincard" onSubmit={submit}>
         <h1 style={{ marginTop: 0 }}>📞 Call Monitor</h1>
         <div style={{ display: "grid", gap: 10 }}>
-          <input placeholder="email" value={email} onChange={(e) => setEmail(e.target.value)} />
-          <input placeholder="password" type="password" value={password}
-                 onChange={(e) => setPassword(e.target.value)} />
+          {/* autoComplete/name are what make iOS + Android offer saved-password (Face ID /
+              fingerprint) autofill; autoCapitalize+autoCorrect stop phones mangling the
+              email; type=email picks the @-bearing keyboard. */}
+          <input
+            placeholder="email"
+            type="email"
+            name="username"
+            autoComplete="username"
+            inputMode="email"
+            autoCapitalize="none"
+            autoCorrect="off"
+            spellCheck={false}
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
+          />
+          <input
+            placeholder="password"
+            type="password"
+            name="password"
+            autoComplete="current-password"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+          />
           {err && <div style={{ color: "var(--danger)" }}>{err}</div>}
           <button className="primary" type="submit">Sign in</button>
         </div>

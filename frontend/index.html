@@ -4,6 +4,19 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Call Monitor</title>
+
+    <!-- Installable web app. Installing matters beyond convenience: an installed web app
+         gets its own storage container, so the saved sign-in is NOT subject to Safari's
+         7-day eviction of script-writable storage that applies to ordinary tabs. -->
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <meta name="theme-color" content="#0f1115" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <!-- iOS standalone. Status bar kept OPAQUE ("black") rather than black-translucent so
+         the page is not drawn under the notch — that would need safe-area insets in CSS. -->
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black" />
+    <meta name="apple-mobile-web-app-title" content="OWEN" />
   </head>
   <body>
     <div id="root"></div>
