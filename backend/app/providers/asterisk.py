@@ -110,12 +110,24 @@ def _channel(event: dict) -> dict:
 def linkedid(event: dict) -> str:
     """The call's Linkedid = the provider_call_sid all legs collapse under.
 
-    Read from `channel.channelvars.Linkedid` (needs `channelvars=Linkedid` in ari.conf).
-    Falls back to the channel's own id, which is correct for the entry leg."""
+    Read from `channel.channelvars["CHANNEL(linkedid)"]`, which requires
+    `channelvars = CHANNEL(linkedid)` in ari.conf.
+
+    `Linkedid` (and `LINKEDID`) are NOT Asterisk channel variables — they always evaluate to
+    the empty string, so the old spelling silently fell through to the channel's own id on
+    EVERY event. That made every leg look like its own entry channel: legs never collapsed
+    onto one call, each got its own `calls` row, and `is_entry_channel` was true for all of
+    them (so an outbound leg could start a flow run). Verified on the live box — with all
+    three names exported at once, only `CHANNEL(linkedid)` had a value.
+
+    The old key is still read as a fallback so an un-reloaded Asterisk keeps working, then
+    the channel's own id, which is correct for the entry leg."""
     ch = _channel(event)
     cv = ch.get("channelvars")
-    if isinstance(cv, dict) and cv.get("Linkedid"):
-        return str(cv["Linkedid"])
+    if isinstance(cv, dict):
+        for key in ("CHANNEL(linkedid)", "Linkedid"):
+            if cv.get(key):
+                return str(cv[key])
     return str(ch.get("id") or "")
 
 
@@ -152,6 +164,16 @@ def is_entry_channel(event: dict) -> bool:
 # ChannelDestroyed — are still identifiable, even if `channelvars=Linkedid` were missing).
 FLOW_DIAL_APP_ARG = "flow-dial"
 FLOW_DIAL_CHANNEL_PREFIX = "flow-dial-"
+
+
+def is_outbound_leg(event: dict) -> bool:
+    """True iff this channel belongs to a manual OUTBOUND call (Ticket 14).
+
+    Those legs are originated and bridged by the backend itself, so they must never enter the
+    flow runtime. Without this guard the unassigned-DID default (Ticket 18) treated the
+    outbound trunk leg as a fresh inbound call and played the voicemail greeting to the person
+    being called."""
+    return _direction(event) == "outbound"
 
 
 def is_flow_dial_leg(event: dict) -> bool:

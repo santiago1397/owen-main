@@ -73,6 +73,27 @@ export function useSoftphone() {
   });
   const userRef = useRef<Web.SimpleUser | null>(null);
 
+  // Set the moment the operator asks the backend to place an outbound call, and cleared by the
+  // first INVITE that arrives (or on expiry). Held in a ref, not state, because onCallReceived
+  // is a SIP.js callback captured at connect() time and would otherwise read a stale value.
+  const outboundIntentRef = useRef<number>(0);
+
+  // How long after clicking "call" an arriving INVITE is treated as our own outbound leg.
+  // Generous enough for trunk setup, short enough that a real inbound call minutes later is
+  // never auto-answered.
+  const OUTBOUND_INTENT_TTL_MS = 45_000;
+
+  const expectOutbound = useCallback(() => {
+    outboundIntentRef.current = Date.now();
+  }, []);
+
+  // Single-shot: reading it clears it, so exactly one INVITE can ever be claimed per click.
+  const consumeOutboundIntent = (): boolean => {
+    const at = outboundIntentRef.current;
+    outboundIntentRef.current = 0;
+    return at > 0 && Date.now() - at < OUTBOUND_INTENT_TTL_MS;
+  };
+
   const patch = (p: Partial<SoftphoneState>) => setState((s) => ({ ...s, ...p }));
 
   const connect = useCallback(async () => {
@@ -112,6 +133,23 @@ export function useSoftphone() {
             const rid = s?.remoteIdentity;
             const caller = (rid?.uri?.user as string) || null;
             const dialed = (rid?.displayName as string) || null;
+
+            // A manual OUTBOUND call (Ticket 14) reaches this operator as an ordinary INVITE
+            // too — the backend originates our leg first, then bridges it to the callee. It is
+            // NOT an incoming call: showing the "Incoming call" popup for a number the operator
+            // just dialed is wrong (and the caller-ID on that leg is the CALLEE). So when we
+            // just asked the backend to place a call, auto-answer and go straight to in-call.
+            // The window is short and single-shot so a genuine inbound call can never be
+            // swallowed by a stale flag.
+            if (consumeOutboundIntent()) {
+              try {
+                await userRef.current?.answer();
+                patch({ status: "in-call", incoming: null });
+                return;
+              } catch {
+                /* fall through to the normal incoming handling */
+              }
+            }
             patch({ status: "ringing", incoming: { caller, dialed } });
           },
           onCallHangup: () => {
@@ -198,7 +236,7 @@ export function useSoftphone() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  return { state, setAvailable, answer, decline, hangup };
+  return { state, setAvailable, answer, decline, hangup, expectOutbound };
 }
 
 export type SoftphoneApi = ReturnType<typeof useSoftphone>;

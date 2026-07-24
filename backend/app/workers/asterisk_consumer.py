@@ -22,7 +22,12 @@ import logging
 from app.core.config import settings
 from app.db import SessionLocal
 from app.flows import dtmf
-from app.providers.asterisk import AsteriskEventRouter, is_entry_channel, is_flow_dial_leg
+from app.providers.asterisk import (
+    AsteriskEventRouter,
+    is_entry_channel,
+    is_flow_dial_leg,
+    is_outbound_leg,
+)
 from app.services import queue
 from app.services.ingestion import ingest_status_event
 from app.services.recordings import ingest_recording_event
@@ -108,7 +113,16 @@ async def _handle(router: AsteriskEventRouter, raw: str | bytes) -> None:
     # (possibly minutes-long) flow runs. Only reached with ASTERISK_ENABLED on. A flow-dial
     # outbound leg (Ticket 15.3) also StasisStarts into our app — it must NEVER start a
     # second flow run (its interpreter is already driving it).
-    if event.get("type") == "StasisStart" and is_entry_channel(event) and not is_flow_dial_leg(event):
+    # An OUTBOUND leg (Ticket 14 manual calling) also StasisStarts into our app — the backend
+    # bridges it itself. It must never enter the flow runtime: with no flow assigned to it, the
+    # unassigned-DID default (Ticket 18) answered it and played the VOICEMAIL GREETING to the
+    # person being called. Observed live on a real outbound call.
+    if (
+        event.get("type") == "StasisStart"
+        and is_entry_channel(event)
+        and not is_flow_dial_leg(event)
+        and not is_outbound_leg(event)
+    ):
         asyncio.create_task(_run_flow(event))
 
 

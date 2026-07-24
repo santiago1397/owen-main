@@ -193,6 +193,47 @@ def test_flow_dial_leg_never_ingests_or_flow_runs():
     check("entry leg still ingests", AsteriskEventRouter().route(_evt("StasisStart", ENTRY)) is not None)
 
 
+def test_linkedid_reads_channel_function_var():
+    """ari.conf exports `CHANNEL(linkedid)`. `Linkedid` is NOT a channel variable — Asterisk
+    evaluates it to "" — so reading that key alone silently fell back to the channel's own id
+    and legs never collapsed onto one call."""
+    from app.providers.asterisk import is_entry_channel, linkedid
+
+    leg = _evt("ChannelStateChange", LEG2, state="Up")
+    leg["channel"]["channelvars"] = {"CHANNEL(linkedid)": LINKEDID}
+    check("CHANNEL(linkedid) is read", linkedid(leg) == LINKEDID)
+    check("secondary leg is not the entry channel", is_entry_channel(leg) is False)
+    check("secondary leg does not ingest", AsteriskEventRouter().route(leg) is None)
+
+    # The empty value Asterisk really sent must not win over the channel id.
+    empty = _evt("ChannelStateChange", ENTRY, state="Up")
+    empty["channel"]["channelvars"] = {"CHANNEL(linkedid)": "", "Linkedid": ""}
+    check("empty channelvars fall back to channel id", linkedid(empty) == ENTRY)
+
+    # Old spelling still honoured so an un-reloaded Asterisk keeps working.
+    legacy = _evt("ChannelStateChange", LEG2, state="Up")
+    legacy["channel"]["channelvars"] = {"Linkedid": LINKEDID}
+    check("legacy Linkedid still read", linkedid(legacy) == LINKEDID)
+
+
+def test_outbound_leg_never_starts_a_flow():
+    """A manual outbound call's legs are bridged by the backend. If one reaches the flow
+    runtime, the unassigned-DID default answers it and plays the voicemail greeting AT THE
+    PERSON BEING CALLED — observed on a real call."""
+    from app.providers.asterisk import is_outbound_leg
+
+    out = _evt("StasisStart", ENTRY)
+    out["channel"]["channelvars"] = {
+        "CHANNEL(linkedid)": ENTRY,
+        "X_OWEN_DIRECTION": "outbound",
+        "X_OWEN_FROM": "+13055559999",
+    }
+    check("outbound leg detected", is_outbound_leg(out) is True)
+
+    inbound = _evt("StasisStart", ENTRY)
+    check("inbound entry leg is not outbound", is_outbound_leg(inbound) is False)
+
+
 def main():
     test_vocabulary_is_shared()
     test_noop_signature()
@@ -201,6 +242,8 @@ def main():
     test_terminal_cause_mapping()
     test_non_entry_and_unmapped_skipped()
     test_flow_dial_leg_never_ingests_or_flow_runs()
+    test_linkedid_reads_channel_function_var()
+    test_outbound_leg_never_starts_a_flow()
     print("\nALL ASTERISK INGESTION CHECKS PASSED")
 
 
