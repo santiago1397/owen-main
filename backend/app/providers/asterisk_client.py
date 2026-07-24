@@ -19,6 +19,7 @@ import uuid
 
 import httpx
 
+from app.core.calllog import clog
 from app.core.config import settings
 from app.flows import dtmf
 from app.providers.asterisk import FLOW_DIAL_APP_ARG, FLOW_DIAL_CHANNEL_PREFIX
@@ -110,6 +111,7 @@ class AsteriskAriClient:
         return httpx.AsyncClient(timeout=_CONTROL_TIMEOUT, auth=self._auth)
 
     async def answer(self, channel_id: str) -> None:
+        clog(logger, "answer", channel=channel_id)
         await self._post(f"/ari/channels/{channel_id}/answer")
 
     async def play(self, channel_id: str, media: str) -> None:
@@ -322,6 +324,7 @@ class AsteriskAriClient:
             state = str(ep.get("state") or "").lower()
             if tech == "PJSIP" and resource.startswith("operator-") and state == "online":
                 out.append(f"PJSIP/{resource}")
+        clog(logger, "operators.available", count=len(out))
         return out
 
     async def ring_and_bridge(
@@ -343,6 +346,8 @@ class AsteriskAriClient:
         watch_ids = list(legs.keys()) + [channel_id]
         queue = dtmf.watch(*watch_ids)
         bridge_id: str | None = None
+        clog(logger, "ring.start", channel=channel_id, endpoints=len(endpoints),
+             timeout_s=int(timeout_s), record=bool(record_name))
         try:
             for out_id, endpoint in legs.items():
                 params = {
@@ -361,6 +366,7 @@ class AsteriskAriClient:
                 queue, channel_id, set(legs.keys()), timeout_s
             )
             if answered_id is None:
+                clog(logger, "ring.result", channel=channel_id, result="noanswer")
                 return "noanswer"
 
             # Winner found: hang up every other still-ringing operator leg.
@@ -368,16 +374,21 @@ class AsteriskAriClient:
                 if out_id != answered_id:
                     await self._delete(f"/ari/channels/{out_id}")
 
+            clog(logger, "ring.answered", channel=channel_id, answered=answered_id)
             bridge_id = await self.create_bridge()
             if not bridge_id:
+                clog(logger, "ring.result", channel=channel_id, result="failed", reason="no_bridge")
                 return "failed"
             await self.add_to_bridge(bridge_id, channel_id, answered_id)
             if record_name:
                 await self.record_bridge(bridge_id, record_name)
+            clog(logger, "ring.bridged", channel=channel_id, answered=answered_id, bridge=bridge_id)
             await self._await_bridge_end(queue, channel_id, answered_id)
+            clog(logger, "ring.ended", channel=channel_id, bridge=bridge_id)
             return "answered"
         except Exception:  # noqa: BLE001 - a ring/bridge failure falls through, never crashes the call
             logger.exception("ARI ring_and_bridge failed")
+            clog(logger, "ring.result", channel=channel_id, result="failed", reason="exception")
             return "failed"
         finally:
             dtmf.unwatch(queue, *watch_ids)
@@ -460,6 +471,8 @@ class AsteriskAriClient:
         caller so RecordingFinished rides the existing recording->transcribe->analyze pipeline.
 
         Best-effort throughout: a greeting/record failure still hangs up cleanly (never dead air)."""
+        clog(logger, "voicemail.start", channel=channel_id, name=name,
+             max_duration_s=int(max_duration_s))
         try:
             if greeting:
                 await self.play_and_wait(channel_id, str(greeting))
@@ -542,18 +555,24 @@ class AsteriskAriClient:
         self, operator_id: str, *, caller_id=None, variables=None
     ) -> str | None:
         """Originate the operator's own WebRTC leg (PJSIP/operator-<slug>) into Stasis."""
-        return await self._originate_channel(
+        ch = await self._originate_channel(
             operator_dial_endpoint(operator_id), caller_id=caller_id, variables=variables
         )
+        clog(logger, "originate.operator", channel=ch, operator=operator_id,
+             caller_id=caller_id, ok=ch is not None)
+        return ch
 
     async def originate_number(
         self, number: str, *, caller_id=None, trunk_name=None, originator=None, variables=None
     ) -> str | None:
         """Originate an external number over the BulkVS trunk into Stasis."""
         trunk = trunk_name or settings.BULKVS_TRUNK_NAME
-        return await self._originate_channel(
+        ch = await self._originate_channel(
             f"PJSIP/{number}@{trunk}", caller_id=caller_id, originator=originator, variables=variables
         )
+        clog(logger, "originate.number", channel=ch, to=number, caller_id=caller_id,
+             originator=originator, ok=ch is not None)
+        return ch
 
     async def record_bridge(self, bridge_id: str, name: str) -> None:
         """Start a mixed recording of a bridge (both legs) — outbound calls record by default."""
@@ -561,16 +580,20 @@ class AsteriskAriClient:
             f"/ari/bridges/{bridge_id}/record",
             params={"name": name, "format": "wav", "ifExists": "overwrite"},
         )
+        clog(logger, "record.start", bridge=bridge_id, name=name)
 
     async def hangup(self, channel_id: str) -> None:
+        clog(logger, "hangup", channel=channel_id)
         await self._delete(f"/ari/channels/{channel_id}")
 
     # --- Softphone control ops (Ticket 13) — driven ONLY by the backend, never the browser ---
 
     async def hold(self, channel_id: str) -> None:
+        clog(logger, "hold", channel=channel_id)
         await self._post(f"/ari/channels/{channel_id}/hold")
 
     async def unhold(self, channel_id: str) -> None:
+        clog(logger, "unhold", channel=channel_id)
         await self._delete(f"/ari/channels/{channel_id}/hold")
 
     async def create_bridge(self) -> str | None:
@@ -578,7 +601,9 @@ class AsteriskAriClient:
         data = await self._post_json("/ari/bridges", params={"type": "mixing"})
         if isinstance(data, dict):
             bid = data.get("id")
+            clog(logger, "bridge.create", bridge=bid, ok=bool(bid))
             return str(bid) if bid else None
+        clog(logger, "bridge.create", ok=False)
         return None
 
     async def add_to_bridge(self, bridge_id: str, *channel_ids: str) -> None:
@@ -586,6 +611,7 @@ class AsteriskAriClient:
         if not chans:
             return
         await self._post(f"/ari/bridges/{bridge_id}/addChannel", params={"channel": chans})
+        clog(logger, "bridge.add", bridge=bridge_id, channels=chans)
 
     async def destroy_bridge(self, bridge_id: str) -> None:
         await self._delete(f"/ari/bridges/{bridge_id}")
@@ -593,17 +619,31 @@ class AsteriskAriClient:
     async def blind_transfer(self, channel_id: str, endpoint: str) -> None:
         """Blind-transfer: redirect the channel to a new endpoint (v1 — attended is out of
         scope). The endpoint string is resolved server-side by app/telephony/control.py."""
+        clog(logger, "transfer.redirect", channel=channel_id, endpoint=endpoint)
         await self._post(
             f"/ari/channels/{channel_id}/redirect", params={"endpoint": endpoint}
         )
+
+    # Every ARI HTTP op logs its outcome so a call can be traced end-to-end: OK at DEBUG (run
+    # with LOG_LEVEL=DEBUG to see the full HTTP conversation), non-2xx at WARNING with a
+    # truncated body (a silently-swallowed 4xx/5xx was previously invisible), transport errors
+    # at ERROR. `path` carries the channel/bridge id, so these lines correlate by grep.
+    @staticmethod
+    def _log_result(method: str, path: str, status_code: int, body: str | None = None) -> None:
+        if status_code < 300:
+            logger.debug("ari.http %s %s -> %s", method, path, status_code)
+        else:
+            snippet = (body or "").strip().replace("\n", " ")[:200]
+            logger.warning("ari.http %s %s -> %s %s", method, path, status_code, snippet)
 
     async def _post(self, path: str, params: dict | None = None) -> bool:
         try:
             async with await self._client() as client:
                 resp = await client.post(f"{self._base}{path}", params=params or {})
+                self._log_result("POST", path, resp.status_code, resp.text)
                 return resp.status_code < 300
         except Exception:  # noqa: BLE001 - control ops are best-effort
-            logger.exception("ARI POST %s failed", path)
+            logger.exception("ari.http POST %s failed", path)
             return False
 
     async def _post_json(self, path: str, params: dict | None = None, json: dict | None = None):
@@ -613,18 +653,20 @@ class AsteriskAriClient:
         try:
             async with await self._client() as client:
                 resp = await client.post(f"{self._base}{path}", params=params or {}, json=json)
+                self._log_result("POST", path, resp.status_code, resp.text)
                 if resp.status_code >= 300:
                     return None
                 return resp.json()
         except Exception:  # noqa: BLE001 - control ops are best-effort
-            logger.exception("ARI POST(json) %s failed", path)
+            logger.exception("ari.http POST(json) %s failed", path)
             return None
 
     async def _delete(self, path: str) -> bool:
         try:
             async with await self._client() as client:
                 resp = await client.delete(f"{self._base}{path}")
+                self._log_result("DELETE", path, resp.status_code, resp.text)
                 return resp.status_code < 300
         except Exception:  # noqa: BLE001 - control ops are best-effort
-            logger.exception("ARI DELETE %s failed", path)
+            logger.exception("ari.http DELETE %s failed", path)
             return False

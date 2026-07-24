@@ -24,6 +24,11 @@ class Settings(BaseSettings):
     ENVIRONMENT: str = "development"
     DEBUG: bool = True
 
+    # Root log level (name or number: DEBUG/INFO/WARNING/...). DEBUG additionally surfaces every
+    # ARI HTTP request line so a call can be traced end-to-end from the worker logs; INFO keeps
+    # the semantic per-phase `call.*` lines. See app/core/calllog.py.
+    LOG_LEVEL: str = "INFO"
+
     # Comma-separated origins allowed to call the API (the frontend subdomain in prod).
     CORS_ORIGINS: str = ""
 

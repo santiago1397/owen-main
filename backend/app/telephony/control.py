@@ -13,9 +13,13 @@ tested too.
 
 from __future__ import annotations
 
+import logging
 from typing import Optional, Protocol
 
+from app.core.calllog import clog
 from app.telephony.credentials import operator_dial_endpoint
+
+logger = logging.getLogger("telephony.control")
 
 # Blind-transfer target kinds (v1 — attended transfer is out of scope).
 TRANSFER_KINDS = frozenset({"did", "operator", "ai_agent"})
@@ -145,6 +149,7 @@ async def place_outbound_call(
     failure at any originate/bridge step short-circuits with ok=False + a reason (best-effort;
     the endpoint surfaces it rather than hanging on a half-set-up call)."""
     op_vars = {DIRECTION_VAR: "outbound", FROM_VAR: from_number}
+    clog(logger, "outbound.begin", operator=operator_id, to=callee_number, from_number=from_number)
 
     if operator_channel_id:
         op_channel: Optional[str] = operator_channel_id
@@ -154,6 +159,8 @@ async def place_outbound_call(
             operator_id, caller_id=callee_number, variables=op_vars
         )
         if not op_channel:
+            clog(logger, "outbound.fail", operator=operator_id, reason="operator_originate_failed",
+                 level=logging.WARNING)
             return {"ok": False, "reason": "operator_originate_failed"}
 
     callee_channel = await ari.originate_number(
@@ -164,6 +171,8 @@ async def place_outbound_call(
         variables=op_vars,
     )
     if not callee_channel:
+        clog(logger, "outbound.fail", channel=op_channel, reason="callee_originate_failed",
+             level=logging.WARNING)
         return {"ok": False, "reason": "callee_originate_failed",
                 "operator_channel": op_channel}
 
@@ -173,9 +182,12 @@ async def place_outbound_call(
 
     bridge_id = await ari.create_bridge()
     if not bridge_id:
+        clog(logger, "outbound.fail", channel=op_channel, reason="bridge_failed",
+             level=logging.WARNING)
         return {"ok": False, "reason": "bridge_failed",
                 "operator_channel": op_channel, "callee_channel": callee_channel}
     await ari.add_to_bridge(bridge_id, op_channel, callee_channel)
+    clog(logger, "outbound.bridged", channel=op_channel, callee=callee_channel, bridge=bridge_id)
 
     if record:
         # Name the recording `{linkedid}-...` so the ticket-05 recording pipeline attaches it
@@ -183,6 +195,8 @@ async def place_outbound_call(
         # originate path the operator (entry) channel id IS the Linkedid.
         await ari.record_bridge(bridge_id, f"{op_channel}-outbound")
 
+    clog(logger, "outbound.ok", channel=op_channel, callee=callee_channel, bridge=bridge_id,
+         recording=record)
     return {
         "ok": True,
         "bridge_id": bridge_id,

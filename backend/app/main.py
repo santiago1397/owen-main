@@ -27,7 +27,9 @@ from app.webhooks import bulkvs as bulkvs_webhooks
 from app.webhooks import signalwire as signalwire_webhooks
 from app.webhooks import twilio as twilio_webhooks
 
-logging.basicConfig(level=logging.INFO)
+from app.core.calllog import setup_logging
+
+setup_logging()
 
 
 @asynccontextmanager

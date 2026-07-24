@@ -19,6 +19,7 @@ import asyncio
 import json
 import logging
 
+from app.core.calllog import clog
 from app.core.config import settings
 from app.db import SessionLocal
 from app.flows import dtmf
@@ -63,7 +64,9 @@ async def _handle(router: AsteriskEventRouter, raw: str | bytes) -> None:
     ch = event.get("channel") if isinstance(event.get("channel"), dict) else {}
     channel_id = str(ch.get("id") or "")
     if etype == "ChannelDtmfReceived":
-        dtmf.push_digit(channel_id, str(event.get("digit") or ""))
+        digit = str(event.get("digit") or "")
+        clog(logger, "dtmf", channel=channel_id, digit=digit)
+        dtmf.push_digit(channel_id, digit)
         return  # DTMF never maps onto the status vocabulary; nothing else to do
     if etype in dtmf.CHANNEL_EVENT_TYPES and channel_id:
         dtmf.push_channel_event(channel_id, event)

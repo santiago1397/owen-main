@@ -27,7 +27,9 @@ from app.workers.mail_poller import enabled as mail_enabled
 from app.workers.mail_poller import poll_mailbox
 from app.workers.reconciler import reconcile_recent
 
-logging.basicConfig(level=logging.INFO)
+from app.core.calllog import setup_logging
+
+setup_logging()
 logger = logging.getLogger("worker")
 
 POLL_INTERVAL = 2.0

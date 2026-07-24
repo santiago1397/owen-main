@@ -14,6 +14,7 @@ Two authenticated surfaces, both gated on ASTERISK_ENABLED (503 when the platfor
 The ARI client is resolved via `get_ari_control()` so tests can substitute a FAKE.
 """
 
+import logging
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -29,6 +30,7 @@ from app.telephony import control, outbound
 from app.telephony.credentials import build_webrtc_credentials
 
 router = APIRouter(prefix="/api/telephony", tags=["telephony"])
+logger = logging.getLogger("api.telephony")
 
 
 def get_ari_control():
@@ -113,6 +115,8 @@ class TransferIn(BaseModel):
 async def control_hold(body: HoldIn, user: User = Depends(current_user)) -> dict:
     """Hold / unhold a channel (backend-driven; SIP.js never does this itself)."""
     _require_enabled()
+    logger.info("call.api.hold operator=%s channel=%s hold=%s",
+                user.email, body.channel_id, body.hold)
     ari = get_ari_control()
     if body.hold:
         await control.hold(ari, body.channel_id)
@@ -138,6 +142,8 @@ async def control_transfer(body: TransferIn, user: User = Depends(current_user))
     _require_enabled()
     if body.kind not in control.TRANSFER_KINDS:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, f"bad transfer kind: {body.kind}")
+    logger.info("call.api.transfer operator=%s channel=%s kind=%s target=%s",
+                user.email, body.channel_id, body.kind, body.target)
     ari = get_ari_control()
     endpoint = await control.blind_transfer(
         ari, body.channel_id, body.kind, body.target, trunk_name=settings.BULKVS_TRUNK_NAME
@@ -236,6 +242,8 @@ async def outbound_call(
         raise HTTPException(status.HTTP_409_CONFLICT, "this contact is blocked")
 
     warnings = await _guardrail_warnings(db, body.callee_number)
+    logger.info("call.api.outbound operator=%s to=%s from=%s warnings=%d",
+                user.email, body.callee_number, body.from_number, len(warnings))
 
     ari = get_ari_control()
     result = await control.place_outbound_call(

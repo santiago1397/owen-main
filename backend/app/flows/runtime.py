@@ -30,6 +30,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app.agents.service import build_spec
 from app.agents.session import AgentCallContext, get_session_for_agent
+from app.core.calllog import clog
 from app.core.config import settings
 from app.db import SessionLocal
 from app.flows.interpreter import AriControl, FlowInterpreter
@@ -250,7 +251,11 @@ async def run_flow_for_stasis(event: dict, ari: AriControl) -> None:
     dialed = (ch.get("dialplan") or {}).get("exten") if isinstance(ch.get("dialplan"), dict) else None
     caller_number = str((ch.get("caller") or {}).get("number") or "") if isinstance(ch.get("caller"), dict) else ""
     if not channel_id or not lid or not dialed:
+        clog(logger, "stasis.skip", linkedid=lid, channel=channel_id, dialed=dialed,
+             level=logging.WARNING)
         return
+    clog(logger, "stasis.start", linkedid=lid, channel=channel_id, dialed=dialed,
+         caller=caller_number or None)
 
     try:
         async with SessionLocal() as db:
@@ -269,8 +274,7 @@ async def run_flow_for_stasis(event: dict, ari: AriControl) -> None:
         # (consent notice -> ring every AVAILABLE operator -> first-answer bridge -> else
         # voicemail). Run with NO DB session held (it can bridge/record for minutes). A real
         # assigned flow OVERRIDES this; this is what happens before anything is configured.
-        logger.info("flow runtime: no assigned flow for DID %s (linkedid=%s); default handling",
-                    dialed, lid)
+        clog(logger, "route", linkedid=lid, mode="default_handling", dialed=dialed)
         await _handle_unassigned(ari, channel_id, lid, str(dialed), caller_number)
         return
 
@@ -286,6 +290,7 @@ async def run_flow_for_stasis(event: dict, ari: AriControl) -> None:
         await _fallback_forward(ari, channel_id, lid)
         return
     fv_id, graph = resolved
+    clog(logger, "route", linkedid=lid, mode="flow", flow_version=fv_id, dialed=dialed)
 
     async def pin() -> None:
         # StasisStart pin (interpreter on_start hook): pin-once, own short session.
@@ -379,10 +384,12 @@ async def _handle_unassigned(
 
         consent = (settings.INBOUND_CONSENT_MEDIA or "").strip()
         if consent:
+            clog(logger, "default.consent", linkedid=lid, channel=channel_id)
             await ari.play_and_wait(channel_id, consent)
 
         if settings.NO_FLOW_RING_OPERATORS:
             operators = await ari.available_operators()
+            clog(logger, "default.ring", linkedid=lid, operators=len(operators))
             if operators:
                 # Caller-ID on each operator leg: display name = the dialed DID (so the popup can
                 # show "to what number"), number = the caller (who is calling). The frontend
@@ -401,18 +408,14 @@ async def _handle_unassigned(
                 finally:
                     await ari.ring_stop(channel_id)
                 if result == "answered":
+                    clog(logger, "default.answered", linkedid=lid, channel=channel_id)
                     await ari.hangup(channel_id)  # bridge ended -> end the call
                     return
-                logger.info(
-                    "default handling: operators did not answer (%s) for DID %s (linkedid=%s); "
-                    "-> voicemail", result, dialed, lid,
-                )
+                clog(logger, "default.no_answer", linkedid=lid, result=result, next="voicemail")
             else:
-                logger.info(
-                    "default handling: no operators available for DID %s (linkedid=%s); "
-                    "-> voicemail", dialed, lid,
-                )
+                clog(logger, "default.no_operators", linkedid=lid, next="voicemail")
 
+        clog(logger, "default.voicemail", linkedid=lid, channel=channel_id)
         await ari.voicemail(
             channel_id,
             greeting=settings.VOICEMAIL_GREETING,
