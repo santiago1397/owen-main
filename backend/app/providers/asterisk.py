@@ -18,14 +18,19 @@ Two locked design decisions live here:
   reconciler's Twilio-only `_is_inbound` guards against — but we solve it structurally
   here rather than reusing that Twilio-only rule).
 
-Requires `channelvars=Linkedid` in ari.conf so every channel event carries
-`channel.channelvars.Linkedid`; without it we cannot tell the entry leg from a secondary
-leg. (Asterisk sets a new channel's Linkedid to the Uniqueid of the first channel in the
-call, so the entry leg's own id equals the Linkedid.)
+Requires `channelvars=CHANNEL(linkedid)` in ari.conf so every channel event carries
+`channel.channelvars["CHANNEL(linkedid)"]`; without it we cannot tell the entry leg from a
+secondary leg. (Asterisk sets a new channel's Linkedid to the Uniqueid of the first channel
+in the call, so the entry leg's own id equals the Linkedid.) NOTE: `Linkedid` is not an
+Asterisk channel variable — that spelling exports an empty string; see `linkedid()`.
 """
 
 from datetime import datetime, timezone
 
+# Reuse the BulkVS E.164 normalizer rather than adding a third copy of it. providers.bulkvs is
+# deliberately import-light (stdlib + providers.base), so this keeps this module dependency-free
+# and unit-testable in a bare sandbox.
+from app.providers.bulkvs import _to_e164
 from app.providers.base import (
     STATUS_RANK,
     NormalizedCallEvent,
@@ -249,6 +254,15 @@ class AsteriskAdapter(ProviderAdapter):
         else:
             from_number = caller_number
             to_number = exten
+
+        # Normalize to E.164 before the projection keys on them. SIP carries whatever the
+        # carrier put in the R-URI / From, and BulkVS emits bare NANP digits ("16452516222")
+        # at least on its SMS side — `numbers.phone_number` is stored E.164, so an
+        # unnormalized DID silently matches nothing and the call loses its number and campaign.
+        # `_to_e164` returns non-numeric values (e.g. the "s" extension on an originated leg)
+        # unchanged, so nothing that isn't a phone number is mangled.
+        from_number = _to_e164(from_number) if from_number else from_number
+        to_number = _to_e164(to_number) if to_number else to_number
 
         return NormalizedCallEvent(
             provider_call_sid=lid,
