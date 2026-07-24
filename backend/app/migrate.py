@@ -33,6 +33,11 @@ def run_migrations() -> None:
             # for the rest of the process. Re-enable everything, then restore level/handler.
             for name in list(logging.Logger.manager.loggerDict):
                 logging.getLogger(name).disabled = False
-            logging.basicConfig(level=logging.INFO, force=True)
+            # Restore OUR logging config (timestamped format + LOG_LEVEL), not a bare
+            # basicConfig — alembic's fileConfig ran with force, so re-assert setup_logging()
+            # here or every post-migration line reverts to the default `LEVEL:name:msg` format.
+            from app.core.calllog import setup_logging
+
+            setup_logging()
     logger.info("migrations applied to head")
     engine.dispose()
