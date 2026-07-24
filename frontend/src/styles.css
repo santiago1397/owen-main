@@ -154,6 +154,27 @@ code.mono { background: var(--panel2); padding: 2px 6px; border-radius: 6px; fon
 .quo-ttime { color: var(--q-muted); font-size: 11px; white-space: nowrap; }
 .quo-unread { background: var(--q-blue); color: #fff; border-radius: 999px; min-width: 18px;
   height: 18px; display: grid; place-items: center; font-size: 11px; font-weight: 700; padding: 0 5px; }
+
+/* Right-click / long-press thread context menu (Quo-style) */
+.quo-menuscrim { position: fixed; inset: 0; z-index: 60; }
+.quo-menu { position: fixed; z-index: 61; min-width: 210px; padding: 5px;
+  background: var(--q-panel); border: 1px solid var(--q-border); border-radius: 12px;
+  box-shadow: 0 12px 32px rgba(0,0,0,.5); display: flex; flex-direction: column; }
+.quo-menuitem { display: flex; align-items: center; gap: 10px; width: 100%;
+  background: none; border: none; color: var(--q-text); cursor: pointer; text-align: left;
+  padding: 8px 10px; border-radius: 8px; font-size: 13px; }
+.quo-menuitem:hover { background: var(--q-panel2); }
+.quo-menuitem.danger { color: var(--danger); }
+.quo-menuitem svg { flex: 0 0 auto; color: inherit; }
+.quo-menusep { height: 1px; background: var(--q-border); margin: 5px 6px; }
+
+/* Undo toast for block/delete/restore */
+.quo-toast { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); z-index: 70;
+  display: flex; align-items: center; gap: 14px; padding: 10px 14px;
+  background: var(--q-panel2); color: var(--q-text); border: 1px solid var(--q-border);
+  border-radius: 10px; box-shadow: 0 8px 24px rgba(0,0,0,.45); font-size: 13px; }
+.quo-toastundo { background: none; border: none; color: var(--q-blue); font-weight: 700;
+  cursor: pointer; font-size: 13px; }
 .quo-convo { flex: 1; min-width: 0; display: flex; flex-direction: column; background: var(--q-bg); }
 .quo-chead { display: flex; align-items: center; gap: 10px; padding: 10px 16px;
   border-bottom: 1px solid var(--q-border); }

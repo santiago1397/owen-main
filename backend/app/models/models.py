@@ -317,6 +317,12 @@ class ContactThreadState(Base):
     )
     last_read_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Quo-style right-click actions. `deleted_at` soft-hides the thread but AUTO-REAPPEARS on
+    # activity newer than it (same derived pattern as closed_at). `blocked_at` hides the thread
+    # AND gates outbound (send + call refuse a blocked contact); it does NOT auto-reappear.
+    # Inbound is store-but-hide — ingestion still records the row, the thread just stays hidden.
+    blocked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )

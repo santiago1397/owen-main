@@ -92,6 +92,22 @@ def test_open_close_reopen():
           merge_threads([msg("a", 10), msg("a", 20)], [], {"a": (None, at(15))})[0].open)
 
 
+def test_blocked_and_deleted():
+    print("derived blocked / soft-deleted:")
+    rows = [msg("a", 10)]
+    check("no state => not blocked, not deleted",
+          not merge_threads(rows, [], {})[0].blocked
+          and not merge_threads(rows, [], {})[0].deleted)
+    check("blocked_at set => blocked (stays regardless of newer activity)",
+          merge_threads([msg("a", 10), msg("a", 20)], [], {"a": (None, None, at(5), None)})[0].blocked)
+    check("deleted_at after last activity => deleted",
+          merge_threads(rows, [], {"a": (None, None, None, at(15))})[0].deleted)
+    check("activity NEWER than delete => auto-reappears (not deleted)",
+          not merge_threads([msg("a", 10), msg("a", 20)], [], {"a": (None, None, None, at(15))})[0].deleted)
+    check("2-tuple state still works (back-compat)",
+          not merge_threads(rows, [], {"a": (at(5), None)})[0].blocked)
+
+
 def test_responded():
     print("derived responded:")
     check("last message inbound => unresponded",
@@ -134,6 +150,7 @@ if __name__ == "__main__":
     test_merge()
     test_unread_and_read()
     test_open_close_reopen()
+    test_blocked_and_deleted()
     test_responded()
     test_sms_resolution()
     test_call_resolution()

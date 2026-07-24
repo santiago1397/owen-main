@@ -43,7 +43,7 @@ from app.services.inbox_threads import (
     resolve_call_from,
     resolve_sms_from,
 )
-from app.services.messages import enqueue_outbound_message, get_optout_state
+from app.services.messages import enqueue_outbound_message, get_optout_state, is_contact_blocked
 from app.services.number_sync import is_carrier_active
 
 router = APIRouter(prefix="/api/inbox", tags=["inbox"])
@@ -155,7 +155,7 @@ async def list_threads(
         .all()
     )
     states = {
-        str(s.caller_id): (s.last_read_at, s.closed_at)
+        str(s.caller_id): (s.last_read_at, s.closed_at, s.blocked_at, s.deleted_at)
         for s in (await db.execute(select(ContactThreadState))).scalars().all()
     }
     threads = merge_threads([_Row(r) for r in msg_rows], [_Row(r) for r in call_rows], states)
@@ -192,6 +192,8 @@ async def list_threads(
                 "unread_count": t.unread_count,
                 "open": t.open,
                 "responded": t.responded,
+                "blocked": t.blocked,
+                "deleted": t.deleted,
                 "sticky_number": _did_out(t.sticky),
                 "call_from": _did_out(call_from),
                 "sms_from": _did_out(sms_from),
@@ -342,6 +344,46 @@ async def set_state(
         db, caller_id, closed_at=datetime.now(timezone.utc) if payload.closed else None
     )
     return {"ok": True, "closed": payload.closed}
+
+
+class BlockBody(BaseModel):
+    blocked: bool
+
+
+@router.post("/thread/{caller_id}/block")
+async def set_blocked(
+    caller_id: uuid.UUID,
+    payload: BlockBody,
+    _: User = Depends(current_user),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Block/unblock a contact. Blocking hides the thread (surfaced via the Blocked filter)
+    and makes outbound send + call refuse this contact; inbound stays store-but-hide. Does
+    NOT auto-reappear on new activity (unlike delete)."""
+    await _upsert_state(
+        db, caller_id, blocked_at=datetime.now(timezone.utc) if payload.blocked else None
+    )
+    return {"ok": True, "blocked": payload.blocked}
+
+
+class DeleteBody(BaseModel):
+    deleted: bool
+
+
+@router.post("/thread/{caller_id}/delete")
+async def set_deleted(
+    caller_id: uuid.UUID,
+    payload: DeleteBody,
+    _: User = Depends(current_user),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Soft-delete/restore a contact's thread. Deleting hides it (surfaced via the Deleted
+    filter) but AUTO-REAPPEARS on activity newer than the delete. No underlying message, call,
+    or recording is touched — attribution data stays intact."""
+    await _upsert_state(
+        db, caller_id, deleted_at=datetime.now(timezone.utc) if payload.deleted else None
+    )
+    return {"ok": True, "deleted": payload.deleted}
 
 
 # --- contact panel -----------------------------------------------------------------------
@@ -525,6 +567,9 @@ async def send(
     contact = _normalize_contact(payload.contact or "")
     if not contact:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "contact number is required")
+
+    if await is_contact_blocked(db, contact):
+        raise HTTPException(status.HTTP_409_CONFLICT, "this contact is blocked")
 
     number: Number | None = None
     via_fallback = False

@@ -228,6 +228,13 @@ async def outbound_call(
     if not body.callee_number.strip():
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "callee_number required")
 
+    # A contact blocked in the Inbox can never be called from OWEN (mirrors the send gate).
+    from app.providers.bulkvs import _to_e164
+    from app.services.messages import is_contact_blocked
+
+    if await is_contact_blocked(db, _to_e164(body.callee_number)):
+        raise HTTPException(status.HTTP_409_CONFLICT, "this contact is blocked")
+
     warnings = await _guardrail_warnings(db, body.callee_number)
 
     ari = get_ari_control()

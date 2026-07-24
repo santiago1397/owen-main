@@ -2,9 +2,13 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowLeft,
+  Ban,
   Check,
+  CheckCheck,
+  Copy,
   Headphones,
   Info,
+  Link as LinkIcon,
   MessageSquarePlus,
   Paperclip,
   Phone,
@@ -14,6 +18,7 @@ import {
   RotateCcw,
   SendHorizontal,
   Settings,
+  Trash2,
   X,
 } from "lucide-react";
 import { useSearchParams } from "react-router-dom";
@@ -43,6 +48,8 @@ type Thread = {
   unread_count: number;
   open: boolean;
   responded: boolean;
+  blocked: boolean;
+  deleted: boolean;
   sticky_number: DidOut;
   call_from: DidOut;
   sms_from: DidOut;
@@ -296,7 +303,135 @@ function ContactPanel({
 // --- main page ---------------------------------------------------------------------------
 
 type ListTab = "chats" | "calls";
-type OpenFilter = "open" | "all" | "closed";
+type OpenFilter = "open" | "all" | "closed" | "blocked" | "deleted";
+
+// --- right-click thread menu -------------------------------------------------------------
+
+type MenuState = { thread: Thread; x: number; y: number };
+type ToastState = { msg: string; undo?: () => void };
+
+function threadLink(callerId: string): string {
+  return `${window.location.origin}/inbox?c=${callerId}`;
+}
+
+// A plain-text/markdown export of a contact's timeline (Copy as markdown).
+function timelineMarkdown(t: Thread, detail: ThreadDetail): string {
+  const head = `# ${displayName(t)}${t.contact_number ? ` (${fmtPhone(t.contact_number)})` : ""}`;
+  const lines = (detail.items || []).map((it) => {
+    const when = it.at ? new Date(it.at).toLocaleString() : "";
+    const who = it.direction === "outbound" ? "You" : displayName(t);
+    if (it.type === "call") {
+      const dir = it.direction === "outbound" ? "Outgoing call" : "Incoming call";
+      return `- **${when}** — ${dir}${it.status ? ` (${it.status})` : ""}${
+        it.duration_seconds != null ? `, ${fmtDur(it.duration_seconds)}` : ""
+      }`;
+    }
+    return `- **${when}** — ${who}: ${it.body || "(no text)"}`;
+  });
+  return [head, "", ...lines].join("\n");
+}
+
+async function copyText(text: string): Promise<boolean> {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function ThreadMenu({
+  menu,
+  onClose,
+  onCall,
+  onAction,
+}: {
+  menu: MenuState;
+  onClose: () => void;
+  onCall: (t: Thread) => void;
+  onAction: (kind: string, t: Thread) => void;
+}) {
+  const t = menu.thread;
+  const ref = useRef<HTMLDivElement>(null);
+  // Keep the menu on-screen: clamp against the viewport once we know its size.
+  const [pos, setPos] = useState({ x: menu.x, y: menu.y });
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const r = el.getBoundingClientRect();
+    setPos({
+      x: Math.min(menu.x, window.innerWidth - r.width - 8),
+      y: Math.min(menu.y, window.innerHeight - r.height - 8),
+    });
+  }, [menu.x, menu.y]);
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  const item = (key: string, icon: JSX.Element, label: string, opts?: { danger?: boolean; run?: () => void }) => (
+    <button
+      className={"quo-menuitem" + (opts?.danger ? " danger" : "")}
+      onClick={() => {
+        onClose();
+        if (opts?.run) opts.run();
+        else onAction(key, t);
+      }}
+    >
+      {icon}
+      <span>{label}</span>
+    </button>
+  );
+
+  const name = displayName(t);
+  return (
+    <>
+      <div className="quo-menuscrim" onClick={onClose} onContextMenu={(e) => { e.preventDefault(); onClose(); }} />
+      <div ref={ref} className="quo-menu" style={{ left: pos.x, top: pos.y }} role="menu">
+        {t.call_from && item("call", <Phone size={15} />, `Call ${name}`, { run: () => onCall(t) })}
+        {t.open
+          ? item("done", <Check size={15} />, "Mark as done")
+          : item("reopen", <RotateCcw size={15} />, "Reopen")}
+        {t.unread_count > 0 && item("read", <CheckCheck size={15} />, "Mark as read")}
+        <div className="quo-menusep" />
+        {item("copylink", <LinkIcon size={15} />, "Copy link")}
+        {item("copymd", <Copy size={15} />, "Copy as markdown")}
+        <div className="quo-menusep" />
+        {t.blocked
+          ? item("unblock", <Ban size={15} />, `Unblock ${name}`)
+          : item("block", <Ban size={15} />, `Block ${name}`, { danger: true })}
+        {t.deleted
+          ? item("restore", <RotateCcw size={15} />, "Restore conversation")
+          : item("delete", <Trash2 size={15} />, "Delete conversation", { danger: true })}
+      </div>
+    </>
+  );
+}
+
+function Toast({ toast, onClose }: { toast: ToastState; onClose: () => void }) {
+  // Auto-dismiss after a few seconds; the undo action stays reachable until then.
+  useEffect(() => {
+    const id = window.setTimeout(onClose, 5000);
+    return () => window.clearTimeout(id);
+  }, [toast, onClose]);
+  return (
+    <div className="quo-toast">
+      <span>{toast.msg}</span>
+      {toast.undo && (
+        <button
+          className="quo-toastundo"
+          onClick={() => {
+            toast.undo?.();
+            onClose();
+          }}
+        >
+          Undo
+        </button>
+      )}
+    </div>
+  );
+}
 
 export default function Inbox() {
   const qc = useQueryClient();
@@ -327,6 +462,9 @@ export default function Inbox() {
   const [showNewChat, setShowNewChat] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [callNote, setCallNote] = useState<string | null>(null);
+  const [menu, setMenu] = useState<MenuState | null>(null);
+  const [toast, setToast] = useState<ToastState | null>(null);
+  const lpTimer = useRef<number | null>(null);
 
   const { data: threads } = useQuery<Thread[]>({
     queryKey: ["inboxThreads"],
@@ -341,13 +479,68 @@ export default function Inbox() {
   const active = (threads || []).find((t) => t.caller_id === selected) || null;
 
   const filtered = useMemo(() => {
-    let list = threads || [];
-    if (openFilter === "open") list = list.filter((t) => t.open);
-    if (openFilter === "closed") list = list.filter((t) => !t.open);
-    if (unreadOnly) list = list.filter((t) => t.unread_count > 0);
-    if (unrespondedOnly) list = list.filter((t) => !t.responded);
-    return list;
+    const list = threads || [];
+    // The Blocked/Deleted views are dedicated buckets — nothing else applies.
+    if (openFilter === "blocked") return list.filter((t) => t.blocked);
+    if (openFilter === "deleted") return list.filter((t) => t.deleted && !t.blocked);
+    // Every normal view (Open/All/Closed) hides blocked AND deleted threads.
+    let out = list.filter((t) => !t.blocked && !t.deleted);
+    if (openFilter === "open") out = out.filter((t) => t.open);
+    if (openFilter === "closed") out = out.filter((t) => !t.open);
+    if (unreadOnly) out = out.filter((t) => t.unread_count > 0);
+    if (unrespondedOnly) out = out.filter((t) => !t.responded);
+    return out;
   }, [threads, openFilter, unreadOnly, unrespondedOnly]);
+
+  // One place every menu action runs: mutate, refresh the list, and (for the reversible ones)
+  // offer an Undo toast. Block/Delete confirm first — they also affect future inbound.
+  const refresh = () => qc.invalidateQueries({ queryKey: ["inboxThreads"] });
+  const runAction = async (kind: string, t: Thread) => {
+    const name = displayName(t);
+    switch (kind) {
+      case "done":
+      case "reopen":
+        await api.inboxSetClosed(t.caller_id, kind === "done");
+        refresh();
+        break;
+      case "read":
+        await api.inboxMarkRead(t.caller_id);
+        refresh();
+        break;
+      case "copylink":
+        setToast({ msg: (await copyText(threadLink(t.caller_id))) ? "Link copied" : "Copy failed" });
+        break;
+      case "copymd": {
+        const detail = (await api.inboxThread(t.caller_id)) as ThreadDetail;
+        setToast({ msg: (await copyText(timelineMarkdown(t, detail))) ? "Copied as markdown" : "Copy failed" });
+        break;
+      }
+      case "block":
+        if (!window.confirm(`Block ${name}? You won't be able to call or text them, and their messages will be hidden.`)) return;
+        await api.inboxSetBlocked(t.caller_id, true);
+        if (selected === t.caller_id) setSelected(null);
+        refresh();
+        setToast({ msg: `${name} blocked`, undo: () => api.inboxSetBlocked(t.caller_id, false).then(refresh) });
+        break;
+      case "unblock":
+        await api.inboxSetBlocked(t.caller_id, false);
+        refresh();
+        setToast({ msg: `${name} unblocked`, undo: () => api.inboxSetBlocked(t.caller_id, true).then(refresh) });
+        break;
+      case "delete":
+        if (!window.confirm(`Delete this conversation with ${name}? It will be hidden but reappears if they contact you again.`)) return;
+        await api.inboxSetDeleted(t.caller_id, true);
+        if (selected === t.caller_id) setSelected(null);
+        refresh();
+        setToast({ msg: "Conversation deleted", undo: () => api.inboxSetDeleted(t.caller_id, false).then(refresh) });
+        break;
+      case "restore":
+        await api.inboxSetDeleted(t.caller_id, false);
+        refresh();
+        setToast({ msg: "Conversation restored", undo: () => api.inboxSetDeleted(t.caller_id, true).then(refresh) });
+        break;
+    }
+  };
 
   const placeCall = async (t: Thread) => {
     const from = t.call_from?.phone_number;
@@ -394,6 +587,8 @@ export default function Inbox() {
                 <option value="open">Open</option>
                 <option value="all">All</option>
                 <option value="closed">Closed</option>
+                <option value="blocked">Blocked</option>
+                <option value="deleted">Deleted</option>
               </select>
               <button className={"quo-pill" + (unreadOnly ? " on" : "")}
                       onClick={() => setUnreadOnly((v) => !v)}>Unread</button>
@@ -404,10 +599,27 @@ export default function Inbox() {
               {filtered.map((t) => (
                 <div key={t.caller_id}
                      className={"quo-thread" + (t.caller_id === selected ? " sel" : "")}
-                     onClick={() => setSelected(t.caller_id)}>
+                     onClick={() => setSelected(t.caller_id)}
+                     onContextMenu={(e) => {
+                       e.preventDefault();
+                       setMenu({ thread: t, x: e.clientX, y: e.clientY });
+                     }}
+                     onTouchStart={(e) => {
+                       // Long-press (~500ms) is the touch equivalent of right-click.
+                       const touch = e.touches[0];
+                       lpTimer.current = window.setTimeout(
+                         () => setMenu({ thread: t, x: touch.clientX, y: touch.clientY }),
+                         500
+                       );
+                     }}
+                     onTouchEnd={() => { if (lpTimer.current) window.clearTimeout(lpTimer.current); }}
+                     onTouchMove={() => { if (lpTimer.current) window.clearTimeout(lpTimer.current); }}>
                   <Avatar name={t.contact_name} number={t.contact_number} />
                   <div className="quo-tmain">
-                    <div className="quo-tname">{displayName(t)}</div>
+                    <div className="quo-tname">
+                      {t.blocked && <Ban size={12} style={{ marginRight: 4, verticalAlign: "-1px" }} />}
+                      {displayName(t)}
+                    </div>
                     <div className="quo-tprev">
                       {t.last_kind === "call" || t.last_direction !== "outbound" ? "" : "You: "}
                       {t.last_preview || "(no text)"}
@@ -475,6 +687,15 @@ export default function Inbox() {
       {showSettings && settings && (
         <SettingsModal settings={settings} onClose={() => setShowSettings(false)} />
       )}
+      {menu && (
+        <ThreadMenu
+          menu={menu}
+          onClose={() => setMenu(null)}
+          onCall={(t) => void placeCall(t)}
+          onAction={(kind, t) => void runAction(kind, t)}
+        />
+      )}
+      {toast && <Toast toast={toast} onClose={() => setToast(null)} />}
     </div>
   );
 }

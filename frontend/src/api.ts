@@ -213,6 +213,18 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ closed }),
     }),
+  inboxSetBlocked: (callerId: string, blocked: boolean) =>
+    request(`/api/inbox/thread/${callerId}/block`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ blocked }),
+    }),
+  inboxSetDeleted: (callerId: string, deleted: boolean) =>
+    request(`/api/inbox/thread/${callerId}/delete`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ deleted }),
+    }),
   inboxUpdateContact: (callerId: string, body: { name?: string | null; company?: string | null; role?: string | null }) =>
     request(`/api/inbox/contacts/${callerId}`, {
       method: "PATCH",

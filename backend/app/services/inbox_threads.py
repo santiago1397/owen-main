@@ -56,6 +56,8 @@ class ContactThread:
     unread_count: int = 0
     open: bool = True
     responded: bool = True
+    blocked: bool = False
+    deleted: bool = False
     sticky: DidRef = field(default_factory=DidRef)
 
 
@@ -67,15 +69,24 @@ def _call_preview(direction: str | None, status: str | None) -> str:
     return "↙ Call"
 
 
+def _state(states: dict, cid: str) -> tuple:
+    """Read a caller's state tuple, tolerating 2- to 4-length forms so older callers/tests
+    that pass only (last_read_at, closed_at) keep working: returns
+    (last_read_at, closed_at, blocked_at, deleted_at) padded with None."""
+    st = states.get(cid) or ()
+    return tuple(st) + (None,) * (4 - len(st))
+
+
 def merge_threads(
     message_rows,
     call_rows,
-    states: dict[str, tuple[datetime | None, datetime | None]] | None = None,
+    states: dict[str, tuple] | None = None,
 ) -> list[ContactThread]:
     """Fold message + call rows (any order) into per-contact summaries, newest-first.
 
-    `states` maps caller_id -> (last_read_at, closed_at); missing key = never read/closed.
-    Rows without a caller_id are skipped — a contact identity is the thread key.
+    `states` maps caller_id -> (last_read_at, closed_at[, blocked_at, deleted_at]); missing
+    key = never read/closed/blocked/deleted. Rows without a caller_id are skipped — a contact
+    identity is the thread key.
     """
     states = states or {}
     threads: dict[str, ContactThread] = {}
@@ -111,7 +122,7 @@ def merge_threads(
         prev = newest_msg.get(cid)
         if at is not None and (prev is None or prev[0] is None or at > prev[0]):
             newest_msg[cid] = (at, getattr(r, "direction", None))
-        last_read = states.get(cid, (None, None))[0]
+        last_read = _state(states, cid)[0]
         if getattr(r, "direction", None) != "outbound" and (
             last_read is None or (at is not None and at > last_read)
         ):
@@ -124,16 +135,21 @@ def merge_threads(
         at = getattr(r, "started_at", None)
         t = bump(cid, r, "call", at, _call_preview(getattr(r, "direction", None), getattr(r, "status", None)))
         t.call_count += 1
-        last_read = states.get(cid, (None, None))[0]
+        last_read = _state(states, cid)[0]
         if getattr(r, "direction", None) != "outbound" and (
             last_read is None or (at is not None and at > last_read)
         ):
             t.unread_count += 1
 
     for cid, t in threads.items():
-        _, closed_at = states.get(cid, (None, None))
+        _, closed_at, blocked_at, deleted_at = _state(states, cid)
         # auto-reopen: activity newer than the close wins
         t.open = closed_at is None or (t.last_at is not None and t.last_at > closed_at)
+        # block persists regardless of new activity; delete AUTO-REAPPEARS on newer activity.
+        t.blocked = blocked_at is not None
+        t.deleted = deleted_at is not None and not (
+            t.last_at is not None and t.last_at > deleted_at
+        )
         nm = newest_msg.get(cid)
         t.responded = nm is None or nm[1] == "outbound"
 

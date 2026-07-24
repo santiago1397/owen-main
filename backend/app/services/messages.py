@@ -14,12 +14,28 @@ from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import Message, Number, SmsOptOut
+from app.models import Caller, ContactThreadState, Message, Number, SmsOptOut
 from app.providers.base import NormalizedMessageEvent
 from app.services import sms
 from app.services.ingestion import _get_or_create_caller, _get_or_create_provider
 
 logger = logging.getLogger("ingestion")
+
+
+async def is_contact_blocked(db: AsyncSession, contact_e164: str) -> bool:
+    """True if the contact with this E.164 number is blocked in the Inbox (a right-click
+    Block set contact_thread_state.blocked_at). Gates outbound send AND outbound call, so a
+    blocked party can never be contacted from OWEN. Inbound stays store-but-hide."""
+    if not contact_e164:
+        return False
+    blocked_at = (
+        await db.execute(
+            select(ContactThreadState.blocked_at)
+            .join(Caller, ContactThreadState.caller_id == Caller.id)
+            .where(Caller.phone_number == contact_e164)
+        )
+    ).scalar_one_or_none()
+    return blocked_at is not None
 
 
 async def ingest_message_event(
