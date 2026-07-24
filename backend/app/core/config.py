@@ -346,10 +346,24 @@ class Settings(BaseSettings):
     def ari_ws_url(self) -> str:
         """ARI events WebSocket, subscribed to our Stasis app. Creds ride in the query
         string (api_key=user:pass) since ARI's WS accepts no auth header — safe because
-        the endpoint is loopback/gateway-only and firewalled (never public)."""
+        the endpoint is loopback/gateway-only and firewalled (never public).
+
+        `subscribeAll=true` is REQUIRED for terminal call status. Without it an app only
+        receives events for channels currently IN Stasis: hanging up sends StasisEnd (which
+        is deliberately non-terminal — the channel may still be live) and the implicit
+        subscription ends, so the ChannelDestroyed that actually carries the Q.850 hangup
+        cause is never delivered. Every call then sat at "in-progress" forever. Verified
+        against a live Asterisk: a second WS with subscribeAll saw ChannelDestroyed for the
+        same entry channel the app's own WS never received.
+
+        The extra global events are cheap and safe: AsteriskEventRouter.route drops anything
+        that doesn't map to a status, isn't the entry channel (id == Linkedid), or is a
+        flow-dial leg, and dedups on "{Linkedid}:{status}".
+        """
         return (
             f"ws://{self.ARI_HOST}:{self.ARI_PORT}/ari/events"
-            f"?app={self.ARI_APP}&api_key={self.ARI_USERNAME}:{self.ARI_PASSWORD}"
+            f"?app={self.ARI_APP}&subscribeAll=true"
+            f"&api_key={self.ARI_USERNAME}:{self.ARI_PASSWORD}"
         )
 
     def twilio_accounts(self) -> list[TwilioAccount]:
