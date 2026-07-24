@@ -235,10 +235,18 @@ export function useSoftphone() {
 
   const hangup = useCallback(async () => {
     const user = userRef.current;
-    if (!user) return;
-    await user.hangup();
-    clearActiveCall();
-    patch({ status: idleStatus(), incoming: null, peer: null, answeredAt: null, muted: false });
+    // Return to idle NO MATTER WHAT. SimpleUser.hangup() rejects when the session is already
+    // tearing down (common for a server-bridged leg) — if that reject escaped, the status patch
+    // never ran and the in-call panel stayed open forever. The operator's intent is to leave, so
+    // always clear the UI; a failed BYE means the session was ending anyway.
+    try {
+      await user?.hangup();
+    } catch {
+      /* session already gone / mid-teardown — fall through to reset */
+    } finally {
+      clearActiveCall();
+      patch({ status: idleStatus(), incoming: null, peer: null, answeredAt: null, muted: false });
+    }
   }, []);
 
   // Ring the operator's chosen ringtone device while an incoming call is pending; stop the

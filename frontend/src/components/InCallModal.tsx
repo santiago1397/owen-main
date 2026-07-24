@@ -26,6 +26,7 @@ import {
 } from "lucide-react";
 import { api } from "../api";
 import { setActiveCall, useActiveCall } from "../lib/activeCall";
+import { playDtmfTone } from "../lib/dtmfTone";
 import {
   applySink,
   getAudioPref,
@@ -134,6 +135,7 @@ export default function InCallModal() {
 
   const [xferKind, setXferKind] = useState<TransferKind>("did");
   const [xferTarget, setXferTarget] = useState("");
+  const [entry, setEntry] = useState(""); // digits pressed on the keypad this call
 
   const rootRef = useRef<HTMLDivElement>(null);
   const [pos, setPos] = useState<{ x: number; y: number } | null>(() => readPos());
@@ -160,8 +162,20 @@ export default function InCallModal() {
       setPeerName(null);
       setLineLabel(null);
       setXferTarget("");
+      setEntry("");
     }
   }, [inCall]);
+
+  // A keypad press: transmit the tone down the line (IVR), play it locally so the operator
+  // hears the press, and append it to the on-screen readout.
+  const pressKey = useCallback(
+    (digit: string) => {
+      void sendDtmf(digit);
+      playDtmfTone(digit);
+      setEntry((e) => (e + digit).slice(-32));
+    },
+    [sendDtmf],
+  );
 
   // Who am I (the "You" participant row). Fetched once; email is all the backend exposes.
   useEffect(() => {
@@ -430,11 +444,26 @@ export default function InCallModal() {
               <X size={16} />
             </button>
           </div>
+          {/* Readout of the digits pressed this call. Tap to clear. */}
+          <div
+            onClick={() => setEntry("")}
+            title={entry ? "Clear" : undefined}
+            style={{
+              minHeight: 34, marginBottom: 10, padding: "6px 10px", borderRadius: 8,
+              background: "var(--panel2)", border: "1px solid var(--border)",
+              display: "flex", alignItems: "center", justifyContent: "flex-end",
+              fontSize: 20, fontWeight: 600, letterSpacing: 1, overflow: "hidden",
+              whiteSpace: "nowrap", direction: "rtl", cursor: entry ? "pointer" : "default",
+              color: entry ? "var(--text)" : "var(--muted)",
+            }}
+          >
+            {entry || "—"}
+          </div>
           <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 8, justifyItems: "center" }}>
             {KEYS.map((k) => (
               <button
                 key={k.d}
-                onClick={() => void sendDtmf(k.d)}
+                onClick={() => pressKey(k.d)}
                 style={{
                   width: 60, height: 60, borderRadius: "50%", background: "var(--panel2)",
                   border: "1px solid var(--border)", display: "flex", flexDirection: "column",
