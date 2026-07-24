@@ -238,12 +238,23 @@ the host cert), and `systemctl enable --now coturn`.
    ```bash
    set -a; . /opt/santiagoproperties/owen-main/.env.prod; set +a
    for f in pjsip ari http rtp extensions cdr cdr_pgsql; do
-     envsubst < asterisk/$f.conf > /tmp/$f.conf
+     asterisk/render.sh $f > /tmp/$f.conf
    done
    rsync -a /tmp/{pjsip,ari,http,rtp,extensions,cdr,cdr_pgsql}.conf /etc/asterisk/
-   envsubst < asterisk/turnserver.conf > /tmp/turnserver.conf
+   asterisk/render.sh turnserver > /tmp/turnserver.conf
    rsync -a /tmp/turnserver.conf /etc/coturn/turnserver.conf
    ```
+
+   > **Use `render.sh`, never bare `envsubst`.** A bare `envsubst` substitutes *every*
+   > `${...}` it can resolve, including Asterisk's own runtime variables — it blanked
+   > `${EXTEN}` and `${BULKVS_FROM}` in the deployed dialplan, leaving `Dial(PJSIP/@bulkvs,60)`
+   > and `Set(CALLERID(num)=)`. `render.sh` passes an explicit allowlist so runtime variables
+   > survive verbatim. Add any new `${VAR}` to its `DEPLOY_VARS`.
+
+   > **`pjsip.conf` is NOT safe to blind-rsync.** Per-operator endpoint/aor/auth trios are
+   > appended by hand to the *deployed* file (see the operator section below), so overwriting
+   > it deletes every operator's softphone endpoint. Re-render it only when you intend to,
+   > and re-append the operator trios afterwards (`pjsip show endpoints` to confirm).
 
 3. **Targeted reload — never restart** (a restart drops in-flight calls):
    ```bash
