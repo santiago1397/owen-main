@@ -1,5 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo, useRef, useState } from "react";
+import type { ChangeEvent } from "react";
 import {
   ArrowLeft,
   Ban,
@@ -11,9 +12,12 @@ import {
   Link as LinkIcon,
   MessageSquarePlus,
   Paperclip,
+  Pause,
   Phone,
   PhoneIncoming,
+  PhoneMissed,
   PhoneOutgoing,
+  Play,
   Plus,
   RotateCcw,
   SendHorizontal,
@@ -120,19 +124,171 @@ function fmtDur(s: number | null | undefined): string {
   const m = Math.floor(s / 60);
   return m > 0 ? `${m}m ${s % 60}s` : `${s}s`;
 }
+function fmtClock(s: number | null | undefined): string {
+  if (s == null || isNaN(s)) return "0:00";
+  const m = Math.floor(s / 60);
+  const sec = Math.floor(s % 60);
+  return `${m}:${sec.toString().padStart(2, "0")}`;
+}
 
-function RecordingPlayer({ recordingId }: { recordingId: string }) {
+// Custom dark audio player (replaces the native white <audio controls>). The signed recording
+// URL is fetched lazily — only on the first play click — so opening a call-heavy thread costs
+// no network until you actually listen. Controls: play/pause, scrubber, time, speed toggle.
+const RATES = [1, 1.5, 2];
+function AudioPlayer({ recordingId }: { recordingId: string }) {
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const wantPlay = useRef(false);
   const [url, setUrl] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [playing, setPlaying] = useState(false);
+  const [cur, setCur] = useState(0);
+  const [dur, setDur] = useState(0);
+  const [rate, setRate] = useState(1);
+
+  const load = () => {
+    if (url || loading) return;
+    setLoading(true);
+    api
+      .playUrl(recordingId)
+      .then((r: any) => setUrl(API_BASE + r.url))
+      .catch(() => {
+        setLoading(false);
+        wantPlay.current = false;
+      });
+  };
+
+  // Once the URL first resolves, honour a play that was requested before it was ready.
   useEffect(() => {
-    api.playUrl(recordingId).then((r: any) => setUrl(API_BASE + r.url)).catch(() => setUrl(null));
-  }, [recordingId]);
-  if (!url) return <span className="muted" style={{ fontSize: 11 }}>loading…</span>;
-  return <audio controls src={url} style={{ height: 28, maxWidth: 220 }} />;
+    if (url && wantPlay.current && audioRef.current) {
+      audioRef.current.playbackRate = rate;
+      audioRef.current.play().catch(() => {});
+      wantPlay.current = false;
+    }
+  }, [url]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const toggle = () => {
+    const a = audioRef.current;
+    if (playing) {
+      a?.pause();
+      return;
+    }
+    if (!url) {
+      wantPlay.current = true;
+      load();
+      return;
+    }
+    a?.play().catch(() => {});
+  };
+
+  const cycleRate = () => {
+    const next = RATES[(RATES.indexOf(rate) + 1) % RATES.length];
+    setRate(next);
+    if (audioRef.current) audioRef.current.playbackRate = next;
+  };
+
+  const onSeek = (e: ChangeEvent<HTMLInputElement>) => {
+    const a = audioRef.current;
+    if (!a || !dur) return;
+    a.currentTime = (Number(e.target.value) / 1000) * dur;
+    setCur(a.currentTime);
+  };
+
+  const pct = dur ? (cur / dur) * 100 : 0;
+  return (
+    <div className="quo-player">
+      <button className="quo-playbtn" onClick={toggle} disabled={loading && !url} aria-label={playing ? "Pause" : "Play"}>
+        {loading && !url ? (
+          <span className="quo-spin" />
+        ) : playing ? (
+          <Pause size={14} fill="currentColor" />
+        ) : (
+          <Play size={14} fill="currentColor" />
+        )}
+      </button>
+      <input
+        className="quo-seek"
+        type="range"
+        min={0}
+        max={1000}
+        value={dur ? (cur / dur) * 1000 : 0}
+        onChange={onSeek}
+        style={{ background: `linear-gradient(90deg, #fff ${pct}%, rgba(255,255,255,.18) ${pct}%)` }}
+      />
+      <span className="quo-time">
+        {fmtClock(cur)}
+        {dur ? ` / ${fmtClock(dur)}` : ""}
+      </span>
+      <button className="quo-rate" onClick={cycleRate}>{rate}x</button>
+      {url && (
+        <audio
+          ref={audioRef}
+          src={url}
+          preload="metadata"
+          onLoadedMetadata={(e) => setDur(e.currentTarget.duration || 0)}
+          onTimeUpdate={(e) => setCur(e.currentTarget.currentTime || 0)}
+          onPlay={() => setPlaying(true)}
+          onPause={() => setPlaying(false)}
+          onEnded={() => {
+            setPlaying(false);
+            setCur(0);
+          }}
+        />
+      )}
+    </div>
+  );
 }
 
 // --- conversation timeline ---------------------------------------------------------------
 
-function Timeline({ items }: { items: TimelineItem[] }) {
+// Map a call row to its Quo card presentation. Tone drives the coloured status circle:
+// gray = inbound answered, blue = outbound answered, red = ANY unanswered call (either
+// direction). We only have Twilio-style terminal statuses (completed/no-answer/busy/failed/
+// canceled), so "missed"/"rejected" is inferred as "not answered".
+type Tone = "gray" | "blue" | "red";
+const OUT_REASON: Record<string, string> = {
+  "no-answer": "No answer",
+  busy: "Busy",
+  failed: "Failed",
+  canceled: "Canceled",
+};
+function callPresent(it: TimelineItem): { tone: Tone; title: string; subtitle: string; icon: "phone" | "missed" | "outgoing" } {
+  const out = it.direction === "outbound";
+  const answered = it.status === "completed" || (it.duration_seconds || 0) > 0;
+  const dur = it.duration_seconds != null ? fmtClock(it.duration_seconds) : "";
+  if (answered) {
+    return {
+      tone: out ? "blue" : "gray",
+      title: "Call ended",
+      subtitle: (out ? "You called" : "Answered") + (dur ? ` · ${dur}` : ""),
+      icon: "phone",
+    };
+  }
+  if (out) {
+    return { tone: "red", title: "Outgoing call", subtitle: OUT_REASON[it.status || ""] || "No answer", icon: "outgoing" };
+  }
+  return { tone: "red", title: "Missed call", subtitle: it.status === "failed" ? "Call failed" : "You missed the call", icon: "missed" };
+}
+
+function CallCard({ it }: { it: TimelineItem }) {
+  const p = callPresent(it);
+  const Icon = p.icon === "missed" ? PhoneMissed : p.icon === "outgoing" ? PhoneOutgoing : Phone;
+  return (
+    <div className="quo-call">
+      <div className="quo-callhead">
+        <div className={"quo-callicon " + p.tone}>
+          <Icon size={16} />
+        </div>
+        <div className="quo-callmeta">
+          <div className="quo-calltitle">{p.title}</div>
+          <div className="quo-callsub">{p.subtitle}</div>
+        </div>
+      </div>
+      {it.recording_id && <AudioPlayer recordingId={it.recording_id} />}
+    </div>
+  );
+}
+
+function Timeline({ items, contact }: { items: TimelineItem[]; contact: ThreadDetail["contact"] | null }) {
   const endRef = useRef<HTMLDivElement>(null);
   const lastId = items.length ? items[items.length - 1].id : null;
   useEffect(() => {
@@ -142,48 +298,59 @@ function Timeline({ items }: { items: TimelineItem[] }) {
   let lastDay = "";
   return (
     <div className="quo-timeline">
-      {items.map((it) => {
+      {items.map((it, i) => {
         const day = it.at ? dayLabel(it.at) : "";
         const divider = day && day !== lastDay;
         lastDay = day || lastDay;
         const time = it.at
           ? new Date(it.at).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })
           : "";
+        const out = it.direction === "outbound";
+
+        // Consecutive same-direction items form a "run": the sender name shows once at the top,
+        // the avatar once at the bottom — Quo-style grouping. A day divider always breaks a run.
+        const prev = items[i - 1];
+        const next = items[i + 1];
+        const nextDay = next?.at ? dayLabel(next.at) : "";
+        const runStart = divider || !prev || prev.direction !== it.direction;
+        const runEnd = !next || next.direction !== it.direction || (nextDay && nextDay !== day);
+        const name = out ? "Owen" : contact?.name || fmtPhone(contact?.phone_number || null) || "Contact";
+
         return (
           <div key={`${it.type}-${it.id}`} style={{ display: "contents" }}>
             {divider && <div className="quo-day">{day}</div>}
-            {it.type === "call" ? (
-              <div className="quo-callchip">
-                <span style={{ display: "inline-flex", alignItems: "center" }}>
-                  {it.direction === "outbound" ? <PhoneOutgoing size={13} /> : <PhoneIncoming size={13} />}
-                </span>
-                <span>
-                  {it.direction === "outbound" ? "Outgoing call" : "Incoming call"}
-                  {it.status && it.status !== "completed" ? ` · ${it.status}` : ""}
-                  {it.duration_seconds != null ? ` · ${fmtDur(it.duration_seconds)}` : ""}
-                </span>
-                {it.recording_id && <RecordingPlayer recordingId={it.recording_id} />}
-                <span style={{ fontSize: 10.5 }}>{time}</span>
+            <div className={"quo-row " + (out ? "out" : "in") + (runStart ? " runstart" : "")}>
+              <div className="quo-rowava">
+                {runEnd && <Avatar name={out ? "Owen" : contact?.name || null} number={out ? null : contact?.phone_number || null} size={28} />}
               </div>
-            ) : (
-              <div className={"quo-msgrow " + (it.direction === "outbound" ? "out" : "in")}>
-                <div className="quo-bubble">
-                  {it.body}
-                  {(it.num_media || 0) > 0 &&
-                    (it.media_urls || []).map((u, i) => (
-                      <a key={i} href={u} target="_blank" rel="noreferrer"
-                         style={{ display: "block", fontSize: 11, color: "inherit", textDecoration: "underline" }}>
-                        <Paperclip size={11} style={{ verticalAlign: "-1px", marginRight: 3 }} />
-                        media {i + 1}
-                      </a>
-                    ))}
-                </div>
-                <div className="quo-msgmeta">
-                  {time}
-                  {it.direction === "outbound" && it.status ? ` · ${it.status}` : ""}
-                </div>
+              <div className="quo-rowbody">
+                {runStart && <div className="quo-rowname">{name}</div>}
+                {it.type === "call" ? (
+                  <>
+                    <CallCard it={it} />
+                    <div className="quo-msgmeta">{time}</div>
+                  </>
+                ) : (
+                  <>
+                    <div className="quo-bubble">
+                      {it.body}
+                      {(it.num_media || 0) > 0 &&
+                        (it.media_urls || []).map((u, k) => (
+                          <a key={k} href={u} target="_blank" rel="noreferrer"
+                             style={{ display: "block", fontSize: 11, color: "inherit", textDecoration: "underline" }}>
+                            <Paperclip size={11} style={{ verticalAlign: "-1px", marginRight: 3 }} />
+                            media {k + 1}
+                          </a>
+                        ))}
+                    </div>
+                    <div className="quo-msgmeta">
+                      {time}
+                      {out && it.status ? ` · ${it.status}` : ""}
+                    </div>
+                  </>
+                )}
               </div>
-            )}
+            </div>
           </div>
         );
       })}
@@ -789,7 +956,7 @@ function Conversation({
             </button>
           </div>
 
-          <Timeline items={detail?.items || []} />
+          <Timeline items={detail?.items || []} contact={detail?.contact || null} />
 
           <div className="quo-composer">
             <div className="box">
@@ -882,7 +1049,7 @@ function CallLog({ onOpenThread }: { onOpenThread: (phone: string) => void }) {
           {expanded === c.id && (
             <div style={{ padding: "6px 14px 12px", borderBottom: "1px solid var(--q-border)" }}>
               {callDetail?.recordings?.length ? (
-                <RecordingPlayer recordingId={callDetail.recordings[0].id} />
+                <AudioPlayer recordingId={callDetail.recordings[0].id} />
               ) : (
                 <span className="muted" style={{ fontSize: 11.5 }}>No recording.</span>
               )}
