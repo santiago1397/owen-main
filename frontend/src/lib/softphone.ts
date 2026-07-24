@@ -44,6 +44,13 @@ export type SoftphoneState = {
   available: boolean;
   error: string | null;
   incoming: IncomingInfo | null;
+  // The other party on the current call (their number), captured off the INVITE. For an
+  // inbound call that's the caller; for our own outbound leg it's the callee, since the
+  // backend rings us first and stamps that leg's caller-ID with the number we dialed.
+  peer: string | null;
+  // epoch ms the call was answered — drives the in-call duration timer. Null when not in a call.
+  answeredAt: number | null;
+  muted: boolean;
 };
 
 // The <audio> element the remote (caller) audio is routed into. Created once, lazily.
@@ -71,8 +78,19 @@ export function useSoftphone() {
     available: false,
     error: null,
     incoming: null,
+    peer: null,
+    answeredAt: null,
+    muted: false,
   });
   const userRef = useRef<Web.SimpleUser | null>(null);
+
+  // Mirrors state.available for the SIP.js delegate callbacks. Those close over the render in
+  // which connect() ran — where `available` is still FALSE, because it only flips to true after
+  // register() succeeds. Reading state.available there made every call end resolve to "offline"
+  // even while the operator was still registered, which also HID the "Hang up" button (it only
+  // renders for in-call/ringing). A ref is always current, so the delegate reads the truth.
+  const availableRef = useRef(false);
+  const idleStatus = (): SoftphoneStatus => (availableRef.current ? "available" : "offline");
 
   const patch = (p: Partial<SoftphoneState>) => setState((s) => ({ ...s, ...p }));
 
@@ -124,19 +142,31 @@ export function useSoftphone() {
             if (consumeOutboundIntent()) {
               try {
                 await userRef.current?.answer();
-                patch({ status: "in-call", incoming: null });
+                patch({
+                  status: "in-call",
+                  incoming: null,
+                  peer: caller,
+                  answeredAt: Date.now(),
+                  muted: false,
+                });
                 return;
               } catch {
                 /* fall through to the normal incoming handling */
               }
             }
-            patch({ status: "ringing", incoming: { caller, dialed } });
+            patch({ status: "ringing", incoming: { caller, dialed }, peer: caller });
           },
           onCallHangup: () => {
-            patch({ status: state.available ? "available" : "offline", incoming: null });
+            patch({
+              status: idleStatus(),
+              incoming: null,
+              peer: null,
+              answeredAt: null,
+              muted: false,
+            });
           },
           onCallAnswered: () => {
-            patch({ status: "in-call" });
+            patch({ status: "in-call", incoming: null, answeredAt: Date.now(), muted: false });
           },
         },
       };
@@ -144,12 +174,14 @@ export function useSoftphone() {
       userRef.current = user;
       await user.connect();
       await user.register();
+      availableRef.current = true;
       patch({ status: "available", available: true });
     } catch (e: any) {
       userRef.current = null;
+      availableRef.current = false;
       patch({ status: "offline", available: false, error: String(e?.message || e) });
     }
-  }, [state.available]);
+  }, []);
 
   const disconnect = useCallback(async () => {
     const user = userRef.current;
@@ -162,7 +194,8 @@ export function useSoftphone() {
     } catch {
       /* best-effort teardown */
     }
-    patch({ status: "offline", available: false });
+    availableRef.current = false;
+    patch({ status: "offline", available: false, peer: null, answeredAt: null, muted: false });
   }, []);
 
   const setAvailable = useCallback(
@@ -177,7 +210,7 @@ export function useSoftphone() {
     const user = userRef.current;
     if (!user) return;
     await user.answer();
-    patch({ status: "in-call", incoming: null });
+    patch({ status: "in-call", incoming: null, answeredAt: Date.now(), muted: false });
   }, []);
 
   const decline = useCallback(async () => {
@@ -190,15 +223,15 @@ export function useSoftphone() {
     } catch {
       /* no pending invite */
     }
-    patch({ status: state.available ? "available" : "offline", incoming: null });
-  }, [state.available]);
+    patch({ status: idleStatus(), incoming: null, peer: null, answeredAt: null, muted: false });
+  }, []);
 
   const hangup = useCallback(async () => {
     const user = userRef.current;
     if (!user) return;
     await user.hangup();
-    patch({ status: state.available ? "available" : "offline", incoming: null });
-  }, [state.available]);
+    patch({ status: idleStatus(), incoming: null, peer: null, answeredAt: null, muted: false });
+  }, []);
 
   // Ring the operator's chosen ringtone device while an incoming call is pending; stop the
   // moment it's answered, hung up, or the phone goes offline.
@@ -216,7 +249,34 @@ export function useSoftphone() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  return { state, setAvailable, answer, decline, hangup };
+  // Mic mute for the live call. SimpleUser.mute()/unmute() just disable the local audio track,
+  // so the call stays up and the far end simply hears silence.
+  const toggleMute = useCallback(() => {
+    const user = userRef.current;
+    if (!user) return;
+    setState((s) => {
+      try {
+        if (s.muted) user.unmute();
+        else user.mute();
+      } catch {
+        return s; // no active session — leave the flag alone
+      }
+      return { ...s, muted: !s.muted };
+    });
+  }, []);
+
+  // In-call DTMF (IVR menus, extensions). RFC 2833 via the established session.
+  const sendDtmf = useCallback(async (digit: string) => {
+    const user = userRef.current;
+    if (!user) return;
+    try {
+      await user.sendDTMF(digit);
+    } catch {
+      /* no active session */
+    }
+  }, []);
+
+  return { state, setAvailable, answer, decline, hangup, toggleMute, sendDtmf };
 }
 
 export type SoftphoneApi = ReturnType<typeof useSoftphone>;

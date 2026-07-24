@@ -9,6 +9,7 @@ import {
 } from "lucide-react";
 import { NavLink, Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import { clearToken, getToken } from "./api";
+import InCallModal from "./components/InCallModal";
 import IncomingCallModal from "./components/IncomingCallModal";
 import { SoftphoneProvider } from "./lib/softphoneContext";
 import Agents from "./pages/Agents";
@@ -117,6 +118,9 @@ export default function App() {
   return (
     <SoftphoneProvider>
       <IncomingCallModal />
+      {/* In-call controls (hang up / mute / keypad) follow the call across every page — the
+          only hang-up button used to live inside InCallBar, which one page renders. */}
+      <InCallModal />
       <Routes>
       <Route path="/login" element={<Login />} />
       <Route path="/" element={<Protected><Dashboard /></Protected>} />
