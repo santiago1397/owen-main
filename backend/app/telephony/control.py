@@ -129,7 +129,16 @@ async def place_outbound_call(
     record: bool = True,
     operator_channel_id: Optional[str] = None,
 ) -> dict:
-    """Orchestrate a manual operator outbound call (Ticket 14), server-side over ARI.
+    """SUPERSEDED — do NOT call from the API request path. This synchronous sequence originates
+    then immediately plays/bridges, which RACES: ARI `originate` returns before the legs answer
+    and enter Stasis, so play/addChannel fail with "Channel not in Stasis application", the legs
+    never bridge, and the callee leg is left orphaned (the far party's call doesn't end on
+    hangup). The live path is the event-driven AsteriskAriClient.run_outbound_call, run as a
+    detached WORKER task (handlers.handle_outbound_call) where it can await each leg's
+    StasisStart before bridging and tear both legs down when either leaves. Kept only for the
+    existing unit test of the op-ordering; not wired to any endpoint.
+
+    Orchestrate a manual operator outbound call (Ticket 14), server-side over ARI.
 
     Sequence (the order is the contract — asserted in tests):
       1. Obtain the OPERATOR leg. Default: originate the operator's own WebRTC endpoint

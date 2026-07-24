@@ -574,6 +574,143 @@ class AsteriskAriClient:
              originator=originator, ok=ch is not None)
         return ch
 
+    # --- Manual OUTBOUND call, event-driven (Ticket 14 fix) ----------------------------------
+    # WHY THIS LIVES HERE AND RUNS IN THE WORKER: the old orchestration (control.place_outbound_
+    # call, called from the API request) originated the two legs and immediately played/bridged
+    # them — but ARI `originate` returns the channel id LONG before the channel answers and
+    # enters Stasis, so the play (409) and addChannel (422) failed with "Channel not in Stasis
+    # application", the legs were never bridged (0.00s empty recording), and the callee leg was
+    # left orphaned — hanging up the operator's browser leg didn't end the far party's call.
+    # The correct flow is event-driven: watch both legs' lifecycle, wait for each to ANSWER
+    # (StasisStart) before bridging, and tear DOWN both legs when either leaves. That needs the
+    # ARI WS event registries (app/flows/dtmf), which only the worker's consumer feeds — hence
+    # this runs as a detached worker task (handlers.handle_outbound_call), not in the API request.
+
+    async def _originate_with_id(
+        self, channel_id: str, endpoint: str, *, caller_id=None, originator=None,
+        variables=None, timeout_s: float | None = None,
+    ) -> bool:
+        """Originate into our Stasis app with a CLIENT-assigned channel id (so we can watch its
+        lifecycle before it exists). True iff ARI accepted the originate."""
+        params = {"endpoint": endpoint, "app": settings.ARI_APP, "channelId": channel_id}
+        if caller_id:
+            params["callerId"] = str(caller_id)
+        if originator:
+            params["originator"] = str(originator)
+        if timeout_s:
+            params["timeout"] = str(int(timeout_s))
+        body = {"variables": dict(variables)} if variables else None
+        data = await self._post_json("/ari/channels", params=params, json=body)
+        return isinstance(data, dict) and bool(data.get("id"))
+
+    async def _await_channel_up(
+        self, queue: asyncio.Queue, channel_id: str, timeout_s: float
+    ) -> bool:
+        """Block until `channel_id` ANSWERS (its StasisStart, or ChannelStateChange->Up); return
+        False if it is destroyed first (declined/busy/no-answer) or the timeout elapses."""
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout_s + _DIAL_ANSWER_GRACE_S
+        while True:
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                return False
+            try:
+                event = await asyncio.wait_for(queue.get(), timeout=remaining)
+            except asyncio.TimeoutError:
+                return False
+            ch = event.get("channel") if isinstance(event.get("channel"), dict) else {}
+            if str(ch.get("id") or "") != channel_id:
+                continue
+            etype = event.get("type")
+            if etype == "ChannelDestroyed":
+                return False
+            if etype == "StasisStart":
+                return True
+            if etype == "ChannelStateChange" and str(ch.get("state") or "").lower() == "up":
+                return True
+
+    async def run_outbound_call(
+        self, *, operator_id: str, callee_number: str, from_number: str, trunk_name: str,
+        op_channel_id: str, callee_channel_id: str, consent_media: str | None = None,
+        record: bool = True, answer_timeout_s: float = 45.0,
+    ) -> None:
+        """Full event-driven manual outbound call. Detached worker task; best-effort, never raises.
+
+        Sequence: watch both legs BEFORE originating (no StasisStart race) -> ring the operator's
+        softphone, wait for it to answer -> ring the callee over the trunk (with a ring timeout),
+        wait for it to answer -> pre-bridge consent to the callee -> bridge both -> record ->
+        hold until EITHER leg leaves. The `finally` ALWAYS tears down both legs + the bridge, so
+        the far party's call ends whenever the operator (or the callee) hangs up."""
+        lid = op_channel_id  # the operator (entry) leg id is this call's Linkedid
+        op_vars = {"X_OWEN_DIRECTION": "outbound", "X_OWEN_FROM": from_number}
+        queue = dtmf.watch(op_channel_id, callee_channel_id)
+        bridge_id: str | None = None
+        clog(logger, "outbound.begin", linkedid=lid, operator=operator_id,
+             to=callee_number, from_number=from_number)
+        try:
+            # 1. Ring the operator's own softphone; wait for the browser to answer.
+            if not await self._originate_with_id(
+                op_channel_id, operator_dial_endpoint(operator_id),
+                caller_id=callee_number, variables=op_vars,
+            ):
+                clog(logger, "outbound.fail", linkedid=lid, reason="operator_originate_failed",
+                     level=logging.WARNING)
+                return
+            if not await self._await_channel_up(queue, op_channel_id, answer_timeout_s):
+                clog(logger, "outbound.fail", linkedid=lid, reason="operator_no_answer",
+                     level=logging.WARNING)
+                return
+            clog(logger, "outbound.operator_up", linkedid=lid, channel=op_channel_id)
+
+            # 2. Ring the callee over the trunk (owned-DID caller-ID, linked to the operator leg
+            #    so both collapse onto ONE calls row). ARI's own `timeout` bounds the ring.
+            if not await self._originate_with_id(
+                callee_channel_id, f"PJSIP/{callee_number}@{trunk_name}",
+                caller_id=from_number, originator=op_channel_id, variables=op_vars,
+                timeout_s=answer_timeout_s,
+            ):
+                clog(logger, "outbound.fail", linkedid=lid, reason="callee_originate_failed",
+                     level=logging.WARNING)
+                return
+            if not await self._await_channel_up(queue, callee_channel_id, answer_timeout_s):
+                clog(logger, "outbound.fail", linkedid=lid, reason="callee_no_answer",
+                     level=logging.WARNING)
+                return
+            clog(logger, "outbound.callee_up", linkedid=lid, channel=callee_channel_id)
+
+            # 3. Consent to the callee BEFORE the operator is bridged in (FL all-party consent).
+            if consent_media:
+                await self.play_and_wait(callee_channel_id, consent_media)
+
+            # 4. Bridge both answered legs.
+            bridge_id = await self.create_bridge()
+            if not bridge_id:
+                clog(logger, "outbound.fail", linkedid=lid, reason="bridge_failed",
+                     level=logging.WARNING)
+                return
+            await self.add_to_bridge(bridge_id, op_channel_id, callee_channel_id)
+
+            # 5. Record the bridged call (on by default); name it `{linkedid}-...` so the
+            #    recording pipeline attaches it to this call's row.
+            if record:
+                await self.record_bridge(bridge_id, f"{op_channel_id}-outbound")
+
+            clog(logger, "outbound.connected", linkedid=lid, bridge=bridge_id)
+            # 6. Hold the call until EITHER leg leaves.
+            await self._await_bridge_end(queue, op_channel_id, callee_channel_id)
+            clog(logger, "outbound.ended", linkedid=lid)
+        except Exception:  # noqa: BLE001 - never raise out of the detached task
+            logger.exception("run_outbound_call failed (linkedid=%s)", lid)
+        finally:
+            # ALWAYS tear down both legs + the bridge. This is the fix for the orphaned far leg:
+            # when the operator hangs up (their leg leaves -> _await_bridge_end returns), the
+            # callee leg is hung up here, so the person being called never dangles on a live call.
+            dtmf.unwatch(queue, op_channel_id, callee_channel_id)
+            if bridge_id:
+                await self.destroy_bridge(bridge_id)
+            await self._delete(f"/ari/channels/{callee_channel_id}")
+            await self._delete(f"/ari/channels/{op_channel_id}")
+
     async def record_bridge(self, bridge_id: str, name: str) -> None:
         """Start a mixed recording of a bridge (both legs) — outbound calls record by default."""
         await self._post(

@@ -558,6 +558,26 @@ async def _relay_via_api(em: InboundEmail) -> dict:
     }
 
 
+# Detached outbound-call tasks (Ticket 14 fix): keep a strong reference so the event loop
+# doesn't GC a task that is merely awaiting ARI events; discard it when it finishes.
+_OUTBOUND_TASKS: set = set()
+
+
+async def handle_outbound_call(db: AsyncSession, payload: dict) -> None:
+    """Run a manual operator outbound call in the WORKER (where the ARI WS consumer feeds the
+    lifecycle registries the orchestration awaits). The API enqueues this with two pre-assigned
+    channel ids so it can return them to the browser immediately; here we drive the actual
+    ring/answer/bridge/teardown. Detached (create_task) so the drain loop is NOT blocked for the
+    whole call duration — mirrors how the consumer runs a flow as a background task."""
+    import asyncio
+
+    from app.providers.asterisk_client import AsteriskAriClient
+
+    task = asyncio.create_task(AsteriskAriClient().run_outbound_call(**payload))
+    _OUTBOUND_TASKS.add(task)
+    task.add_done_callback(_OUTBOUND_TASKS.discard)
+
+
 HANDLERS = {
     "recording_fetch": handle_recording_fetch,
     "transcribe": handle_transcribe,
@@ -566,4 +586,5 @@ HANDLERS = {
     "message_send": handle_message_send,
     "call_relay_ghl": handle_call_relay_ghl,
     "email_relay_ghl": handle_email_relay_ghl,
+    "outbound_call": handle_outbound_call,
 }

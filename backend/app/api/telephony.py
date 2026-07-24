@@ -15,6 +15,7 @@ The ARI client is resolved via `get_ari_control()` so tests can substitute a FAK
 """
 
 import logging
+import uuid
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -26,6 +27,7 @@ from app.api.deps import current_user
 from app.core.config import settings
 from app.db import get_db
 from app.models import Caller, Number, User
+from app.services import queue
 from app.telephony import control, outbound
 from app.telephony.credentials import build_webrtc_credentials
 
@@ -242,23 +244,31 @@ async def outbound_call(
         raise HTTPException(status.HTTP_409_CONFLICT, "this contact is blocked")
 
     warnings = await _guardrail_warnings(db, body.callee_number)
-    logger.info("call.api.outbound operator=%s to=%s from=%s warnings=%d",
-                user.email, body.callee_number, body.from_number, len(warnings))
 
-    ari = get_ari_control()
-    result = await control.place_outbound_call(
-        ari,
-        operator_id=user.email,
-        callee_number=body.callee_number,
-        from_number=body.from_number,
-        trunk_name=settings.BULKVS_TRUNK_NAME,
-        consent_media=settings.OUTBOUND_CONSENT_MEDIA or None,
-        record=settings.OUTBOUND_RECORDING_ENABLED,
-        operator_channel_id=body.operator_channel_id,
-    )
-    if not result.get("ok"):
-        raise HTTPException(
-            status.HTTP_502_BAD_GATEWAY,
-            f"could not place call: {result.get('reason', 'unknown')}",
-        )
-    return {**result, "warnings": warnings}
+    # Pre-assign both channel ids so we can return them to the browser NOW (the softphone uses
+    # callee_channel for hold/transfer) while the actual ring/answer/bridge runs in the WORKER.
+    # WHY THE WORKER: bridging must wait for each leg to ANSWER and enter Stasis, which requires
+    # the ARI WS event stream that only the worker's consumer reads. Originating+bridging inline
+    # in this request (the old path) raced — it bridged before the legs were in Stasis (422/409),
+    # left the callee leg orphaned, and the far party's call never ended on hangup. See
+    # AsteriskAriClient.run_outbound_call.
+    op_channel_id = uuid.uuid4().hex
+    callee_channel_id = uuid.uuid4().hex
+    logger.info("call.api.outbound operator=%s to=%s from=%s warnings=%d linkedid=%s",
+                user.email, body.callee_number, body.from_number, len(warnings), op_channel_id)
+    await queue.enqueue(db, "outbound_call", {
+        "operator_id": user.email,
+        "callee_number": body.callee_number,
+        "from_number": body.from_number,
+        "trunk_name": settings.BULKVS_TRUNK_NAME,
+        "consent_media": settings.OUTBOUND_CONSENT_MEDIA or None,
+        "record": settings.OUTBOUND_RECORDING_ENABLED,
+        "op_channel_id": op_channel_id,
+        "callee_channel_id": callee_channel_id,
+    })
+    return {
+        "ok": True,
+        "operator_channel": op_channel_id,
+        "callee_channel": callee_channel_id,
+        "warnings": warnings,
+    }
