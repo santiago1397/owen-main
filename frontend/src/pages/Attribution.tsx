@@ -208,6 +208,11 @@ function Body({
   const won = jobs.filter((j) => j.outcome === "won").length;
   const lost = jobs.filter((j) => j.outcome === "lost").length;
   const verified = jobs.filter((j) => j.basis === "call").length;
+  // Deduplicated across campaigns: the same client must not be counted twice in the header.
+  const convertedTotal = new Set(
+    jobs.filter((j) => j.basis === "call" && j.phone).map((j) => j.phone),
+  ).size;
+  const convertingTotal = rows.reduce((s, r) => s + r.convertingCalls, 0);
   const conflicts = jobs.filter((j) => j.conflictsWith).length;
   const filtered = callData.total_calls_in_range - callData.total_qualified_calls;
 
@@ -236,6 +241,11 @@ function Body({
       <div className="row" style={{ marginBottom: 16 }}>
         <Stat n={callData.total_qualified_calls} l="Qualified calls"
               hint={`${filtered.toLocaleString()} shorter calls filtered out`} />
+        <Stat
+          n={hasJobs ? convertedTotal : "—"}
+          l="Callers who became clients"
+          hint={hasJobs ? `${convertingTotal} of ${callData.total_qualified_calls} calls` : undefined}
+        />
         <Stat n={hasJobs ? jobs.length : "—"} l="Jobs in range" />
         <Stat n={hasJobs ? won : "—"} l="Jobs won" hint={lost ? `${lost} lost` : undefined} />
         <Stat n={hasJobs ? money0(revenue) : "—"} l="Revenue (won)" />
@@ -266,10 +276,12 @@ function Body({
               <th style={{ textAlign: "left" }}>Campaign</th>
               <th style={{ textAlign: "right" }}>Qualified calls</th>
               <th style={{ textAlign: "right" }}>Unique callers</th>
+              <th style={{ textAlign: "right" }}>Became clients</th>
+              <th style={{ textAlign: "right" }}>Converting calls</th>
+              <th style={{ textAlign: "right" }}>Caller→client</th>
               <th style={{ textAlign: "right" }}>Jobs</th>
               <th style={{ textAlign: "right" }}>Won</th>
               <th style={{ textAlign: "right" }}>Close rate</th>
-              <th style={{ textAlign: "right" }}>Call→job</th>
               <th style={{ textAlign: "right" }}>Revenue</th>
               <th style={{ textAlign: "right" }}>Avg job</th>
               <th style={{ textAlign: "right" }}>Rev / call</th>
@@ -288,10 +300,14 @@ function Body({
                 </td>
                 <td style={{ textAlign: "right" }}>{r.qualifiedCalls || "—"}</td>
                 <td style={{ textAlign: "right" }}>{r.uniqueCallers || "—"}</td>
+                <td style={{ textAlign: "right", fontWeight: 600 }}>{r.convertedCallers || "—"}</td>
+                <td style={{ textAlign: "right" }}>
+                  {r.convertingCalls ? `${r.convertingCalls} of ${r.qualifiedCalls}` : "—"}
+                </td>
+                <td style={{ textAlign: "right" }}>{pct(r.callerConversion)}</td>
                 <td style={{ textAlign: "right" }}>{r.jobs || "—"}</td>
                 <td style={{ textAlign: "right" }}>{r.won || "—"}</td>
                 <td style={{ textAlign: "right" }}>{pct(r.closeRate)}</td>
-                <td style={{ textAlign: "right" }}>{pct(r.jobRate)}</td>
                 <td style={{ textAlign: "right" }}>{r.revenue ? money0(r.revenue) : "—"}</td>
                 <td style={{ textAlign: "right" }}>{r.avgJobValue ? money0(r.avgJobValue) : "—"}</td>
                 <td style={{ textAlign: "right", fontWeight: 600 }}>
@@ -302,9 +318,13 @@ function Body({
           </tbody>
         </table>
         <div className="muted" style={{ fontSize: 11, marginTop: 8 }}>
-          Close rate is won ÷ (won + lost) — undecided jobs are excluded. Call→job is jobs ÷
-          qualified calls. {UNATTRIBUTED} holds calls whose tracking number has no campaign
-          and jobs whose phone matched no call.
+          <strong>Became clients</strong> counts the distinct people who called this campaign
+          and turned into a Workiz job — per caller, so a repeat client counts once.{" "}
+          <strong>Converting calls</strong> is how many of the campaign's qualified calls came
+          from those people. Both count only call-verified jobs: a job attributed from Workiz's
+          Source field alone was never tied to a real call, so it cannot prove a call converted.
+          Close rate is won ÷ (won + lost) — undecided jobs are excluded. {UNATTRIBUTED} holds
+          calls whose tracking number has no campaign and jobs whose phone matched no call.
         </div>
       </div>
 

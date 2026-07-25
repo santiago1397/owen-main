@@ -225,6 +225,18 @@ export type CampaignRow = {
   /** The money question: revenue earned per qualified call this campaign delivered. */
   revenuePerCall: number | null;
   callVerified: number;
+
+  // --- "how many of these calls actually became a client?" ---------------------------
+  /** Distinct people (phone numbers) who called this campaign AND turned into a Workiz job.
+   *  Counted per caller, not per job, so a repeat client is one converted caller. Only
+   *  call-verified jobs count — a job attributed from Workiz's Source field alone was never
+   *  tied to a real call, so it cannot prove a call converted. */
+  convertedCallers: number;
+  /** Of this campaign's qualified calls, how many came from someone who became a client.
+   *  This is the literal "how many of those calls translated into jobs" figure. */
+  convertingCalls: number;
+  /** convertedCallers / uniqueCallers — the campaign's true lead-to-client rate. */
+  callerConversion: number | null;
 };
 
 export function rollUp(
@@ -235,8 +247,11 @@ export function rollUp(
   const blank = (campaign: string): CampaignRow => ({
     campaign, qualifiedCalls: 0, uniqueCallers: 0, jobs: 0, won: 0, lost: 0, open: 0,
     revenue: 0, avgJobValue: 0, closeRate: null, jobRate: null, revenuePerCall: null,
-    callVerified: 0,
+    callVerified: 0, convertedCallers: 0, convertingCalls: 0, callerConversion: null,
   });
+  // Per campaign, the distinct phones that converted. A client with two jobs must not be
+  // counted twice, and their calls must not be added twice either.
+  const converted = new Map<string, Map<string, number>>();
   const get = (c: string) => {
     if (!rows.has(c)) rows.set(c, blank(c));
     return rows.get(c)!;
@@ -248,11 +263,24 @@ export function rollUp(
     r.uniqueCallers = s.unique_callers;
   }
   for (const j of jobs) {
-    const r = get(j.campaign ?? UNATTRIBUTED);
+    const key = j.campaign ?? UNATTRIBUTED;
+    const r = get(key);
     r.jobs++;
     if (j.basis === "call") r.callVerified++;
     r[j.outcome]++;
     if (j.outcome === "won") r.revenue += j.total;
+
+    // Only a call-verified job proves a call turned into a client.
+    if (j.basis === "call" && j.phone && j.match) {
+      if (!converted.has(key)) converted.set(key, new Map());
+      converted.get(key)!.set(j.phone, j.match.qualified_calls);
+    }
+  }
+
+  for (const [campaign, phones] of converted) {
+    const r = get(campaign);
+    r.convertedCallers = phones.size;
+    r.convertingCalls = Array.from(phones.values()).reduce((s, n) => s + n, 0);
   }
 
   for (const r of rows.values()) {
@@ -261,6 +289,7 @@ export function rollUp(
     r.closeRate = decided ? r.won / decided : null;
     r.jobRate = r.qualifiedCalls ? r.jobs / r.qualifiedCalls : null;
     r.revenuePerCall = r.qualifiedCalls ? r.revenue / r.qualifiedCalls : null;
+    r.callerConversion = r.uniqueCallers ? r.convertedCallers / r.uniqueCallers : null;
   }
 
   // Best earner first; campaigns that produced calls but no revenue sink to the bottom
