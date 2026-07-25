@@ -377,6 +377,19 @@ code.mono { background: var(--panel2); padding: 2px 6px; border-radius: 6px; fon
 .quo-callrow { display: flex; align-items: center; gap: 10px; padding: 10px 14px;
   border-bottom: 1px solid var(--q-border); font-size: 13px; line-height: 16px; }
 .quo-callrow:hover { background: var(--q-hover); }
+/* Softphone sheet (availability toggle + dialer + call status). Floats over the Inbox instead
+   of living inside the conversation pane: below 900px that pane is hidden whenever no thread
+   is selected, which made the whole call surface unreachable from the list. Fixed positioning
+   also means it can't be clipped by .quo's overflow:hidden. */
+.quo-phone { position: fixed; right: 16px; bottom: 16px; z-index: 45; width: 400px;
+  max-width: calc(100vw - 32px); max-height: 70dvh; overflow-y: auto;
+  background: var(--q-panel); border: 1px solid var(--q-border-strong); border-radius: 14px;
+  padding: 10px 12px 12px; box-shadow: 0 16px 48px rgba(0,0,0,.5); }
+.quo-phonehead { display: flex; align-items: center; justify-content: space-between;
+  font-weight: var(--q-w-semibold); font-size: 13px; padding-bottom: 8px; }
+/* The bar ships as a .card; inside the sheet it's already on a panel, so drop its own chrome. */
+.quo-phone .card { background: none; border: none; border-radius: 0; padding: 0; }
+.quo-phonenote { color: var(--q-muted); font-size: 12px; line-height: 16px; padding-top: 8px; }
 
 /* =======================================================================
    RESPONSIVE — iPhone support. See docs/RESPONSIVE_SPEC.md.
@@ -515,6 +528,16 @@ code.mono { background: var(--panel2); padding: 2px 6px; border-radius: 6px; fon
   /* Bubbles can use more of a narrow screen than the desktop 68%. */
   .quo-row { max-width: 90%; }
 
+  /* Softphone sheet spans the screen bottom (a 400px floating card is most of a phone anyway),
+     and its dialer controls wrap instead of overflowing at the 16px mobile font size. */
+  .quo-phone {
+    left: 10px; right: 10px; width: auto; max-width: none;
+    bottom: calc(10px + env(safe-area-inset-bottom));
+    max-height: 62dvh;
+  }
+  .quo-phone input, .quo-phone select { min-width: 0; flex: 1 1 150px; }
+  .quo-phone .card > div { row-gap: 8px; }
+
   /* ---- Messages: same single-pane switch, simpler layout ---- */
   .msgsplit { height: calc(100dvh - 200px) !important; }
   .msglist { width: 100% !important; border-right: none !important; }
@@ -570,6 +593,8 @@ code.mono { background: var(--panel2); padding: 2px 6px; border-radius: 6px; fon
   /* margin-bottom:0 (not the -16px inherited from the 900px rule) so the Inbox ends at the tab
      bar instead of running under it. The side margins re-match .main's tighter 12px here. */
   .quo { margin: -14px -12px 0; height: calc(100dvh - 61px - var(--tabbar-h)); }
+  /* Clear the bottom tab bar, which is fixed above it. */
+  .quo-phone { bottom: calc(10px + var(--tabbar-h)); }
   .msgsplit { height: calc(100dvh - 200px - var(--tabbar-h)) !important; }
   .flowcanvas { height: calc(100dvh - 260px - var(--tabbar-h)); }
 

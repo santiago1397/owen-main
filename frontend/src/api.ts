@@ -76,6 +76,20 @@ export class ApiError extends Error {
   }
 }
 
+/** FastAPI errors are `{"detail": ...}`. These strings are shown to the operator verbatim (the
+ *  Inbox composer and the softphone sheet both print them), so unwrap `detail` instead of
+ *  surfacing raw JSON. Anything unexpected falls back to the body as-is. */
+async function errorMessage(res: Response): Promise<string> {
+  const text = await res.text();
+  try {
+    const detail = JSON.parse(text)?.detail;
+    if (typeof detail === "string" && detail) return detail;
+  } catch {
+    /* not JSON — use the body */
+  }
+  return text;
+}
+
 async function request(path: string, opts: RequestInit = {}, allowRetry = true): Promise<any> {
   const headers: Record<string, string> = { ...(opts.headers as any) };
   const token = getToken();
@@ -93,7 +107,7 @@ async function request(path: string, opts: RequestInit = {}, allowRetry = true):
     if (!location.pathname.startsWith("/login")) location.href = "/login";
     throw new ApiError(401, "unauthorized");
   }
-  if (!res.ok) throw new ApiError(res.status, await res.text());
+  if (!res.ok) throw new ApiError(res.status, await errorMessage(res));
   const ct = res.headers.get("content-type") || "";
   return ct.includes("application/json") ? res.json() : res.text();
 }

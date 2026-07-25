@@ -29,6 +29,7 @@ import { useSearchParams } from "react-router-dom";
 import { API_BASE, api, ApiError } from "../api";
 import Avatar from "../components/Avatar";
 import InCallBar from "../components/InCallBar";
+import { useSoftphoneContext } from "../lib/softphoneContext";
 
 // Quo-style per-contact Inbox: one thread per CONTACT across all BulkVS DIDs, messages AND
 // calls interleaved in one timeline. Scope = platform (bulkvs/asterisk) only; the legacy
@@ -633,6 +634,10 @@ export default function Inbox() {
   const [showNewChat, setShowNewChat] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [callNote, setCallNote] = useState<string | null>(null);
+  // Softphone lives in the app shell (one instance); the Inbox only reads its status so it can
+  // register on demand instead of dialing into an endpoint that isn't there.
+  const { state: phone, setAvailable } = useSoftphoneContext();
+  const [pendingCall, setPendingCall] = useState<Thread | null>(null);
   const [menu, setMenu] = useState<MenuState | null>(null);
   const [toast, setToast] = useState<ToastState | null>(null);
   const lpTimer = useRef<number | null>(null);
@@ -713,25 +718,67 @@ export default function Inbox() {
     }
   };
 
-  const placeCall = async (t: Thread) => {
-    const from = t.call_from?.phone_number;
-    const to = t.contact_number;
-    if (!from || !to) {
-      setCallNote("No BulkVS caller-ID available for this contact.");
-      return;
-    }
-    setShowPhone(true);
-    setCallNote(null);
+  const dial = async (t: Thread) => {
+    const from = t.call_from?.phone_number as string;
+    const to = t.contact_number as string;
+    setCallNote(`Calling ${fmtPhone(to)} from ${fmtPhone(from)} — your softphone will ring.`);
     try {
       const res = await api.outboundCall(to, from);
-      setCallNote(
-        `Calling ${fmtPhone(to)} from ${fmtPhone(from)} — your softphone will ring.` +
-          (res?.warnings?.length ? ` ⚠ ${res.warnings.join(" · ")}` : "")
-      );
+      if (res?.warnings?.length) {
+        setCallNote(
+          `Calling ${fmtPhone(to)} from ${fmtPhone(from)} — your softphone will ring. ⚠ ${res.warnings.join(" · ")}`
+        );
+      }
     } catch (e: any) {
       setCallNote(`Call error: ${String(e?.message || e)}`);
     }
   };
+
+  // The backend rings THIS browser's softphone first and only then bridges it to the callee, so
+  // dialing while the softphone is unregistered originates to an offline endpoint and the call
+  // silently never happens — which is exactly how "the call button does nothing" looked on a
+  // phone, where the availability toggle lives in a pane you may never have opened. So register
+  // first (the tap is the user gesture iOS needs for mic permission) and dial once we're up.
+  const placeCall = (t: Thread) => {
+    setShowPhone(true);
+    if (!t.call_from?.phone_number || !t.contact_number) {
+      setCallNote("No BulkVS caller-ID available for this contact.");
+      return;
+    }
+    if (phone.status === "in-call") {
+      setCallNote("You're already on a call — hang up first.");
+      return;
+    }
+    if (phone.status === "available") {
+      void dial(t);
+      return;
+    }
+    setCallNote("Connecting your softphone…");
+    setPendingCall(t);
+    if (phone.status === "offline") setAvailable(true);
+  };
+
+  // Registration finished (or failed) while a call was queued behind it.
+  useEffect(() => {
+    if (!pendingCall) return;
+    if (phone.status === "available") {
+      const t = pendingCall;
+      setPendingCall(null);
+      void dial(t);
+      return;
+    }
+    // `offline` with no error is just the state before connect() has patched to `registering`.
+    if (phone.status === "offline" && phone.error) {
+      setPendingCall(null);
+      setCallNote(`Softphone couldn't connect: ${phone.error}`);
+      return;
+    }
+    const id = window.setTimeout(() => {
+      setPendingCall(null);
+      setCallNote("Softphone didn't connect in time — check Available below and try again.");
+    }, 30000);
+    return () => window.clearTimeout(id);
+  }, [phone.status, phone.error, pendingCall]); // eslint-disable-line react-hooks/exhaustive-deps
 
   return (
     // has-active drives the below-900px single-pane switch: with a thread open the list is
@@ -824,12 +871,6 @@ export default function Inbox() {
 
       {/* center: conversation */}
       <div className="quo-convo">
-        {showPhone && (
-          <div style={{ borderBottom: "1px solid var(--q-border)", padding: 8 }}>
-            <InCallBar />
-            {callNote && <div className="muted" style={{ fontSize: 12, padding: "4px 8px" }}>{callNote}</div>}
-          </div>
-        )}
         {active ? (
           <Conversation
             key={active.caller_id}
@@ -844,6 +885,23 @@ export default function Inbox() {
         )}
       </div>
 
+      {/* Softphone sheet. Rendered at the ROOT of .quo, never inside .quo-convo: below 900px
+          that pane is display:none whenever no thread is selected, so the availability toggle,
+          the dialer and every call message were unreachable from the list — the ☎ button
+          appeared dead. Fixed-position, so it is reachable from either mobile pane. */}
+      {showPhone && (
+        <div className="quo-phone">
+          <div className="quo-phonehead">
+            <span>Softphone</span>
+            <button className="quo-iconbtn" aria-label="Close softphone" title="Close"
+                    onClick={() => setShowPhone(false)}>
+              <X size={16} />
+            </button>
+          </div>
+          <InCallBar />
+          {callNote && <div className="quo-phonenote">{callNote}</div>}
+        </div>
+      )}
       {showNewChat && (
         <NewChatModal
           onClose={() => setShowNewChat(false)}
