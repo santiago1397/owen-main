@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
-  PRESET_LABELS, PRESETS, type Preset, type Range,
+  DAY_PRESETS, PRESET_LABELS, type Preset, type Range,
   easternTodayInput, resolveRange,
 } from "../lib/dates";
 
@@ -9,9 +9,13 @@ import {
 // UTC [from, to) window (or null while a custom range is incomplete) via onChange.
 export default function DateRangeBar({
   defaultPreset = "7d",
+  presets = DAY_PRESETS,
   onChange,
 }: {
   defaultPreset?: Preset;
+  /** Which preset buttons to offer. Defaults to the day-scale set; the attribution module
+   *  passes a list including "12m" because it is a year-scale question. */
+  presets?: readonly Preset[];
   onChange: (range: Range | null) => void;
 }) {
   const [now] = useState(() => new Date());
@@ -31,7 +35,7 @@ export default function DateRangeBar({
 
   return (
     <div style={{ display: "flex", gap: 4, flexWrap: "wrap", alignItems: "center" }}>
-      {PRESETS.map((p) => (
+      {presets.map((p) => (
         <button
           key={p}
           onClick={() => setPreset(p)}

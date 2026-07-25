@@ -139,6 +139,22 @@ export const api = {
   me: () => request("/api/auth/me"),
   dashboard: (params: { date_from?: string; date_to?: string; hide_junk?: boolean }) =>
     request(`/api/dashboard/summary${qs(params)}`),
+  // --- Campaign attribution (/attribution) ---
+  // Both endpoints are READ-ONLY. `match` is a POST only because the phone list is too long
+  // for a query string; job/revenue data is never sent to or stored on the server.
+  attributionCampaigns: (params: { date_from?: string; date_to?: string; min_duration_seconds?: number }) =>
+    request(`/api/attribution/campaigns${qs(params)}`),
+  attributionMatch: (body: {
+    phones: string[];
+    min_duration_seconds?: number;
+    date_from?: string;
+    date_to?: string;
+  }) =>
+    request("/api/attribution/match", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }),
   calls: (filters: Record<string, any>) => request(`/api/calls${qs(filters)}`),
   call: (id: string) => request(`/api/calls/${id}`),
   overrideAnalysis: (id: string, body: any) =>

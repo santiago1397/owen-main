@@ -6,6 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
 
 from app.api import agents as agents_api
+from app.api import attribution as attribution_api
 from app.api import auth
 from app.api import callers as callers_api
 from app.api import calls as calls_api
@@ -55,6 +56,7 @@ app.include_router(numbers_api.router)
 app.include_router(callers_api.router)
 app.include_router(campaigns_api.router)
 app.include_router(dashboard_api.router)
+app.include_router(attribution_api.router)
 app.include_router(emails_api.router)
 app.include_router(flows_api.router)
 app.include_router(agents_api.router)

@@ -49,8 +49,13 @@ function addDays(ymd: YMD, n: number): YMD {
 
 export type Range = { from: Date; to: Date };
 
-export const PRESETS = ["today", "yesterday", "7d", "30d", "month", "custom"] as const;
+export const PRESETS = ["today", "yesterday", "7d", "30d", "month", "12m", "custom"] as const;
 export type Preset = (typeof PRESETS)[number];
+
+// The day-scale presets every page had before "12m" existed. DateRangeBar defaults to these,
+// so adding a year-scale preset for the attribution module does not quietly put a
+// "Last 12 months" button (and the wide query behind it) on the Calls list.
+export const DAY_PRESETS = ["today", "yesterday", "7d", "30d", "month", "custom"] as const;
 
 export const PRESET_LABELS: Record<Preset, string> = {
   today: "Today",
@@ -58,6 +63,7 @@ export const PRESET_LABELS: Record<Preset, string> = {
   "7d": "Last 7 days",
   "30d": "Last 30 days",
   month: "This month",
+  "12m": "Last 12 months",
   custom: "Custom",
 };
 
@@ -93,6 +99,8 @@ export function resolveRange(
       return { from: new Date(now.getTime() - 30 * 86400_000), to: now };
     case "month":
       return { from: easternMidnightUTC({ ...today, d: 1 }), to: now };
+    case "12m":
+      return { from: easternMidnightUTC(addDays(today, -365)), to: now };
     case "custom": {
       const f = customFrom && parseInputDate(customFrom);
       const t = customTo && parseInputDate(customTo);
