@@ -56,7 +56,7 @@ function FlowAssignment({ n }: { n: NumberRow }) {
             Assigned to{" "}
             {assigned
               ? <Link to={`/flows/${assigned.id}`}>{assigned.name}</Link>
-              : <code className="mono">{n.flow_id}</code>}
+              : <Link to={`/flows/${n.flow_id}`}>{n.flow_name || n.flow_id}</Link>}
           </span>
           <button disabled={patch.isPending} onClick={() => patch.mutate(null)}>
             Unassign

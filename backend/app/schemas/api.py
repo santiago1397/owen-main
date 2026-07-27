@@ -95,6 +95,11 @@ class NumberStats(BaseModel):
     released_at: datetime | None = None  # set when a synced DID vanished from BulkVS
     provider_status: str | None = None  # carrier-reported /tnRecord Status ("Active"/"SUBMITTED"/…)
     lifecycle: str = "available"        # DERIVED: available | pending | assigned | released
+    # Assigned call flow (Ticket 15.5). The numbers list is the ONLY place the UI learns
+    # which flow answers a DID — without these the detail view can never render the
+    # "assigned" state (and so can never offer Unassign).
+    flow_id: uuid.UUID | None = None
+    flow_name: str | None = None
 
 
 class NumberFlowAssign(BaseModel):

@@ -91,9 +91,11 @@ export default function Numbers() {
                     <span className="badge prov">{providerPath(n)}</span>
                     {!managed && <span className="muted" style={{ marginLeft: 6 }} title="Read-only attribution number">🔒</span>}
                   </td>
-                  {/* Flow / SMS-state authoring is filled by later tickets; the columns exist
+                  {/* SMS-state authoring is filled by a later ticket; the column exists
                       now so the hub's information architecture is complete. */}
-                  <td className="muted">{managed ? "—" : "n/a"}</td>
+                  <td className={n.flow_name ? undefined : "muted"}>
+                    {!managed ? "n/a" : n.flow_name || "—"}
+                  </td>
                   <td>{n.campaign_name || "—"}</td>
                   <td className="muted">{managed ? "—" : "n/a"}</td>
                   <td>

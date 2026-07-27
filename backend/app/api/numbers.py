@@ -35,16 +35,20 @@ async def list_numbers(
                 Number.provider_status,
                 # Selected only to DERIVE lifecycle below; popped before building the schema.
                 Number.campaign_id,
+                # flow_id is BOTH a lifecycle input and part of the response (the UI reads it
+                # to render the assigned state) — read, never popped.
                 Number.flow_id,
                 Provider.name.label("provider"),
                 Campaign.name.label("campaign_name"),
+                Flow.name.label("flow_name"),
                 func.count(Call.id).label("total_calls"),
                 func.max(Call.started_at).label("last_call_at"),
             )
             .join(Provider, Number.provider_id == Provider.id, isouter=True)
             .join(Campaign, Number.campaign_id == Campaign.id, isouter=True)
+            .join(Flow, Number.flow_id == Flow.id, isouter=True)
             .join(Call, Call.number_id == Number.id, isouter=True)
-            .group_by(Number.id, Provider.name, Campaign.name)
+            .group_by(Number.id, Provider.name, Campaign.name, Flow.name)
             .order_by(func.count(Call.id).desc())
         )
     ).mappings().all()
@@ -56,7 +60,7 @@ async def list_numbers(
             active=d["active"],
             released_at=d["released_at"],
             campaign_id=d.pop("campaign_id"),
-            flow_id=d.pop("flow_id"),
+            flow_id=d["flow_id"],
             provider_status=d["provider_status"],
         )
         out.append(NumberStats(**d))
