@@ -65,6 +65,23 @@ def _flow_out(flow: Flow, *, versions: int = 0, calls: int = 0) -> FlowOut:
     )
 
 
+async def _flow_out_counted(db: AsyncSession, flow: Flow) -> FlowOut:
+    """`_flow_out` with its counts actually filled in. Single-flow endpoints must use this:
+    defaulting the counts to 0 would report "no versions" for a flow that has them, which a
+    caller would reasonably believe (the UI decides whether Clone is even offered from it)."""
+    versions = int(
+        (
+            await db.execute(
+                select(func.count())
+                .select_from(FlowVersion)
+                .where(FlowVersion.flow_id == flow.id)
+            )
+        ).scalar_one()
+        or 0
+    )
+    return _flow_out(flow, versions=versions, calls=await _attributed_call_count(db, flow.id))
+
+
 async def _source_version(db: AsyncSession, flow: Flow) -> FlowVersion | None:
     """The version a clone copies. Loads this flow's (id, version) pairs and lets the pure
     `pick_clone_source` kernel decide (active, else latest); None if it has no version."""
@@ -243,7 +260,7 @@ async def rename_flow(
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "name is required")
     flow.name = name
     await db.commit()
-    return _flow_out(flow)
+    return await _flow_out_counted(db, flow)
 
 
 @router.delete("/{flow_id}", response_model=FlowDeleteResult)
@@ -307,7 +324,7 @@ async def restore_flow(
         raise HTTPException(status.HTTP_404_NOT_FOUND, "flow not found")
     flow.archived_at = None
     await db.commit()
-    return _flow_out(flow)
+    return await _flow_out_counted(db, flow)
 
 
 @router.get("/{flow_id}", response_model=FlowDetail)
