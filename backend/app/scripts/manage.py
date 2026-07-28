@@ -201,6 +201,76 @@ async def reconcile_now(hours: int | None) -> None:
     print(f"reconcile done: {n} inbound calls ingested")
 
 
+# --- Billing (BulkVS cost estimate) ---------------------------------------------------------
+# Rates and manual adjustments are administered here rather than in the UI: the price sheet
+# changes about once a year, and a rates editor is a lot of surface for that.
+
+
+async def list_rates() -> None:
+    from app.models import BillingRate
+
+    async with SessionLocal() as db:
+        rows = (
+            await db.execute(select(BillingRate).order_by(BillingRate.unit, BillingRate.code))
+        ).scalars().all()
+    print(f"{'code':28} {'unit':11} {'amount':>10}  {'incr':>5}  src   label")
+    for r in rows:
+        incr = str(r.increment_seconds or "") if r.unit == "per_minute" else ""
+        print(f"{r.code:28} {r.unit:11} {float(r.amount):>10.6f}  {incr:>5}  "
+              f"{r.source:5} {r.label}")
+
+
+async def set_rate(code: str, amount: float | None, increment: int | None,
+                   minimum: int | None) -> None:
+    """Correct a rate (or its billing increment) after checking a real BulkVS invoice.
+
+    Existing `call_charges` rows are deliberately NOT re-priced — the rate is stamped on each
+    row at costing time, so past periods keep the numbers you already looked at. Only legs
+    costed after this change use the new rate.
+    """
+    from app.models import BillingRate
+
+    async with SessionLocal() as db:
+        row = await db.get(BillingRate, code)
+        if row is None:
+            raise SystemExit(f"no such rate code: {code!r} (see `billing-rates`)")
+        if amount is not None:
+            row.amount = amount
+        if increment is not None:
+            row.increment_seconds = increment
+        if minimum is not None:
+            row.minimum_seconds = minimum
+        await db.commit()
+        print(f"{code}: amount={float(row.amount):.6f} increment={row.increment_seconds} "
+              f"minimum={row.minimum_seconds}")
+    print("note: already-costed legs keep the rate they were billed at (history is frozen)")
+
+
+async def add_adjustment(occurred_on: str, code: str, amount: float,
+                         description: str | None) -> None:
+    """Record an account-level charge with no call data behind it (LNP port fee, E911
+    overage, LIDB update, directory listing)."""
+    from datetime import date as _date
+
+    from app.models import BillingAdjustment
+
+    async with SessionLocal() as db:
+        db.add(BillingAdjustment(
+            occurred_on=_date.fromisoformat(occurred_on),
+            code=code, amount=amount, description=description,
+        ))
+        await db.commit()
+    print(f"adjustment added: {occurred_on} {code} ${amount:.4f}")
+
+
+async def cost_now(hours: int | None) -> None:
+    """Price the recent CDR window on demand instead of waiting for the schedule."""
+    from app.workers.billing import reconcile_charges
+
+    n = await reconcile_charges(hours)
+    print(f"billing reconcile done: {n} charge rows written")
+
+
 def main() -> None:
     p = argparse.ArgumentParser(prog="manage")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -243,6 +313,23 @@ def main() -> None:
 
     sub.add_parser("list")
 
+    sub.add_parser("billing-rates", help="Show the configured BulkVS price sheet")
+
+    sr = sub.add_parser("set-rate", help="Correct a rate/increment after checking an invoice")
+    sr.add_argument("--code", required=True, help="e.g. outbound.domestic (see billing-rates)")
+    sr.add_argument("--amount", type=float)
+    sr.add_argument("--increment", type=int, help="billing increment in seconds (per-minute rates)")
+    sr.add_argument("--minimum", type=int, help="minimum billed seconds (per-minute rates)")
+
+    aa = sub.add_parser("add-adjustment", help="Record a manual account-level charge")
+    aa.add_argument("--date", required=True, help="YYYY-MM-DD")
+    aa.add_argument("--code", required=True, help="e.g. lnp / e911_overage / lidb / directory")
+    aa.add_argument("--amount", type=float, required=True)
+    aa.add_argument("--description")
+
+    cn = sub.add_parser("cost-now", help="Price the recent CDR window immediately")
+    cn.add_argument("--hours", type=int)
+
     args = p.parse_args()
     if args.cmd == "add-campaign":
         asyncio.run(add_campaign(args.name, args.source))
@@ -260,6 +347,14 @@ def main() -> None:
         asyncio.run(backfill(args.provider, args.hours, args.transcribe))
     elif args.cmd == "sync-numbers":
         asyncio.run(sync_numbers(args.provider, args.dry_run))
+    elif args.cmd == "billing-rates":
+        asyncio.run(list_rates())
+    elif args.cmd == "set-rate":
+        asyncio.run(set_rate(args.code, args.amount, args.increment, args.minimum))
+    elif args.cmd == "add-adjustment":
+        asyncio.run(add_adjustment(args.date, args.code, args.amount, args.description))
+    elif args.cmd == "cost-now":
+        asyncio.run(cost_now(args.hours))
 
 
 if __name__ == "__main__":

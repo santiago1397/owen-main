@@ -29,6 +29,19 @@ class BulkvsTn:
     # Number.provider_status and every operation gate refuses non-Active DIDs.
     status: str | None = None
 
+    # --- "TN Details" block, mirrored for cost estimation (Billing tab) -------------------
+    # `tier` selects the inbound per-minute rate and is the most cost-sensitive field BulkVS
+    # reports: the published tiers span $0.0003 to $0.0198/min. Syncing it means per-number
+    # rating is never hand-maintained and self-corrects if BulkVS re-tiers a DID.
+    tier: str | None = None
+    state: str | None = None
+    rate_center: str | None = None
+    # Carrier-side CNAM delivery. When true BulkVS performs (and bills) a lookup per inbound
+    # call — at short call durations that per-event charge can exceed the minutes themselves.
+    cnam: bool = False
+    # Raw "YYYY-MM-DD HH:MM:SS" as reported; parsed by the sync.
+    activation_date: str | None = None
+
 
 def _to_e164(tn: str) -> str:
     """Normalize a BulkVS TN to E.164. BulkVS reports bare NANP digits (10- or 11-digit,
@@ -71,7 +84,31 @@ def parse_tn_records(data) -> list[BulkvsTn]:
         ref = (str(ref).strip() or None) if ref is not None else None
         st = rec.get("Status") or rec.get("status")
         st = (str(st).strip() or None) if st is not None else None
-        out.append(BulkvsTn(phone_number=_to_e164(str(tn)), reference_id=ref, status=st))
+
+        # "TN Details" carries the tier/rate-center/CNAM/activation block. Absent on older
+        # responses (and on non-BulkVS-shaped fakes in tests), so every field is optional and
+        # a missing block simply leaves them None — a DID with no tier is later flagged
+        # `unrated` rather than being priced at a guessed rate.
+        details = rec.get("TN Details") or rec.get("TNDetails") or {}
+        if not isinstance(details, dict):
+            details = {}
+
+        def _s(key: str) -> str | None:
+            v = details.get(key)
+            return (str(v).strip() or None) if v is not None else None
+
+        out.append(
+            BulkvsTn(
+                phone_number=_to_e164(str(tn)),
+                reference_id=ref,
+                status=st,
+                tier=_s("Tier"),
+                state=_s("State"),
+                rate_center=_s("Rate Center"),
+                cnam=bool(details.get("Cnam")),
+                activation_date=_s("Activation Date"),
+            )
+        )
     return out
 
 

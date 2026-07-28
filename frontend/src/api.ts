@@ -155,6 +155,35 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     }),
+  // --- Billing (/billing) ---
+  // A BulkVS cost ESTIMATE computed from our own CDR — BulkVS publishes no billing API.
+  // Charges are per LEG (a forwarded call is billed twice: inbound + outbound), and each
+  // row carries the rate it was priced at, so totals never change retroactively.
+  billingSummary: (params: { date_from?: string; date_to?: string }) =>
+    request(`/api/billing/summary${qs(params)}`),
+  billingLegs: (params: {
+    date_from?: string;
+    date_to?: string;
+    direction?: string;
+    number_id?: string;
+    unrated_only?: boolean;
+    limit?: number;
+    offset?: number;
+  }) => request(`/api/billing/legs${qs(params)}`),
+  billingRates: () => request("/api/billing/rates"),
+  addBillingAdjustment: (body: {
+    occurred_on: string;
+    code: string;
+    amount: number;
+    description?: string;
+  }) =>
+    request("/api/billing/adjustments", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }),
+  deleteBillingAdjustment: (id: string) =>
+    request(`/api/billing/adjustments/${id}`, { method: "DELETE" }),
   calls: (filters: Record<string, any>) => request(`/api/calls${qs(filters)}`),
   call: (id: string) => request(`/api/calls/${id}`),
   overrideAnalysis: (id: string, body: any) =>

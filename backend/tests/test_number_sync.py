@@ -34,8 +34,10 @@ def _row(phone, *, label=None, active=True, released_at=None, provider_status=No
     )
 
 
-def _tn(phone, ref=None, status=None):
-    return SimpleNamespace(phone_number=phone, reference_id=ref, status=status)
+def _tn(phone, ref=None, status=None, tier=None, state=None, rate_center=None, cnam=False):
+    return SimpleNamespace(phone_number=phone, reference_id=ref, status=status,
+                           tier=tier, state=state, rate_center=rate_center, cnam=cnam,
+                           activation_date=None)
 
 
 def main():
@@ -120,6 +122,37 @@ def main():
     check("relabel and restatus can both apply to one row",
           plan.relabel == [(existing[0], "b")]
           and plan.restatus == [(existing[0], "SUBMITTED")])
+
+    print("plan_sync — one-way TN Details mirror (tier drives Billing's inbound rate):")
+    existing = [_row("+15618788090", provider_status="Active")]
+    plan = plan_sync(
+        existing=existing,
+        incoming=[_tn("+15618788090", status="Active", tier="0", state="FL",
+                      rate_center="BELLEGLADE 0", cnam=True)],
+    )
+    check("new TN Details produce a redetail change set",
+          plan.redetail == [(existing[0], {"tier": "0", "state": "FL",
+                                           "rate_center": "BELLEGLADE 0",
+                                           "cnam_enabled": True})])
+    settled = _row("+15618788090", provider_status="Active")
+    settled.tier, settled.state = "0", "FL"
+    settled.rate_center, settled.cnam_enabled = "BELLEGLADE 0", True
+    plan = plan_sync(
+        existing=[settled],
+        incoming=[_tn("+15618788090", status="Active", tier="0", state="FL",
+                      rate_center="BELLEGLADE 0", cnam=True)],
+    )
+    check("unchanged details -> no redetail churn", not plan.redetail)
+    retiered = _row("+15618788090", provider_status="Active")
+    retiered.tier, retiered.cnam_enabled = "0", False
+    plan = plan_sync(existing=[retiered],
+                     incoming=[_tn("+15618788090", status="Active", tier="3")])
+    check("a re-tiered DID mirrors the new tier (rating self-corrects)",
+          plan.redetail and plan.redetail[0][1].get("tier") == "3")
+    plan = plan_sync(existing=[_row("+1", provider_status="Active")],
+                     incoming=[_tn("+1", status="Active")])
+    check("a TN with no TN Details block -> no redetail (None/False is not a change)",
+          not plan.redetail)
 
     print("plan_sync — ported DID adopts the legacy (foreign-provider) row instead of duplicating:")
     legacy = _row("+19195550009", label="GBP Legacy Twilio")

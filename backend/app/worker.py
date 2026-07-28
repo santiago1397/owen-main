@@ -20,6 +20,8 @@ from app.services import queue
 from app.workers import asterisk_consumer
 from app.workers.asterisk_cdr import enabled as asterisk_cdr_enabled
 from app.workers.asterisk_cdr import reconcile_cdr
+from app.workers.billing import enabled as billing_enabled
+from app.workers.billing import reconcile_charges
 from app.workers.handlers import HANDLERS
 from app.workers.bulkvs_sync import enabled as bulkvs_sync_enabled
 from app.workers.bulkvs_sync import sync_numbers as bulkvs_sync_numbers
@@ -118,6 +120,16 @@ def build_scheduler() -> AsyncIOScheduler:
             seconds=settings.ASTERISK_CDR_POLL_SECONDS, id="asterisk_cdr",
         )
         logger.info("asterisk CDR reconcile scheduled every %ss", settings.ASTERISK_CDR_POLL_SECONDS)
+    # BulkVS cost projection (Billing tab). Runs on the same CDR the reconcile above reads,
+    # but writes stamped per-leg charge rows. Scheduled AFTER it and on a slower cadence so
+    # the call projection is settled before its legs are priced; both are idempotent, so
+    # ordering is an optimization, not a correctness requirement.
+    if billing_enabled():
+        sched.add_job(
+            reconcile_charges, "interval",
+            seconds=settings.BILLING_POLL_SECONDS, id="billing_charges",
+        )
+        logger.info("billing charge reconcile scheduled every %ss", settings.BILLING_POLL_SECONDS)
     return sched
 
 

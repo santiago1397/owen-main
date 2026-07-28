@@ -63,7 +63,69 @@ class SyncPlan:
     adopt: list = field(default_factory=list)          # [(row, tn)]
     relabel: list = field(default_factory=list)        # [(row, new_label)]
     restatus: list = field(default_factory=list)       # [(row, new_provider_status)]
+    # "TN Details" mirror (tier / state / rate center / CNAM), for cost estimation. Carries
+    # (row, details-dict) so the applier writes only what changed.
+    redetail: list = field(default_factory=list)       # [(row, dict)]
     soft_release: list = field(default_factory=list)   # [row]
+
+
+# Fields mirrored one-way from BulkVS /tnRecord "TN Details" onto the Number row. Purely
+# informational for behaviour — nothing gates on them — but `tier` drives inbound rating, so
+# keeping them in sync is what stops the Billing estimate going stale when BulkVS re-tiers a
+# DID. `activation_date` is handled separately (it needs parsing and is write-once).
+_DETAIL_FIELDS = ("tier", "state", "rate_center", "cnam_enabled")
+
+
+def _parse_activation(raw):
+    """BulkVS "Activation Date" ("YYYY-MM-DD HH:MM:SS", no zone) -> aware UTC datetime.
+
+    Returns None for anything unparseable — a bad value must never abort a number sync, and
+    a missing activation date only costs us the ability to prorate a first month we've
+    already decided not to prorate.
+    """
+    from datetime import datetime, timezone
+
+    if not raw:
+        return None
+    text = str(raw).strip().replace("T", " ")
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(text, fmt).replace(tzinfo=timezone.utc)
+        except ValueError:
+            continue
+    logger.warning("bulkvs number sync: unparseable Activation Date %r", raw)
+    return None
+
+
+def _incoming_details(tn) -> dict:
+    """The detail values an incoming TN implies. getattr-tolerant so duck-typed TNs in tests
+    (and older records without the block) simply yield None/False and diff as no-change."""
+    return {
+        "tier": getattr(tn, "tier", None),
+        "state": getattr(tn, "state", None),
+        "rate_center": getattr(tn, "rate_center", None),
+        "cnam_enabled": bool(getattr(tn, "cnam", False)),
+    }
+
+
+def _detail_changes(row, tn) -> dict:
+    """Only the detail fields that actually differ on `row` (empty dict = nothing to do).
+
+    `cnam_enabled` is normalized to bool on BOTH sides before comparing: a row predating the
+    column (or a duck-typed test row) reads back as None, and None != False would otherwise
+    make every poll report a change forever.
+    """
+    incoming = _incoming_details(tn)
+    changes = {}
+    for key, value in incoming.items():
+        current = getattr(row, key, None)
+        if key == "cnam_enabled":
+            if bool(current) != bool(value):
+                changes[key] = bool(value)
+            continue
+        if current != value:
+            changes[key] = value
+    return changes
 
 
 def plan_sync(existing, incoming, foreign=None) -> SyncPlan:
@@ -107,6 +169,11 @@ def plan_sync(existing, incoming, foreign=None) -> SyncPlan:
         new_status = getattr(tn, "status", None)
         if new_status != getattr(row, "provider_status", None):
             plan.restatus.append((row, new_status))
+        # One-way mirror of the TN Details block (tier/state/rate center/CNAM), same shape as
+        # the status mirror above: diff first so an unchanged poll writes nothing.
+        changes = _detail_changes(row, tn)
+        if changes:
+            plan.redetail.append((row, changes))
 
     for phone, row in by_phone.items():
         # Only ACTIVE rows soft-release on vanish; an already-released row that stays gone
@@ -144,15 +211,26 @@ async def apply_sync(db, records) -> dict:
     plan = plan_sync(existing, records, foreign=foreign)
     now = datetime.now(timezone.utc)
 
+    def _apply_details(row, tn) -> None:
+        for key, value in _incoming_details(tn).items():
+            setattr(row, key, value)
+        # Write-once: BulkVS reports the activation date verbatim and it never legitimately
+        # changes, so an unparseable value is skipped rather than clobbering a good one.
+        raw = getattr(tn, "activation_date", None)
+        if raw and getattr(row, "activation_date", None) is None:
+            row.activation_date = _parse_activation(raw)
+
     for row, tn in plan.adopt:
         row.owner_provider = settings.BULKVS_OWNER_PROVIDER
         row.media_provider = settings.BULKVS_MEDIA_PROVIDER
         row.active = True
         row.released_at = None
         row.provider_status = tn.status
+        _apply_details(row, tn)
         if tn.reference_id and tn.reference_id != row.friendly_name:
             row.friendly_name = tn.reference_id
     for tn in plan.insert:
+        details = _incoming_details(tn)
         db.add(
             Number(
                 provider_id=provider.id,
@@ -162,6 +240,8 @@ async def apply_sync(db, records) -> dict:
                 owner_provider=settings.BULKVS_OWNER_PROVIDER,
                 media_provider=settings.BULKVS_MEDIA_PROVIDER,
                 provider_status=tn.status,
+                activation_date=_parse_activation(getattr(tn, "activation_date", None)),
+                **details,
             )
         )
     for row, tn in plan.reactivate:
@@ -172,10 +252,14 @@ async def apply_sync(db, records) -> dict:
         # Backfill identity in case the row predates the split-identity columns.
         row.owner_provider = settings.BULKVS_OWNER_PROVIDER
         row.media_provider = settings.BULKVS_MEDIA_PROVIDER
+        _apply_details(row, tn)
     for row, label in plan.relabel:
         row.friendly_name = label
     for row, new_status in plan.restatus:
         row.provider_status = new_status
+    for row, changes in plan.redetail:
+        for key, value in changes.items():
+            setattr(row, key, value)
     for row in plan.soft_release:
         row.active = False
         row.released_at = now
@@ -188,11 +272,12 @@ async def apply_sync(db, records) -> dict:
         "adopted": len(plan.adopt),
         "relabeled": len(plan.relabel),
         "restatused": len(plan.restatus),
+        "redetailed": len(plan.redetail),
         "soft_released": len(plan.soft_release),
     }
     logger.info(
         "bulkvs number sync: inserted=%(inserted)d reactivated=%(reactivated)d "
         "adopted=%(adopted)d relabeled=%(relabeled)d restatused=%(restatused)d "
-        "soft_released=%(soft_released)d", counts
+        "redetailed=%(redetailed)d soft_released=%(soft_released)d", counts
     )
     return counts
