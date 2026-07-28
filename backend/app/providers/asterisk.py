@@ -430,5 +430,9 @@ def cdr_row_to_event(row: dict) -> NormalizedCallEvent | None:
         # billsec is the answered-duration; fall back to total duration.
         duration_seconds=_int(row.get("billsec")) or _int(row.get("duration")),
         provider_sequence=f"{linkedid}:{status}",
-        raw=dict(row),
+        # `raw` lands in a JSONB column, and the driver hands back real datetime objects for
+        # start/answer/end — json.dumps chokes on those ("Object of type datetime is not JSON
+        # serializable"), which killed the whole reconcile job the moment a real CDR row
+        # existed to read. The WS path never hit this because its raw is already-decoded JSON.
+        raw={k: (v.isoformat() if isinstance(v, datetime) else v) for k, v in row.items()},
     )

@@ -19,7 +19,9 @@ Verified here:
 Run: python -m tests.test_asterisk_recordings
 """
 
+import json
 import sys
+from datetime import datetime, timezone
 
 from app.providers.asterisk import (
     AsteriskAdapter,
@@ -56,16 +58,19 @@ def _rec_event(name, *, state="done", duration=12):
 
 
 def _cdr(**over):
-    """A CDR row as cdr_pgsql wrote it (dict, like SQLAlchemy .mappings())."""
+    """A CDR row as cdr_pgsql wrote it and the DRIVER hands it back (dict, like SQLAlchemy
+    .mappings()). The time columns are real `datetime` objects, NOT ISO strings: this fixture
+    used to fake them as strings, which is why nothing caught that `raw` was unserializable
+    until a real CDR row existed to read (see test_cdr_raw_is_json_serializable)."""
     row = {
         "linkedid": LINKEDID,
         "uniqueid": LINKEDID,   # entry leg: uniqueid == linkedid
         "src": "+13055551234",
         "dst": "+13055559999",
         "disposition": "ANSWERED",
-        "start": "2026-07-22T14:03:00+00:00",
-        "answer": "2026-07-22T14:03:05+00:00",
-        "end": "2026-07-22T14:04:00+00:00",
+        "start": datetime(2026, 7, 22, 14, 3, 0, tzinfo=timezone.utc),
+        "answer": datetime(2026, 7, 22, 14, 3, 5, tzinfo=timezone.utc),
+        "end": datetime(2026, 7, 22, 14, 4, 0, tzinfo=timezone.utc),
         "duration": 60,
         "billsec": 55,
     }
@@ -138,6 +143,23 @@ def test_cdr_backfills_missed_call():
           proj.calls[LINKEDID]["status"] == "completed" and proj.calls[LINKEDID]["rank"] == 4)
 
 
+def test_cdr_raw_is_json_serializable():
+    """`raw` lands in a JSONB column, so it must survive json.dumps. The driver returns real
+    datetimes for start/answer/end; passing them through raw made the whole reconcile_cdr job
+    raise "Object of type datetime is not JSON serializable" on the first real CDR row."""
+    print("CDR raw payload is JSON-serializable (JSONB column):")
+    evt = cdr_row_to_event(_cdr())
+    try:
+        encoded = json.dumps(evt.raw)
+    except TypeError as exc:  # noqa: PERF203 - the assertion IS the try/except
+        check(f"raw is JSON-serializable ({exc})", False)
+        return
+    check("raw is JSON-serializable", True)
+    check("datetimes preserved as ISO strings",
+          json.loads(encoded)["start"] == "2026-07-22T14:03:00+00:00")
+    check("non-datetime fields untouched", json.loads(encoded)["billsec"] == 55)
+
+
 def test_cdr_disposition_mapping():
     print("CDR disposition -> terminal status:")
     cases = {"ANSWERED": "completed", "NO ANSWER": "no-answer", "BUSY": "busy",
@@ -193,6 +215,7 @@ def main():
     test_parse_recording_event()
     test_route_recording()
     test_cdr_backfills_missed_call()
+    test_cdr_raw_is_json_serializable()
     test_cdr_disposition_mapping()
     test_cdr_secondary_leg_dropped()
     test_reconcile_idempotent_and_no_double_count()
