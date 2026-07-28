@@ -8,10 +8,12 @@ Notes that encode design decisions:
 """
 
 import uuid
+from datetime import date as dt_date
 from datetime import datetime
 
 from sqlalchemy import (
     Boolean,
+    Date,
     DateTime,
     ForeignKey,
     Index,
@@ -99,6 +101,21 @@ class Number(Base):
     # unset by default so no number can send until an operator explicitly enables it.
     sms_enabled: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false())
     sms_campaign_id: Mapped[str | None] = mapped_column(String)
+
+    # --- BulkVS /tnRecord "TN Details", mirrored by the sync (Billing) -----------------
+    # `tier` selects the inbound per-minute rate and is the single most cost-sensitive
+    # field on this row: the published tiers span $0.0003 to $0.0198 per minute. A DID with
+    # no tier is never guessed at — its legs are recorded as `unrated`.
+    tier: Mapped[str | None] = mapped_column(String)
+    state: Mapped[str | None] = mapped_column(String)
+    rate_center: Mapped[str | None] = mapped_column(String)
+    activation_date: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Carrier-side CNAM delivery. When on, BulkVS performs (and bills) a lookup per inbound
+    # call, which at this account's rates is a larger line than the minutes themselves.
+    cnam_enabled: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false())
+    # E911 is NOT reported by /tnRecord and no BulkVS endpoint exposes it, so it is operator-
+    # set rather than synced. Defaults off.
+    e911_enabled: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false())
 
 
 class Caller(Base):
@@ -495,6 +512,93 @@ class AgentVersion(Base):
     agent_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("agents.id"), index=True)
     version: Mapped[int] = mapped_column(Integer)  # 1-based, monotonically increasing per agent
     config: Mapped[dict] = mapped_column(JSONB)  # persona/voice/greeting/model/engine/tools/…
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class BillingRate(Base):
+    """The BulkVS price sheet, as data. Seeded from app.services.billing.SEED_RATES.
+
+    `source` is provenance, and it matters: 'sheet' rows were read off the operator's own
+    BulkVS portal price table (authoritative for this account), 'web' rows fill gaps the
+    portal only linked out to. Keeping the distinction visible means a surprising total can
+    be traced to a rate nobody ever verified.
+    """
+
+    __tablename__ = "billing_rates"
+
+    code: Mapped[str] = mapped_column(String, primary_key=True)
+    label: Mapped[str] = mapped_column(String)
+    unit: Mapped[str] = mapped_column(String)  # per_minute | per_event | per_month
+    amount: Mapped[float] = mapped_column(Numeric(12, 6))
+    # Per-minute rows only. Stored per-rate so one invoice check can correct the increment
+    # without a deploy, and so already-costed legs keep the increment they were billed under.
+    increment_seconds: Mapped[int | None] = mapped_column(Integer)
+    minimum_seconds: Mapped[int | None] = mapped_column(Integer)
+    lnp_fee: Mapped[float | None] = mapped_column(Numeric(12, 4))
+    source: Mapped[str] = mapped_column(String, default="sheet", server_default="sheet")
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class CallCharge(Base):
+    """One BulkVS-billable LEG (per charge kind) — the unit BulkVS actually meters.
+
+    Why legs and not calls: an inbound call a flow forwards back out over the same trunk is
+    billed TWICE (inbound minutes + outbound minutes). `calls` collapses every leg onto one
+    row keyed by Linkedid, so costing from it would understate a forwarded call by ~half.
+
+    The rate is STAMPED here at costing time (rate_code + rate_amount + increment_seconds),
+    mirroring how campaign_id is stamped onto calls at ingest: re-pricing later must never
+    silently rewrite what a past month cost.
+    """
+
+    __tablename__ = "call_charges"
+    __table_args__ = (
+        # Idempotency: re-running the reconciler can never double-bill a leg.
+        UniqueConstraint("uniqueid", "kind", name="uq_charge_leg_kind"),
+        Index("ix_call_charges_number_started", "number_id", "started_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_uuid)
+    uniqueid: Mapped[str] = mapped_column(String)          # Asterisk CDR leg id
+    linkedid: Mapped[str] = mapped_column(String, index=True)  # groups the legs of one call
+    kind: Mapped[str] = mapped_column(String, default="minutes", server_default="minutes")
+    call_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("calls.id"))
+    number_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("numbers.id"))
+    direction: Mapped[str] = mapped_column(String)         # inbound | outbound
+    channel: Mapped[str | None] = mapped_column(String)
+    src: Mapped[str | None] = mapped_column(String)
+    dst: Mapped[str | None] = mapped_column(String)
+    # CDR records dst='s' (a dialplan exten) on the flow-dial leg, so a forwarded call's real
+    # destination isn't recoverable from CDR alone.
+    dest_unknown: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false())
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    raw_billsec: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    billed_seconds: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    rate_code: Mapped[str | None] = mapped_column(String)
+    rate_amount: Mapped[float | None] = mapped_column(Numeric(12, 6))
+    increment_seconds: Mapped[int | None] = mapped_column(Integer)
+    amount: Mapped[float] = mapped_column(Numeric(12, 6), default=0, server_default="0")
+    # Recorded at 0 but FLAGGED — an unpriceable leg is surfaced, never silently free.
+    unrated: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false())
+    unrated_reason: Mapped[str | None] = mapped_column(String)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class BillingAdjustment(Base):
+    """A manual account-level charge with no call data behind it — LNP port fees, E911
+    overage, LIDB updates, directory listings. These are account events, not call events, so
+    they cannot be derived from CDR; entering them by hand keeps the monthly total complete
+    without inventing anything."""
+
+    __tablename__ = "billing_adjustments"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_uuid)
+    occurred_on: Mapped[dt_date] = mapped_column(Date, index=True)
+    code: Mapped[str] = mapped_column(String)
+    description: Mapped[str | None] = mapped_column(String)
+    amount: Mapped[float] = mapped_column(Numeric(12, 4))
+    number_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("numbers.id"))
+    created_by_user_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 

@@ -274,6 +274,12 @@ class Settings(BaseSettings):
     ASTERISK_CDR_WINDOW_HOURS: int = 4
     ASTERISK_CDR_POLL_SECONDS: int = 300
 
+    # --- BulkVS cost projection (Billing tab) ---------------------------------------
+    # How often billable legs are priced out of the same CDR window. Slower than the CDR
+    # reconcile: a cost row is only useful once its call has settled, and charges are
+    # write-once, so there is nothing to gain from pricing aggressively.
+    BILLING_POLL_SECONDS: int = 600
+
     # BulkVS SIP trunk. Secrets from env. Inbound auth is by SBC source IP (see
     # asterisk/README.md), so the trunk name identifies the PJSIP endpoint/aor/identify
     # rendered from the asterisk/ templates; username/password cover outbound REGISTER/auth.

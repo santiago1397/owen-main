@@ -14,6 +14,7 @@ import IncomingCallModal from "./components/IncomingCallModal";
 import { SoftphoneProvider } from "./lib/softphoneContext";
 import Agents from "./pages/Agents";
 import Attribution from "./pages/Attribution";
+import Billing from "./pages/Billing";
 import Callers from "./pages/Callers";
 import Calls from "./pages/Calls";
 import Dashboard from "./pages/Dashboard";
@@ -70,6 +71,7 @@ function Layout({ children }: { children: any }) {
         <NavLink to="/" end className={link}>Dashboard</NavLink>
         <NavLink to="/campaigns" className={link}>Campaign ROI</NavLink>
         <NavLink to="/calls" className={link}>Calls</NavLink>
+        <NavLink to="/billing" className={link}>Billing</NavLink>
         <NavLink to="/callers" className={link}>Callers</NavLink>
         <NavLink to="/emails" className={link}>Email Log</NavLink>
 
@@ -127,6 +129,7 @@ export default function App() {
       <Route path="/login" element={<Login />} />
       <Route path="/" element={<Protected><Dashboard /></Protected>} />
       <Route path="/campaigns" element={<Protected><Attribution /></Protected>} />
+      <Route path="/billing" element={<Protected><Billing /></Protected>} />
       <Route path="/calls" element={<Protected><Calls /></Protected>} />
       <Route path="/numbers" element={<Protected><Numbers /></Protected>} />
       <Route path="/numbers/:id" element={<Protected><NumberDetail /></Protected>} />
