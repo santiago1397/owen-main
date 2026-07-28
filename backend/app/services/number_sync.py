@@ -125,6 +125,15 @@ def _detail_changes(row, tn) -> dict:
             continue
         if current != value:
             changes[key] = value
+
+    # Backfill activation_date on an EXISTING row too, not just on insert/adopt/reactivate —
+    # otherwise a DID that has only ever taken the plain-update path never gets one, and its
+    # one-time setup fee can never be attributed to a period. Write-once: an already-set
+    # value is left alone (the carrier's activation date never legitimately changes).
+    if getattr(row, "activation_date", None) is None:
+        activated = _parse_activation(getattr(tn, "activation_date", None))
+        if activated is not None:
+            changes["activation_date"] = activated
     return changes
 
 

@@ -153,6 +153,22 @@ def main():
                      incoming=[_tn("+1", status="Active")])
     check("a TN with no TN Details block -> no redetail (None/False is not a change)",
           not plan.redetail)
+    # activation_date must backfill on the PLAIN-UPDATE path too, not only on
+    # insert/adopt/reactivate — otherwise a long-lived DID never gets one and its one-time
+    # setup fee can never be attributed to a period.
+    aged = _row("+15618788090", provider_status="Active")
+    aged.tier, aged.cnam_enabled, aged.activation_date = "0", False, None
+    tn = _tn("+15618788090", status="Active", tier="0")
+    tn.activation_date = "2026-07-21 16:57:40"
+    plan = plan_sync(existing=[aged], incoming=[tn])
+    check("activation_date backfills on an existing row",
+          plan.redetail and plan.redetail[0][1].get("activation_date") is not None)
+    aged2 = _row("+15618788090", provider_status="Active")
+    aged2.tier, aged2.cnam_enabled = "0", False
+    aged2.activation_date = "already-set"
+    plan = plan_sync(existing=[aged2], incoming=[tn])
+    check("activation_date is write-once (never overwritten)",
+          not any("activation_date" in c for _, c in plan.redetail))
 
     print("plan_sync — ported DID adopts the legacy (foreign-provider) row instead of duplicating:")
     legacy = _row("+19195550009", label="GBP Legacy Twilio")
