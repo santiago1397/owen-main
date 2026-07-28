@@ -275,10 +275,17 @@ class Settings(BaseSettings):
     ASTERISK_CDR_POLL_SECONDS: int = 300
 
     # --- BulkVS cost projection (Billing tab) ---------------------------------------
-    # How often billable legs are priced out of the same CDR window. Slower than the CDR
-    # reconcile: a cost row is only useful once its call has settled, and charges are
-    # write-once, so there is nothing to gain from pricing aggressively.
+    # Charges come from BulkVS's own rated /voice records, so this polls the CARRIER, not
+    # Asterisk. Kept unhurried: their records settle after the call ends and re-fetching
+    # costs an API round-trip for data that does not change.
     BILLING_POLL_SECONDS: int = 600
+    # Look-back per poll. Wider than the poll interval so a missed tick self-heals, and wide
+    # enough to catch records BulkVS posts late.
+    BILLING_WINDOW_HOURS: int = 48
+    # /voice stamps callStart in the account's display timezone with no offset. Verified
+    # against the same calls in Asterisk's UTC CDR: BulkVS 15:04:41 == 19:04 UTC (UTC-4).
+    # Wrong here means every charge lands in the wrong day bucket.
+    BULKVS_CDR_TZ: str = "America/New_York"
 
     # BulkVS SIP trunk. Secrets from env. Inbound auth is by SBC source IP (see
     # asterisk/README.md), so the trunk name identifies the PJSIP endpoint/aor/identify

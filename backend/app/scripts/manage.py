@@ -222,11 +222,11 @@ async def list_rates() -> None:
 
 async def set_rate(code: str, amount: float | None, increment: int | None,
                    minimum: int | None) -> None:
-    """Correct a rate (or its billing increment) after checking a real BulkVS invoice.
+    """Correct a rate in the local price sheet.
 
-    Existing `call_charges` rows are deliberately NOT re-priced — the rate is stamped on each
-    row at costing time, so past periods keep the numbers you already looked at. Only legs
-    costed after this change use the new rate.
+    Only RECURRING charges (did.monthly.*, e911.monthly, did.setup) are computed from this
+    table — per-call usage comes from BulkVS's own rated /voice records and is unaffected by
+    anything set here.
     """
     from app.models import BillingRate
 
@@ -264,11 +264,21 @@ async def add_adjustment(occurred_on: str, code: str, amount: float,
 
 
 async def cost_now(hours: int | None) -> None:
-    """Price the recent CDR window on demand instead of waiting for the schedule."""
+    """Pull BulkVS's rated records on demand instead of waiting for the schedule."""
     from app.workers.billing import reconcile_charges
 
     n = await reconcile_charges(hours)
     print(f"billing reconcile done: {n} charge rows written")
+
+
+async def purge_estimates() -> None:
+    """One-time cleanup after switching from the Asterisk-CDR estimate to BulkVS's rated
+    /voice feed: drops the bogus per-call CNAM rows (never actually billed) and the
+    locally-priced minutes rows, which `cost-now` then re-creates from real amounts."""
+    from app.workers.billing import purge_estimated_charges
+
+    n = await purge_estimated_charges()
+    print(f"purged {n} superseded estimated charge rows (run `cost-now` to repopulate)")
 
 
 def main() -> None:
@@ -327,8 +337,11 @@ def main() -> None:
     aa.add_argument("--amount", type=float, required=True)
     aa.add_argument("--description")
 
-    cn = sub.add_parser("cost-now", help="Price the recent CDR window immediately")
+    cn = sub.add_parser("cost-now", help="Pull BulkVS rated call records immediately")
     cn.add_argument("--hours", type=int)
+
+    sub.add_parser("billing-purge-estimates",
+                   help="One-time: drop charge rows written by the old local estimate")
 
     args = p.parse_args()
     if args.cmd == "add-campaign":
@@ -355,6 +368,8 @@ def main() -> None:
         asyncio.run(add_adjustment(args.date, args.code, args.amount, args.description))
     elif args.cmd == "cost-now":
         asyncio.run(cost_now(args.hours))
+    elif args.cmd == "billing-purge-estimates":
+        asyncio.run(purge_estimates())
 
 
 if __name__ == "__main__":

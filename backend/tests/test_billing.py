@@ -1,12 +1,13 @@
 """Unit test for the BulkVS cost kernel (app/services/billing.py).
 
-No DB, no Asterisk, no network — the kernel is stdlib-only by design, like
-app.flows.interpreter and app.services.inbox_threads, so the rating rules are proven in
-isolation against REAL CDR rows captured from production (linkedid 1785265481.14).
+No DB, no network — the kernel is stdlib-only by design, like app.flows.interpreter and
+app.services.inbox_threads.
 
-Those fixtures include the two-leg shape that makes this feature necessary: an inbound call
-the flow forwards back out over the same BulkVS trunk is billed TWICE — once inbound, once
-outbound — which is exactly what a per-CALL cost view would hide.
+Every fixture below is a REAL record pulled from this account's BulkVS /voice feed, so the
+tests pin behaviour against what the carrier actually billed rather than what we assumed.
+Notably they encode the two facts that overturned the original estimate-based design:
+  - a flow-forwarded call bills TWICE, seconds apart (inbound + outbound);
+  - outbound is NOT a flat $0.004 — one observed call rated at $0.0099/min.
 
 Run: python -m tests.test_billing
 """
@@ -16,8 +17,6 @@ from decimal import Decimal
 
 from app.services import billing as b
 
-KNOWN = {r["code"] for r in b.SEED_RATES}
-
 
 def check(name, cond):
     print(f"  [{'PASS' if cond else 'FAIL'}] {name}")
@@ -25,148 +24,151 @@ def check(name, cond):
         raise SystemExit(f"billing failed at: {name}")
 
 
-# --- real production CDR rows -----------------------------------------------------------
+# --- real records from the live /voice feed -------------------------------------------------
 
-INBOUND_LEG = {
-    "uniqueid": "1785265481.14", "linkedid": "1785265481.14",
-    "channel": "PJSIP/bulkvs-00000008", "dstchannel": "PJSIP/bulkvs-00000009",
-    "src": "+12178584185", "dst": "+15618788090", "billsec": 15, "disposition": "ANSWERED",
+INBOUND = {
+    "callStart": "2026-07-28 15:04:41", "durationSecs": "16",
+    "callSource": "+12178584185", "callDestination": "15618788090",
+    "callID": "422088617_50304226@206.146.99.24",
+    "perMinute": "0.0003", "amount": "0.00009", "callType": "inbound",
+    "Cnam": "THOMASBORO   IL", "trunkGroup": "vps-main-trunk",
 }
-FORWARD_LEG = {
-    "uniqueid": "flow-dial-a01e3c45139a42a98afd83019ea60252", "linkedid": "1785265481.14",
-    "channel": "PJSIP/bulkvs-00000009", "dstchannel": "",
-    "src": "", "dst": "s", "billsec": 0, "disposition": "ANSWERED",
+# The SAME call, 8 seconds later: the flow forwarding back out over the trunk.
+FORWARD = {
+    "callStart": "2026-07-28 15:04:49", "durationSecs": "7",
+    "callSource": "+12178584185", "callDestination": "19549147244",
+    "callID": "a2fddc3d-8366-4f2f-af28-fc6ba1a521d9",
+    "perMinute": ".004", "amount": "0.00080", "callType": "outbound",
+    "trunkGroup": "144.126.138.157",
 }
-OPERATOR_LEG = {
-    "uniqueid": "x.1", "linkedid": "x.1",
-    "channel": "PJSIP/operator-admin-santiagoproperties.uk", "src": "", "dst": "", "billsec": 30,
+# An outbound call rated well above "domestic" — proof a single flat outbound rate is wrong.
+EXPENSIVE = {
+    "callStart": "2026-07-24 10:47:01", "durationSecs": "11",
+    "callSource": "+16452516222", "callDestination": "15616905516",
+    "callID": "expensive-1", "perMinute": "0.0099", "amount": "0.00198",
+    "callType": "outbound",
 }
-LOCAL_LEG = {
-    "uniqueid": "y.1", "linkedid": "y.1",
-    "channel": "Local/cdrtest2@from-operator-00000002;1", "src": "", "dst": "", "billsec": 5,
+LONG_CALL = {
+    "callStart": "2026-07-24 01:22:09", "durationSecs": "140",
+    "callSource": "+16452516222", "callDestination": "19549147244",
+    "callID": "long-1", "perMinute": ".004", "amount": "0.00960", "callType": "outbound",
 }
 
 
-def test_leg_classification():
-    print("classify_leg — which legs BulkVS actually meters:")
-    inbound = b.classify_leg(INBOUND_LEG)
-    check("entry leg on the trunk -> inbound",
-          inbound is not None and inbound.direction == "inbound")
-    check("inbound keeps its answered seconds", inbound.raw_billsec == 15)
+def test_parse_basics():
+    print("parse_voice_record — normalizing BulkVS's rated records:")
+    c = b.parse_voice_record(INBOUND)
+    check("record parses", c is not None)
+    check("callID becomes the idempotency key", c.call_ref == INBOUND["callID"])
+    check("callType -> direction", c.direction == "inbound")
+    check("duration preserved", c.duration_seconds == 16)
+    check("perMinute parsed", c.per_minute == Decimal("0.0003"))
+    check("amount parsed (THEIR figure, not ours)", c.amount == Decimal("0.00009"))
+    check("delivered CNAM captured but not billed", c.cnam == "THOMASBORO   IL")
+    check("not flagged unrated", not c.unrated)
 
-    fwd = b.classify_leg(FORWARD_LEG)
-    check("secondary trunk leg -> outbound", fwd is not None and fwd.direction == "outbound")
-    check("forward leg shares the call's linkedid (a 2nd charge on ONE call)",
-          fwd.linkedid == INBOUND_LEG["linkedid"])
-
-    check("operator WebRTC leg never billed", b.classify_leg(OPERATOR_LEG) is None)
-    check("internal Local leg never billed", b.classify_leg(LOCAL_LEG) is None)
-    check("trunk name is configurable",
-          b.classify_leg(INBOUND_LEG, trunk_name="othertrunk") is None)
-    check("missing linkedid is not billable",
-          b.classify_leg({**INBOUND_LEG, "linkedid": ""}) is None)
+    # BulkVS writes rates inconsistently: '.004' on one record, '0.0003' on another.
+    check("leading-dot rate parses", b.parse_voice_record(FORWARD).per_minute == Decimal(".004"))
+    check("no callID -> dropped", b.parse_voice_record({"callStart": "x"}) is None)
 
 
-def test_rounding():
-    print("\nround_billsec — 6-second increments:")
-    check("unanswered (billsec 0) bills nothing — the minimum is for CONNECTED calls",
-          b.round_billsec(0) == 0)
-    for billsec, expected in [(1, 6), (6, 6), (7, 12), (15, 18), (28, 30), (60, 60), (61, 66)]:
-        check(f"{billsec}s -> {expected}s billed", b.round_billsec(billsec) == expected)
-    check("increment is configurable (per-minute rounding)",
-          b.round_billsec(15, increment_seconds=60, minimum_seconds=60) == 60)
+def test_timezone():
+    print("\ncallStart is account-local, NOT UTC:")
+    # Verified against the same call in Asterisk's UTC CDR: 15:04:41 BulkVS == 19:04 UTC.
+    c = b.parse_voice_record(INBOUND)
+    check("15:04:41 Eastern -> 19:04 UTC",
+          c.started_at.hour == 19 and c.started_at.minute == 4)
+    check("stored as aware UTC", c.started_at.tzinfo is not None
+          and c.started_at.utcoffset().total_seconds() == 0)
+    # Treating it as UTC would file the charge 4h early and in the wrong day bucket.
+    utc = b.parse_voice_record(INBOUND, tz_name="UTC")
+    check("timezone is honoured, not hardcoded", utc.started_at.hour == 15)
+
+
+def test_billed_seconds_from_their_numbers():
+    print("\nbilled_seconds — derived from THEIR amount/rate so it always reconciles:")
+    check("16s call billed as 18s (6s increment)",
+          b.parse_voice_record(INBOUND).billed_seconds == 18)
+    check("7s call billed as 12s", b.parse_voice_record(FORWARD).billed_seconds == 12)
+    check("140s call billed as 144s", b.parse_voice_record(LONG_CALL).billed_seconds == 144)
+    check("11s call billed as 12s", b.parse_voice_record(EXPENSIVE).billed_seconds == 12)
+
+
+def test_forwarded_call_bills_twice():
+    print("\nthe central fact: a forwarded call is TWO charges:")
+    inb = b.parse_voice_record(INBOUND)
+    out = b.parse_voice_record(FORWARD)
+    check("distinct records", inb.call_ref != out.call_ref)
+    check("8 seconds apart — same caller, one call",
+          abs((out.started_at - inb.started_at).total_seconds()) == 8)
+    check("opposite directions", inb.direction == "inbound" and out.direction == "outbound")
+    total = inb.amount + out.amount
+    check("the forward leg costs ~9x the inbound leg", out.amount > inb.amount * 8)
+    check("call total is the SUM of both legs", total == Decimal("0.00089"))
+
+
+def test_outbound_is_not_flat():
+    print("\noutbound is not a flat rate (why a local rate table was wrong):")
+    cheap = b.parse_voice_record(FORWARD)
+    dear = b.parse_voice_record(EXPENSIVE)
+    check("two outbound calls, different rates",
+          cheap.per_minute == Decimal(".004") and dear.per_minute == Decimal("0.0099"))
+    check("the dearer one is ~2.5x domestic", dear.per_minute > cheap.per_minute * Decimal("2"))
+
+
+def test_unrated_is_flagged_not_zeroed():
+    print("\na record with no readable amount is flagged, never counted as $0:")
+    c = b.parse_voice_record({**INBOUND, "amount": None})
+    check("flagged unrated", c.unrated)
+    check("reason recorded", "no amount" in (c.unrated_reason or ""))
+    check("amount stays None rather than 0", c.amount is None)
+    junk = b.parse_voice_record({**INBOUND, "amount": "not-a-number"})
+    check("unparseable amount also flagged", junk.unrated)
+
+
+def test_rounding_helper():
+    print("\nround_billsec — only a fallback now, still 6s increments:")
+    check("unanswered bills nothing", b.round_billsec(0) == 0)
+    for s, exp in [(1, 6), (6, 6), (7, 12), (16, 18), (140, 144)]:
+        check(f"{s}s -> {exp}s", b.round_billsec(s) == exp)
     check("zero increment degrades to per-second, never ZeroDivisionError",
           b.round_billsec(15, increment_seconds=0, minimum_seconds=0) == 15)
 
 
-def test_inbound_rating():
-    print("\nresolve_rate_code — inbound prices off the DID's tier:")
-    leg = b.classify_leg(INBOUND_LEG)
-    r = b.resolve_rate_code(leg, number_tier="0", number_phone="+15618788090", known_codes=KNOWN)
-    check("tier 0 DID -> inbound.tier.0", r.code == "inbound.tier.0" and not r.unrated)
-
-    r = b.resolve_rate_code(leg, number_tier=None, number_phone="+15618788090", known_codes=KNOWN)
-    check("no tier -> UNRATED, never guessed (tiers span $0.0003-$0.0198/min)",
-          r.unrated and "tier" in (r.unrated_reason or ""))
-
-    r = b.resolve_rate_code(leg, number_tier="0", number_phone="+18005551212", known_codes=KNOWN)
-    check("toll-free overrides tier", r.code == "inbound.tollfree")
-
-    r = b.resolve_rate_code(leg, number_tier="99", number_phone="+15618788090", known_codes=KNOWN)
-    check("tier with no configured rate -> unrated", r.unrated)
-
-
-def test_outbound_rating():
-    print("\nresolve_rate_code — outbound, and the unreadable-vs-foreign distinction:")
-    fwd = b.classify_leg(FORWARD_LEG)
-    check("flow-dial leg's destination is unreadable (Asterisk writes dst='s')",
-          fwd.dest_unknown is True)
-    check("unreadable destination -> priced domestic (this trunk only serves NANP)",
-          b.resolve_rate_code(fwd, known_codes=KNOWN).code == "outbound.domestic")
-
-    intl = b.classify_leg({**FORWARD_LEG, "dst": "+442071234567", "billsec": 30})
-    r = b.resolve_rate_code(intl, known_codes=KNOWN)
-    check("readable NON-NANP destination is NOT unreadable", intl.dest_unknown is False)
-    check("readable international -> UNRATED, must not fall through to the domestic rate",
-          r.unrated and "non-domestic" in (r.unrated_reason or ""))
-
-    dom = b.classify_leg({**FORWARD_LEG, "dst": "+19549147244", "billsec": 30})
-    check("readable domestic -> outbound.domestic",
-          dom.dest_unknown is False
-          and b.resolve_rate_code(dom, known_codes=KNOWN).code == "outbound.domestic")
-
-
-def test_costing():
-    print("\ncost_of_minutes — exact at very small rates:")
-    check("18 billed seconds @ $0.0003/min = $0.000090",
-          b.cost_of_minutes(18, "0.0003") == Decimal("0.000090"))
-    check("zero billed seconds costs nothing",
-          b.cost_of_minutes(0, "0.0040") == Decimal("0.000000"))
-
-    inbound = b.cost_of_minutes(b.round_billsec(180), "0.0003")
-    outbound = b.cost_of_minutes(b.round_billsec(180), "0.0040")
-    check("forwarding costs 13x receiving — the forward leg dominates a forwarded call",
-          outbound > inbound and (outbound / inbound).quantize(Decimal("1")) == Decimal("13"))
-
-
-def test_seed_table():
-    print("\nSEED_RATES — the price sheet as data:")
+def test_recurring_rate_table():
+    print("\nSEED_RATES — now only load-bearing for RECURRING charges:")
     codes = [r["code"] for r in b.SEED_RATES]
     check("codes are unique", len(codes) == len(set(codes)))
-
-    missing = [
-        code
-        for tier in ("0", "10", "1", "2", "3", "4", "AK", "PRI", "5", "6")
-        for code in (f"{b.INBOUND_TIER_PREFIX}{tier}", f"{b.DID_MONTHLY_PREFIX}{tier}")
-        if code not in KNOWN
-    ]
-    check("every tier the resolver can name is seeded (else it'd be unrated in prod)",
-          not missing)
-    check("non-tier codes seeded",
-          all(c in KNOWN for c in
-              (b.INBOUND_TOLLFREE, b.OUTBOUND_DOMESTIC, b.CNAM_DIP, b.E911_MONTHLY)))
-
     by_code = {r["code"]: r for r in b.SEED_RATES}
-    check("inbound tier 0 = $0.0003/min", by_code["inbound.tier.0"]["amount"] == "0.0003")
-    check("inbound tier 3 = $0.0171/min", by_code["inbound.tier.3"]["amount"] == "0.0171")
-    check("outbound domestic = $0.0040/min", by_code["outbound.domestic"]["amount"] == "0.0040")
+    for tier in ("0", "10", "1", "2", "3", "4", "AK", "PRI", "5", "6"):
+        check(f"tier {tier} has a monthly rate", f"{b.DID_MONTHLY_PREFIX}{tier}" in by_code)
     check("tier 0 monthly = $0.06", by_code["did.monthly.tier.0"]["amount"] == "0.06")
-    check("CNAM dip = $0.0020", by_code["cnam.dip"]["amount"] == "0.0020")
     check("E911 = $0.49/number", by_code["e911.monthly"]["amount"] == "0.49")
+    check("DID setup = $0.25 one-time", by_code["did.setup"]["amount"] == "0.25")
+    check("toll-free monthly = $0.14", by_code["did.monthly.tollfree"]["amount"] == "0.14")
+    check("web-sourced rates stay identifiable",
+          by_code["did.setup"]["source"] == "web"
+          and by_code["did.monthly.tier.0"]["source"] == "sheet")
+    # Live records confirm the published per-minute figures even though usage no longer uses
+    # them for costing.
+    check("published inbound rate matches what BulkVS actually charged",
+          by_code["inbound.tier.0"]["amount"] == "0.0003"
+          and b.parse_voice_record(INBOUND).per_minute == Decimal("0.0003"))
 
-    check("web-sourced rates stay identifiable (provenance is load-bearing)",
-          by_code["sms.outbound"]["source"] == "web"
-          and by_code["did.setup"]["source"] == "web"
-          and by_code["inbound.tier.0"]["source"] == "sheet")
+    print("\nis_toll_free — still used to pick the recurring rate:")
+    check("800 is toll free", b.is_toll_free("+18005551212"))
+    check("561 is not", not b.is_toll_free("+15618788090"))
 
 
 def main():
-    test_leg_classification()
-    test_rounding()
-    test_inbound_rating()
-    test_outbound_rating()
-    test_costing()
-    test_seed_table()
+    test_parse_basics()
+    test_timezone()
+    test_billed_seconds_from_their_numbers()
+    test_forwarded_call_bills_twice()
+    test_outbound_is_not_flat()
+    test_unrated_is_flagged_not_zeroed()
+    test_rounding_helper()
+    test_recurring_rate_table()
     print("\nALL BILLING CHECKS PASSED")
 
 

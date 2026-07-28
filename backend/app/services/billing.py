@@ -1,29 +1,44 @@
-"""Pure BulkVS cost-estimation kernel (Billing tab).
+"""Pure BulkVS cost kernel (Billing tab).
 
-This is an ESTIMATE, never an invoice. BulkVS publishes no usage/billing API — every
-path probed (/cdr, /usage, /invoice, /billing) returns the same 200-with-1-byte body as a
-nonsense URL, i.e. they do not exist. So cost is derived from Asterisk's own CDR, which is
-the only per-leg record of what actually traversed the trunk.
+USAGE COST IS NOT ESTIMATED. BulkVS exposes `GET /voice` — its own RATED call detail
+records, carrying `perMinute` (the rate they applied) and `amount` (what they actually
+charged). That feed is the source of truth for per-call cost, so no local rate table is
+consulted when pricing a call.
 
-THE CENTRAL FACT: one caller-facing call can be TWO billable legs. An inbound call that a
-flow forwards back out over the same trunk is billed by BulkVS as inbound minutes AND
-outbound minutes. `calls` deliberately collapses every leg onto one row (provider_call_sid =
-Linkedid), which is exactly the wrong shape for billing — hence a per-LEG projection.
+(An earlier design costed usage from Asterisk's CDR against a hand-maintained rate table,
+on the mistaken belief that BulkVS had no billing API. Probing guessed endpoint names
+(/cdr, /usage, /invoice, /billing) is what produced that error — they all return the same
+200-with-1-byte body as a nonsense URL, but the OpenAPI spec at /api/v1.0/openapi lists
+/voice. Checking real records against that approach found it wrong in BOTH directions:
+Asterisk reports billsec=0 on a flow-dial leg that BulkVS actually billed for 21 seconds,
+and outbound is not a flat $0.004 — one observed call rated at $0.0099/min.)
 
-Kept stdlib-only (no sqlalchemy, no app.core.config) so the classification, rounding and
-rate-resolution rules are unit-testable in a bare sandbox, exactly like app.flows.interpreter
-and app.services.inbox_threads. The DB-aware applier lives in app/workers/billing.py.
+The RATE TABLE survives for what /voice does not cover: recurring per-DID monthly charges,
+E911, and one-time setup fees. Those are account-level facts with no call record behind them.
+
+THE CENTRAL FACT, confirmed against live BulkVS records: one caller-facing call can be TWO
+billed records. An inbound call that a flow forwards back out over the same trunk bills as
+inbound minutes AND outbound minutes, seconds apart:
+    15:04:41  inbound   +12178584185 -> 15618788090   16s  $0.00009
+    15:04:49  outbound  +12178584185 -> 19549147244    7s  $0.00080
+`calls` deliberately collapses every leg onto one row (provider_call_sid = Linkedid), which
+is exactly the wrong shape for billing — hence a per-LEG projection.
+
+Kept stdlib-only (no sqlalchemy, no app.core.config) so record parsing, rounding and the
+recurring-rate lookups are unit-testable in a bare sandbox, exactly like
+app.flows.interpreter and app.services.inbox_threads. The DB-aware applier lives in
+app/workers/billing.py.
 
 RATE PROVENANCE is tracked per rate row (`source`), because not every number is equally
 trustworthy:
   - "sheet" — read off the operator's own BulkVS portal price table. Authoritative.
   - "web"   — filled from public BulkVS pricing where the portal sheet had a "View" link.
-              Every item where the two overlap matches exactly (inbound $0.0003, outbound
-              $0.004, toll-free $0.0055/$0.14, CNAM $0.002, E911 $0.49, DID $0.06 — 7 for 7),
-              which is why the web-sourced gaps are trusted enough to seed.
-Unknown/unresolvable rates are NEVER silently costed at $0 — the leg is marked `unrated`
-and surfaced, because a billing estimate that quietly under-reports is worse than one that
-admits ignorance.
+Both are now only used for RECURRING charges; the /voice feed supersedes them for usage.
+The published per-minute rows are kept for reference (and their LNP fees), and live records
+confirm them: observed inbound rated at exactly $0.0003/min, outbound at $0.004/min.
+
+A record whose amount cannot be read is marked `unrated` and surfaced, NEVER counted as $0
+— a bill that quietly under-reports is worse than one that admits ignorance.
 """
 
 from __future__ import annotations
@@ -51,8 +66,12 @@ DID_MONTHLY_PREFIX = "did.monthly.tier."   # + tier
 TOLLFREE_MONTHLY = "did.monthly.tollfree"
 E911_MONTHLY = "e911.monthly"
 
-# Charge kinds written to call_charges (one row per leg per kind).
+# Charge kinds written to call_charges.
 KIND_MINUTES = "minutes"
+# NOTE: a per-call CNAM charge was previously written and is NOT billed. Live /voice records
+# show inbound `amount` equal to minutes alone (24s x $0.0003/60 = $0.00012, exactly), with
+# the CNAM value delivered as a free field on the record. The constant remains only so the
+# reconciler can purge the bogus rows it used to write.
 KIND_CNAM = "cnam"
 
 # BulkVS bills in 6-second increments with a 6-second minimum. Sourced from public BulkVS
@@ -129,7 +148,9 @@ SEED_RATES: list[dict] = [
     {"code": OUTBOUND_DOMESTIC, "label": "Outbound Calling Domestic",
      "unit": "per_minute", "amount": "0.0040", "source": "sheet"},
     # --- additional services --------------------------------------------------------------
-    {"code": CNAM_DIP, "label": "CNAM lookup", "unit": "per_event",
+    # Reference only: live /voice records show inbound `amount` equal to minutes alone, so
+    # CNAM is NOT charged per call on this account despite Cnam being enabled on the DIDs.
+    {"code": CNAM_DIP, "label": "CNAM lookup (not billed per call)", "unit": "per_event",
      "amount": "0.0020", "source": "sheet"},
     {"code": LRN_DIP, "label": "LRN lookup", "unit": "per_event",
      "amount": "0.0001", "source": "sheet"},
@@ -147,26 +168,7 @@ SEED_RATES: list[dict] = [
 ]
 
 
-# --- leg classification -------------------------------------------------------------------
-
-
-@dataclass
-class BillableLeg:
-    """One leg of a call that traversed the BulkVS trunk, i.e. one thing BulkVS meters."""
-
-    uniqueid: str
-    linkedid: str
-    direction: str            # "inbound" | "outbound"
-    channel: str
-    src: str | None
-    dst: str | None
-    raw_billsec: int
-    # True when the CDR row records NO usable destination number at all — Asterisk writes
-    # dst='s' (a dialplan extension) on the flow-dial leg, so a forwarded call's real
-    # destination is not recoverable from CDR. This means "unreadable", NOT "foreign": a
-    # destination we CAN read but that isn't NANP is a different case entirely (unrated),
-    # and conflating the two would price international calls at the domestic rate.
-    dest_unknown: bool = False
+# --- helpers ------------------------------------------------------------------------------
 
 
 def is_toll_free(e164: str | None) -> bool:
@@ -174,76 +176,6 @@ def is_toll_free(e164: str | None) -> bool:
     if len(digits) == 11 and digits.startswith("1"):
         digits = digits[1:]
     return len(digits) == 10 and digits[:3] in TOLL_FREE_NPAS
-
-
-def is_nanp(e164: str | None) -> bool:
-    """True for a North-American-Numbering-Plan destination (the only outbound rate we hold).
-
-    Deliberately strict: 10 digits, or 11 beginning with 1. Anything else (international,
-    a dialplan extension like 's', an empty string) is NOT treated as domestic — it resolves
-    to no rate code and the leg is flagged unrated rather than priced at the domestic rate.
-    """
-    digits = "".join(c for c in (e164 or "") if c.isdigit())
-    if len(digits) == 11 and digits.startswith("1"):
-        return True
-    return len(digits) == 10
-
-
-def classify_leg(row: dict, trunk_name: str = "bulkvs") -> BillableLeg | None:
-    """Decide whether a CDR row is a BulkVS-billable leg, and in which direction.
-
-    Billable iff the leg's own CHANNEL is on the BulkVS trunk (`PJSIP/<trunk>-…`) — that is
-    literally what "traversed BulkVS" means. Operator WebRTC legs (`PJSIP/operator-…`) and
-    internal `Local/…` legs never touch the carrier and are never billed.
-
-    Direction reuses the entry-channel rule already locked in providers/asterisk.py: Asterisk
-    sets a new channel's Linkedid to the Uniqueid of the first channel in the call, so the
-    entry leg is the one whose `uniqueid == linkedid`.
-      - entry leg on the trunk      -> the call ARRIVED from BulkVS  -> inbound
-      - secondary leg on the trunk  -> we DIALED OUT over BulkVS     -> outbound
-    That single rule handles both shapes correctly: an inbound call forwarded by a flow
-    (entry=inbound + flow-dial=outbound), and a manual operator call (entry is the operator's
-    non-trunk WebRTC leg and is not billed; the trunk leg is secondary -> outbound).
-
-    Returns None for anything not billable.
-    """
-    channel = str(row.get("channel") or "")
-    if not channel.startswith(f"PJSIP/{trunk_name}-"):
-        return None
-
-    uniqueid = str(row.get("uniqueid") or "")
-    linkedid = str(row.get("linkedid") or "")
-    if not uniqueid or not linkedid:
-        return None
-
-    direction = "inbound" if uniqueid == linkedid else "outbound"
-    dst = row.get("dst")
-    src = row.get("src")
-
-    # billsec is answered seconds; unanswered legs are 0 and therefore cost nothing, but they
-    # are still recorded so the log shows the call happened.
-    try:
-        raw_billsec = int(row.get("billsec") or 0)
-    except (TypeError, ValueError):
-        raw_billsec = 0
-
-    # The destination only matters for OUTBOUND rating. "Unknown" means the row carries no
-    # dialable number — a dialplan exten ('s'), an internal extension, or nothing — as
-    # opposed to a readable number that happens to be international. Anything with fewer
-    # digits than the shortest real destination is treated as not-a-number.
-    dest_digits = "".join(c for c in str(dst or "") if c.isdigit())
-    dest_unknown = direction == "outbound" and len(dest_digits) < 7
-
-    return BillableLeg(
-        uniqueid=uniqueid,
-        linkedid=linkedid,
-        direction=direction,
-        channel=channel,
-        src=str(src) if src else None,
-        dst=str(dst) if dst else None,
-        raw_billsec=max(raw_billsec, 0),
-        dest_unknown=dest_unknown,
-    )
 
 
 # --- rounding + costing ---------------------------------------------------------------------
@@ -281,56 +213,104 @@ def quantize_money(value) -> Decimal:
     return _d(value).quantize(_MONEY_Q, rounding=ROUND_HALF_UP)
 
 
-# --- rate resolution ------------------------------------------------------------------------
+# --- BulkVS /voice rated records (the authoritative usage feed) ----------------------------
+
+# Directions BulkVS reports in `callType`. e911 / 8xx / 8yy are accepted verbatim so an
+# unexpected class is still recorded and costed from THEIR amount rather than dropped.
+VOICE_INBOUND = "inbound"
+VOICE_OUTBOUND = "outbound"
+
+# BulkVS stamps `callStart` in the account's display timezone with NO offset. Verified
+# against the same calls in Asterisk's (UTC) CDR: BulkVS 15:04:41 == 19:04 UTC, i.e. UTC-4
+# (US Eastern, DST). Parsed with an explicit zone rather than assumed UTC — treating these
+# as UTC would file every charge 4-5 hours late and land them in the wrong day bucket.
+VOICE_DEFAULT_TZ = "America/New_York"
 
 
 @dataclass
-class RateResolution:
-    """Which rate code prices a leg, or why none does."""
+class VoiceCharge:
+    """One RATED record from BulkVS /voice — what they actually charged for one leg."""
 
-    code: str | None
+    call_ref: str                  # BulkVS callID; the idempotency key
+    direction: str                 # callType verbatim: inbound | outbound | e911 | 8xx | 8yy
+    started_at: object | None      # aware UTC datetime
+    duration_seconds: int
+    source: str | None             # callSource (caller ID)
+    destination: str | None        # callDestination (called number)
+    per_minute: Decimal | None     # the rate BULKVS applied — not ours
+    amount: Decimal | None         # what BULKVS charged
+    trunk_group: str | None = None
+    cnam: str | None = None        # delivered CNAM/city-state; informational, not billed
+    unrated: bool = False
     unrated_reason: str | None = None
 
     @property
-    def unrated(self) -> bool:
-        return self.code is None
+    def billed_seconds(self) -> int:
+        """Seconds BulkVS actually billed, implied by amount / perMinute.
+
+        Derived from THEIR two numbers rather than by re-applying our own rounding, so the
+        figure shown always reconciles with the charge. Falls back to our 6-second rounding
+        only when the rate is zero/absent and nothing can be implied.
+        """
+        if self.per_minute and self.per_minute > 0 and self.amount is not None:
+            return int(round(float(self.amount) / float(self.per_minute) * 60))
+        return round_billsec(self.duration_seconds)
 
 
-def resolve_rate_code(
-    leg: BillableLeg,
-    *,
-    number_tier: str | None = None,
-    number_phone: str | None = None,
-    known_codes: set[str] | None = None,
-) -> RateResolution:
-    """Pick the rate code for a billable leg. Pure.
+def _dec(value) -> Decimal | None:
+    """Parse a BulkVS money/rate string. They are inconsistent — rates come back as both
+    '.004' and '0.0003' — and Decimal(str) handles both. Returns None if unparseable."""
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        return Decimal(text)
+    except Exception:  # noqa: BLE001 - a malformed figure must flag the row, not crash the scan
+        return None
 
-    INBOUND is priced off the DID that was dialed: toll-free numbers have their own rate
-    regardless of tier, otherwise the BulkVS-reported tier selects the row. A DID whose tier
-    we don't have (never synced, or a tier absent from the price sheet) is UNRATED — guessing
-    a tier is how you under-report by 57x, since the sheet spans $0.0003 to $0.0198 per minute.
 
-    OUTBOUND has exactly one published rate: domestic. A destination we can read and that is
-    NOT NANP is unrated (international rates are published nowhere). A destination we CANNOT
-    read — the flow-dial leg's dst='s' — is rated domestic, because this trunk only serves
-    NANP and refusing to price the operator's most common call shape would gut the tab; the
-    leg carries `dest_unknown` so the UI can show the uncertainty rather than hide it.
+def parse_voice_record(rec: dict, tz_name: str = VOICE_DEFAULT_TZ) -> VoiceCharge | None:
+    """Normalize one /voice record. Pure. Returns None if it carries no usable identity.
+
+    A record whose `amount` cannot be parsed is returned FLAGGED (unrated) rather than
+    costed at zero — same honesty rule as everywhere else: a charge we can't read must be
+    visible, never silently free.
     """
-    if leg.direction == "inbound":
-        if is_toll_free(number_phone):
-            code = INBOUND_TOLLFREE
-        else:
-            tier = (number_tier or "").strip()
-            if not tier:
-                return RateResolution(None, "no tier known for this DID")
-            code = f"{INBOUND_TIER_PREFIX}{tier}"
-        if known_codes is not None and code not in known_codes:
-            return RateResolution(None, f"no rate configured for {code}")
-        return RateResolution(code)
+    from datetime import datetime, timezone as _tz
+    from zoneinfo import ZoneInfo
 
-    # outbound
-    if not leg.dest_unknown and not is_nanp(leg.dst):
-        return RateResolution(None, f"no rate for non-domestic destination {leg.dst!r}")
-    if known_codes is not None and OUTBOUND_DOMESTIC not in known_codes:
-        return RateResolution(None, f"no rate configured for {OUTBOUND_DOMESTIC}")
-    return RateResolution(OUTBOUND_DOMESTIC)
+    call_ref = str(rec.get("callID") or rec.get("CallID") or "").strip()
+    if not call_ref:
+        return None
+
+    started_at = None
+    raw_start = str(rec.get("callStart") or "").strip()
+    if raw_start:
+        try:
+            naive = datetime.strptime(raw_start, "%Y-%m-%d %H:%M:%S")
+            started_at = naive.replace(tzinfo=ZoneInfo(tz_name)).astimezone(_tz.utc)
+        except Exception:  # noqa: BLE001 - a bad timestamp must not drop a real charge
+            started_at = None
+
+    try:
+        duration = int(str(rec.get("durationSecs") or 0).strip() or 0)
+    except (TypeError, ValueError):
+        duration = 0
+
+    amount = _dec(rec.get("amount"))
+    return VoiceCharge(
+        call_ref=call_ref,
+        direction=str(rec.get("callType") or "").strip().lower() or "unknown",
+        started_at=started_at,
+        duration_seconds=max(duration, 0),
+        source=str(rec.get("callSource") or "").strip() or None,
+        destination=str(rec.get("callDestination") or "").strip() or None,
+        per_minute=_dec(rec.get("perMinute")),
+        amount=amount,
+        trunk_group=str(rec.get("trunkGroup") or "").strip() or None,
+        cnam=str(rec.get("Cnam") or "").strip() or None,
+        unrated=amount is None,
+        unrated_reason=None if amount is not None else "BulkVS reported no amount",
+    )

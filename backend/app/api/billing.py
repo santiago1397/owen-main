@@ -1,9 +1,9 @@
-"""Billing tab API — BulkVS cost ESTIMATE from our own call data.
+"""Billing tab API.
 
-Reads the `call_charges` projection (one stamped row per billable leg, written by
-workers/billing.py) plus the recurring side derived from the `numbers` inventory. Never
-claims to be an invoice: BulkVS publishes no usage/billing API, so every figure here is
-computed by us and labelled as an estimate in the UI.
+Usage figures are BulkVS's OWN rated amounts, pulled from `GET /voice` into `call_charges`
+by workers/billing.py — not an estimate. The recurring side (per-DID monthly, E911, setup)
+IS derived locally from the `numbers` inventory against the seeded rate table, because those
+are account-level charges with no call record behind them.
 
 Date handling follows the dashboard idiom exactly: the frontend sends explicit half-open UTC
 bounds and day buckets are cut in the business timezone (ARCHITECTURE.md #10).
@@ -77,6 +77,15 @@ async def summary(
     labels = {
         r.code: r.label for r in (await db.execute(select(BillingRate))).scalars().all()
     }
+    # Usage rows carry `bulkvs.<callType>` rather than a code from our rate table — the
+    # figure is theirs, so there is no local rate row to name it.
+    labels.update({
+        "bulkvs.inbound": "Inbound calls (BulkVS rated)",
+        "bulkvs.outbound": "Outbound calls (BulkVS rated)",
+        "bulkvs.e911": "E911 calls (BulkVS rated)",
+        "bulkvs.8xx": "Toll-free calls (BulkVS rated)",
+        "bulkvs.8yy": "Toll-free calls (BulkVS rated)",
+    })
     usage_lines = [
         {
             "kind": r["kind"],
@@ -111,8 +120,9 @@ async def summary(
          "raw_billsec": int(r["raw_billsec"] or 0)}
         for r in unrated_rows
     ]
-    # Forwarded legs whose destination Asterisk never recorded (dst='s'). Priced as domestic
-    # because this trunk only serves NANP, but surfaced so the assumption is visible.
+    # Legacy counter from the estimate era (Asterisk never recorded a forwarded leg's
+    # destination). /voice always reports the real destination, so this is now always 0 for
+    # freshly-scanned rows; kept so historical rows still report honestly.
     dest_unknown_legs = (
         await db.execute(
             select(func.count()).select_from(CallCharge)
@@ -179,9 +189,12 @@ async def summary(
         "adjustments": adjustments,
         "adjustments_total": _f(adjustments_total),
         "grand_total": _f(usage_total + monthly_total + onetime_total + adjustments_total),
-        # Surfaced so the UI can caveat the headline until a real invoice has confirmed the
-        # billing increment (the one rate not read off the operator's own price sheet).
+        # BulkVS's verified billing increment (every observed record rounds up to it).
+        # Informational only — usage cost comes from their amount, never from re-rounding.
         "increment_seconds": billing.DEFAULT_INCREMENT_SECONDS,
+        # Usage is carrier-rated; recurring is derived locally. The UI says so, because the
+        # two halves of the total have very different trust levels.
+        "usage_source": "bulkvs_voice_cdr",
     }
 
 

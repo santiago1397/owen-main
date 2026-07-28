@@ -128,6 +128,37 @@ async def fetch_tn_records() -> list[BulkvsTn]:
         return parse_tn_records(resp.json())
 
 
+async def fetch_voice_cdr(start_epoch: int, end_epoch: int, call_type: str = "all") -> list[dict]:
+    """GET /voice — BulkVS's OWN RATED call detail records.
+
+    This is the authoritative billing feed: each record carries `perMinute` (the rate BulkVS
+    actually applied) and `amount` (what they actually charged), so cost never has to be
+    estimated from a local rate table. Verified against the live account — every record's
+    implied billed seconds matches a 6-second increment, and a flow-forwarded call correctly
+    appears as TWO records (one inbound, one outbound).
+
+    `Type` must be one of e911 / inbound / 8xx / outbound / 8yy / all (the API returns
+    {"Status": "Invalid Type"} otherwise). Start/End are unix epoch seconds.
+
+    Returns the raw record dicts; normalization lives in the pure kernel
+    (app.services.billing.parse_voice_record) so it is unit-testable without the network.
+    Raises on non-2xx so the caller can log and skip — a bad poll must never lose data, and
+    the scan is idempotent on the BulkVS callID.
+    """
+    url = f"{settings.BULKVS_API_BASE.rstrip('/')}/voice"
+    auth = (settings.BULKVS_API_USERNAME, settings.BULKVS_API_PASSWORD)
+    params = {"Type": call_type, "Start": str(int(start_epoch)), "End": str(int(end_epoch))}
+    async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+        resp = await client.get(url, params=params, auth=auth)
+        resp.raise_for_status()
+        data = resp.json()
+    if isinstance(data, dict):
+        # An error body comes back as an object (e.g. {"Status": "Invalid Type", ...}) with
+        # HTTP 200, so a 2xx alone is not success — surface it rather than silently costing 0.
+        raise ValueError(f"BulkVS /voice returned an error body: {data!r}")
+    return [r for r in (data or []) if isinstance(r, dict)]
+
+
 def _extract_ref_id(data) -> str | None:
     """Pull the BulkVS message reference id out of a /messageSend response. BulkVS returns the
     ref under one of a few casings depending on the endpoint version — match them all."""

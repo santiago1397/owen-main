@@ -5,10 +5,12 @@ import { api } from "../api";
 import DateRangeBar from "../components/DateRangeBar";
 import type { Range } from "../lib/dates";
 
-// BulkVS cost ESTIMATE, computed from our own Asterisk CDR — BulkVS publishes no usage or
-// billing API. Two things drive this page's shape:
+// Usage figures here are BULKVS'S OWN rated amounts (their GET /voice feed), not an
+// estimate — each row is what they actually charged. The recurring block IS derived locally
+// from the numbers inventory, since per-DID monthly/E911/setup have no call record behind
+// them. Two things drive the page's shape:
 //   1. Charges are per LEG, because that is what BulkVS meters. A call the flow forwards back
-//      out over the same trunk is billed TWICE (inbound minutes + outbound minutes), so a
+//      out over the same trunk bills TWICE (inbound + outbound), seconds apart, so a
 //      per-call view would understate a forwarded call by roughly half.
 //   2. At this account's volume the RECURRING per-DID fees dwarf usage, so they lead the page.
 
@@ -75,11 +77,11 @@ export default function Billing() {
       </div>
 
       <p className="muted" style={{ fontSize: 12, marginTop: 0 }}>
-        Estimated BulkVS cost, computed from our own call records — BulkVS provides no billing
-        API, so this is not an invoice. Charges are shown per <strong>leg</strong>, which is
-        what BulkVS meters: a call your flow forwards back out over the trunk is billed twice,
-        once inbound and once outbound. Billed at {s?.increment_seconds ?? 6}-second increments
-        (not yet confirmed against a real invoice).
+        Call costs are <strong>BulkVS's own rated amounts</strong>, pulled from their billing
+        records — not an estimate. Charges are per <strong>leg</strong>, which is what they
+        meter: a call your flow forwards back out over the trunk bills twice, once inbound and
+        once outbound. Billed in {s?.increment_seconds ?? 6}-second increments. Monthly
+        per-number fees below are calculated from the published price sheet.
       </p>
 
       {!range && <p className="muted">Pick a date range.</p>}
@@ -132,7 +134,7 @@ export default function Billing() {
           </div>
 
           <div className="row" style={{ marginBottom: 16 }}>
-            <Stat n={money(s.grand_total, 2)} l="Estimated total"
+            <Stat n={money(s.grand_total, 2)} l="Total"
                   hint="recurring + usage + adjustments" />
             <Stat n={money(rec?.monthly_total, 2)} l="Recurring / month" />
             <Stat n={money(s.usage_total)} l="Usage this period" />
@@ -186,11 +188,9 @@ export default function Billing() {
                       )}
                     </td>
                     <td style={{ textAlign: "right" }}>{u.legs}</td>
-                    <td style={{ textAlign: "right" }}>
-                      {u.kind === "minutes" ? fmtSecs(u.billed_seconds) : "—"}
-                    </td>
+                    <td style={{ textAlign: "right" }}>{fmtSecs(u.billed_seconds)}</td>
                     <td style={{ textAlign: "right" }} className="muted">
-                      {money(u.rate_amount, 4)}{u.kind === "minutes" ? "/min" : " ea"}
+                      {money(u.rate_amount, 4)}/min
                     </td>
                     <td style={{ textAlign: "right" }}>{money(u.amount)}</td>
                   </tr>
@@ -261,22 +261,16 @@ export default function Billing() {
                 <td>{l.direction === "inbound" ? "in" : "out"}</td>
                 <td>{fmtPhone(l.our_number) || <span className="muted">—</span>}</td>
                 <td>
-                  {l.kind === "cnam" ? (
-                    <span className="muted">CNAM lookup</span>
-                  ) : l.dest_unknown ? (
-                    <span className="muted" title="Asterisk records no destination on a forwarded leg">
-                      (flow forward)
+                  {l.dest_unknown ? (
+                    <span className="muted" title="Legacy row: destination was not recorded">
+                      (not recorded)
                     </span>
                   ) : (
                     fmtPhone(l.other_party) || <span className="muted">—</span>
                   )}
                 </td>
-                <td style={{ textAlign: "right" }}>
-                  {l.kind === "minutes" ? fmtSecs(l.raw_billsec) : "—"}
-                </td>
-                <td style={{ textAlign: "right" }}>
-                  {l.kind === "minutes" ? fmtSecs(l.billed_seconds) : "—"}
-                </td>
+                <td style={{ textAlign: "right" }}>{fmtSecs(l.raw_billsec)}</td>
+                <td style={{ textAlign: "right" }}>{fmtSecs(l.billed_seconds)}</td>
                 <td style={{ textAlign: "right" }} className="muted">
                   {l.rate_amount != null ? money(l.rate_amount, 4) : "—"}
                 </td>
@@ -291,8 +285,8 @@ export default function Billing() {
           </tbody>
         </table>
         <div className="muted" style={{ fontSize: 11, marginTop: 8 }}>
-          Billing data starts 28 Jul 2026, when per-call CDR logging was enabled. Earlier calls
-          have no recorded duration and cannot be priced.
+          Amounts are BulkVS's own rated charges, refreshed from their billing records every
+          10 minutes.
         </div>
       </div>
     </div>
