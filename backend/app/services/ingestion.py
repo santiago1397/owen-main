@@ -11,7 +11,7 @@ Correctness rules (ARCHITECTURE.md #6):
 import logging
 from datetime import datetime, timezone
 
-from sqlalchemy import or_, select, update
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -163,6 +163,28 @@ async def ingest_status_event(
             direction=evt.direction or Call.direction,
         )
     )
+
+    # Duration/answer back-fill, decoupled from the status-rank gate above. For Asterisk the
+    # live WS path carries NO duration at all (ARI channel events don't have one) — it exists
+    # only in Asterisk's CDR, which the reconciler replays with the SAME terminal status the
+    # WS already recorded. The gate above is `status_rank <`, so that CDR event matched no
+    # rows and every normally-ingested Asterisk call stayed permanently duration-less; only
+    # calls the WS actually MISSED ever got one. Guarded on IS NULL and COALESCEd so this
+    # only ever fills a hole — a later, less-informed event can't blank or rewrite a
+    # duration/answer time that is already recorded.
+    if evt.duration_seconds is not None or evt.answered_at is not None:
+        await db.execute(
+            update(Call)
+            .where(
+                Call.provider_id == provider.id,
+                Call.provider_call_sid == evt.provider_call_sid,
+                or_(Call.duration_seconds.is_(None), Call.answered_at.is_(None)),
+            )
+            .values(
+                duration_seconds=func.coalesce(Call.duration_seconds, evt.duration_seconds),
+                answered_at=func.coalesce(Call.answered_at, evt.answered_at),
+            )
+        )
 
     # Attribution back-fill, decoupled from the status-rank gate above. A call can reach
     # its terminal status via an event that lacked the tracking number — e.g. a SignalWire
