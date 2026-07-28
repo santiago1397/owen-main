@@ -85,6 +85,9 @@ _LEG_GONE_EVENTS = frozenset({"ChannelHangupRequest", "StasisEnd", "ChannelDestr
 # Q.850 hangup cause -> dial-node port for the outbound leg's ChannelDestroyed while
 # ringing. 17=user busy; 18/19/21=no response/no answer/rejected. Unlisted -> "failed".
 _DIAL_CAUSE_PORTS = {17: "busy", 18: "noanswer", 19: "noanswer", 21: "noanswer"}
+# Hard ceiling on awaiting a menu prompt's PlaybackFinished. Only reached if the event is
+# missed (WS blip); the node then falls through to its digit timer rather than hanging.
+_PROMPT_MAX_S = 120.0
 
 
 class AsteriskAriClient:
@@ -155,19 +158,29 @@ class AsteriskAriClient:
     ):
         """Collect DTMF (Ticket 15.1): play the prompt, then await the channel's digit
         queue (fed by the WS consumer on ChannelDtmfReceived). Collects up to `max_digits`
-        with `timeout_s` as BOTH the first-digit and the inter-digit timeout. Digits pressed
-        during the prompt (barge-in / type-ahead) are already queued and count. Returns the
-        digit string, or None on no input (-> the menu's 'timeout' port)."""
-        if prompt:
-            await self.play(channel_id, str(prompt))
+        with `timeout_s` as BOTH the first-digit and the inter-digit timeout. Returns the
+        digit string, or None on no input (-> the menu's 'timeout' port).
+
+        THE PROMPT IS AWAITED. `play` only fires the ARI request and returns, so the old
+        code started the first-digit timer the moment the prompt STARTED: a menu whose
+        prompt was longer than its timeout hung up on every caller who listened to the
+        options. Observed live 2026-07-28 — a 6.11s prompt on a node with the default 5s
+        timeout cut the caller off mid-word and took the 'timeout' port. So the prompt now
+        plays to completion (or until the caller barges in) BEFORE the timer starts, which
+        also makes a node's `timeout` mean what an operator building a flow expects: how
+        long the caller gets to answer, not how long the whole node has."""
         queue = dtmf.digit_queue(channel_id)
         if queue is None:
             # No consumer registered this channel (client driven outside a flow run):
             # behave like a timeout so the menu falls through, never dead air.
+            if prompt:
+                await self.play(channel_id, str(prompt))
             return None
         max_digits = max(1, int(max_digits or 1))
         timeout_s = max(0.5, float(timeout_s or 5))
         digits = ""
+        if prompt:
+            digits = await self._play_prompt_barge_in(channel_id, str(prompt), queue)
         while len(digits) < max_digits:
             try:
                 digit = await asyncio.wait_for(queue.get(), timeout=timeout_s)
@@ -176,6 +189,48 @@ class AsteriskAriClient:
             if digit:
                 digits += str(digit)
         return digits or None
+
+    async def _play_prompt_barge_in(
+        self, channel_id: str, media: str, queue: asyncio.Queue,
+        *, timeout_s: float = _PROMPT_MAX_S,
+    ) -> str:
+        """Play a menu prompt and BLOCK until PlaybackFinished — but let the caller BARGE IN:
+        the first DTMF digit stops the prompt immediately and is returned as the first
+        collected digit. Returns "" when the prompt simply finished (or was unplayable / a
+        PlaybackFinished never arrived within the cap) — never raises, never dead-airs."""
+        uri = await self._resolve_media(str(media))
+        if not uri:
+            return ""
+        data = await self._post_json(f"/ari/channels/{channel_id}/play", params={"media": uri})
+        pb_id = data.get("id") if isinstance(data, dict) else None
+        if not pb_id:
+            return ""
+        pb_queue = dtmf.register_playback(str(pb_id))
+        getters = {
+            asyncio.ensure_future(pb_queue.get()),
+            asyncio.ensure_future(queue.get()),
+        }
+        try:
+            done, pending = await asyncio.wait(
+                getters, timeout=timeout_s, return_when=asyncio.FIRST_COMPLETED
+            )
+            for fut in pending:
+                fut.cancel()
+            if not done:
+                return ""  # prompt overran the cap; fall through to the digit timer
+            result = next(iter(done)).result()
+            if isinstance(result, dict):
+                return ""  # PlaybackFinished — the prompt played out in full
+            # A digit: the caller barged in, so stop the prompt at once.
+            await self._delete(f"/ari/playbacks/{pb_id}")
+            return str(result or "")
+        except Exception:  # noqa: BLE001 - prompt playback is best-effort, never break the menu
+            logger.exception("ARI read_digit: prompt playback failed")
+            for fut in getters:
+                fut.cancel()
+            return ""
+        finally:
+            dtmf.unregister_playback(str(pb_id))
 
     async def dial_number(self, channel_id: str, number: str, *, caller_id, timeout_s: float) -> str:
         """Real Forward-to-Phone (Ticket 15.3): originate + bridge, observed over the WS.
