@@ -47,8 +47,8 @@ _CORRELATE_QUERY = text(
     FROM cdr
     WHERE start BETWEEN :lo AND :hi
       AND (
-            regexp_replace(coalesce(src, ''), '\\D', '', 'g') = :a
-         OR regexp_replace(coalesce(dst, ''), '\\D', '', 'g') = :a
+            regexp_replace(coalesce(src, ''), '\\D', '', 'g') IN (:a, :b)
+         OR regexp_replace(coalesce(dst, ''), '\\D', '', 'g') IN (:a, :b)
       )
     ORDER BY abs(extract(epoch FROM (start - :at)))
     LIMIT 1
@@ -86,16 +86,21 @@ async def _correlate(db, charge, provider_id) -> tuple[str | None, _uuid.UUID | 
     """
     if charge.started_at is None:
         return None, None
-    other = _digits(charge.source if charge.direction == billing.VOICE_INBOUND
-                    else charge.destination)
-    if not other:
+    # Match on BOTH parties, not just the far end. A flow-forward leg presents the ORIGINAL
+    # caller as its source and a third party as its destination, so its destination appears
+    # nowhere in Asterisk's CDR (which records dst='s' for that leg) — but its SOURCE matches
+    # the entry leg of the very call it belongs to. Matching either side is what links a
+    # forwarded charge back to its call.
+    a, bnum = _digits(charge.source), _digits(charge.destination)
+    if not a and not bnum:
         return None, None
     try:
         lo = charge.started_at - timedelta(seconds=_CORRELATION_WINDOW_SECONDS)
         hi = charge.started_at + timedelta(seconds=_CORRELATION_WINDOW_SECONDS)
         linkedid = (
             await db.execute(
-                _CORRELATE_QUERY, {"lo": lo, "hi": hi, "at": charge.started_at, "a": other}
+                _CORRELATE_QUERY,
+                {"lo": lo, "hi": hi, "at": charge.started_at, "a": a or bnum, "b": bnum or a},
             )
         ).scalar_one_or_none()
     except Exception:  # noqa: BLE001 - cdr absent / unreadable -> just no correlation
@@ -183,6 +188,18 @@ async def reconcile_charges(window_hours: int | None = None) -> int:
 
             number = _number_for(charge, numbers)
             linkedid, call_id = await _correlate(db, charge, provider_id)
+            if number is None and call_id is not None:
+                # A flow-forward leg carries neither of our DIDs (it presents the original
+                # caller as source and a third party as destination), so direct matching
+                # cannot attribute it. Inherit the DID from the call it belongs to — that is
+                # the number the caller actually dialled, and therefore the number whose
+                # forwarding incurred this charge.
+                number = (
+                    await db.execute(
+                        select(Number).join(Call, Call.number_id == Number.id)
+                        .where(Call.id == call_id)
+                    )
+                ).scalar_one_or_none()
 
             values = {
                 "uniqueid": charge.call_ref,
