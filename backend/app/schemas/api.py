@@ -149,15 +149,41 @@ class FlowVersionOut(BaseModel):
     created_at: datetime | None = None
 
 
+class FlowClone(BaseModel):
+    """Name for the copy. Required: `flows` has no rename-free identity and the UI cannot
+    invent a good one — see POST /api/flows/{id}/clone."""
+
+    name: str
+
+
+class FlowRename(BaseModel):
+    name: str
+
+
 class FlowOut(BaseModel):
     id: uuid.UUID
     name: str
     active_version_id: uuid.UUID | None = None
     created_at: datetime | None = None
+    archived_at: datetime | None = None
+    # Counts the library list needs to offer honest actions: `version_count` distinguishes a
+    # never-saved flow (nothing to clone) from one holding unactivated drafts — both of which
+    # otherwise render identically as "draft" — and `attributed_call_count` tells the delete
+    # confirmation whether DELETE will hard-delete or archive, BEFORE the operator commits.
+    version_count: int = 0
+    attributed_call_count: int = 0
 
 
 class FlowDetail(FlowOut):
     versions: list[FlowVersionOut] = []
+
+
+class FlowDeleteResult(BaseModel):
+    """`outcome` is what DELETE actually did: "deleted" when no call referenced any of the
+    flow's versions (rows really gone), "archived" otherwise."""
+
+    outcome: str
+    flow_id: uuid.UUID
 
 
 class ActivationResult(BaseModel):

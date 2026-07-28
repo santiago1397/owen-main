@@ -429,6 +429,12 @@ class Flow(Base):
         UUID(as_uuid=True),
         ForeignKey("flow_versions.id", use_alter=True, name="fk_flows_active_version"),
     )
+    # Soft delete. A flow can rarely be hard-deleted: calls.flow_version_id references this
+    # flow's versions for attribution and every FK in the chain is NO ACTION, so removing a
+    # flow that ever handled a call would either violate the constraint or shred call
+    # history. Archiving hides it from the library + the Numbers picker instead, leaving
+    # every reference intact. See DELETE /api/flows/{id}.
+    archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 

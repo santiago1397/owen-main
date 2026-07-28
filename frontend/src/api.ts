@@ -173,7 +173,14 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     }),
+  // Archived flows are hidden unless asked for — so every existing caller (including the
+  // NumberDetail flow picker) stops offering them without needing to know they exist.
+  // DELIBERATELY ARGUMENT-FREE: these are passed straight to react-query as `queryFn`,
+  // which calls them with its context object. A `flows(archived = false)` signature would
+  // receive that truthy object as `archived` and silently start including archived flows
+  // in the number-assignment picker. Two explicit functions make that impossible.
   flows: () => request("/api/flows"),
+  flowsIncludingArchived: () => request("/api/flows?archived=true"),
   flow: (id: string) => request(`/api/flows/${id}`),
   createFlow: (name: string) =>
     request("/api/flows", {
@@ -181,6 +188,24 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ name }),
     }),
+  // Copy a flow's active (else latest) graph into a new DRAFT flow — the "don't start from
+  // an empty canvas" path. Nothing is assigned to the copy; agents stay shared.
+  cloneFlow: (id: string, name: string) =>
+    request(`/api/flows/${id}/clone`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name }),
+    }),
+  renameFlow: (id: string, name: string) =>
+    request(`/api/flows/${id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name }),
+    }),
+  // Returns {outcome: "deleted" | "archived"} — a flow any call is attributed to can only
+  // ever be archived, because calls.flow_version_id IS that call's attribution.
+  deleteFlow: (id: string) => request(`/api/flows/${id}`, { method: "DELETE" }),
+  restoreFlow: (id: string) => request(`/api/flows/${id}/restore`, { method: "POST" }),
   flowVersions: (flowId: string) => request(`/api/flows/${flowId}/versions`),
   saveFlowVersion: (flowId: string, graph: any) =>
     request(`/api/flows/${flowId}/versions`, {
