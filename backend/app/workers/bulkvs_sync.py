@@ -32,5 +32,39 @@ async def sync_numbers() -> None:
     except Exception:  # noqa: BLE001 - a connect/auth/HTTP failure retries next poll
         logger.exception("bulkvs_sync: /tnRecord fetch failed")
         return
+
+    # Which DIDs arrived by PORT (free) rather than purchase ($0.05 setup) — billing needs
+    # the distinction. Best-effort and separate from the inventory sync: a failure here must
+    # not block mirroring the numbers themselves, so it degrades to "no port info this poll".
+    ported: set[str] | None = None
+    try:
+        ported = await bulkvs_client.fetch_ported_numbers()
+    except Exception:  # noqa: BLE001 - port info is a billing nicety, not core inventory
+        logger.warning("bulkvs_sync: /portTn fetch failed; leaving ported_in unchanged")
+
     async with SessionLocal() as db:
         await apply_sync(db, records)
+        if ported:
+            await _mark_ported(db, ported)
+
+
+async def _mark_ported(db, ported: set[str]) -> None:
+    """Set `ported_in` on the DIDs BulkVS reports as port-ins. One-way and set-only: a number
+    that was ported stays ported, so this never clears the flag (a completed port order can
+    age out of the API's window without the number ceasing to have been ported)."""
+    from sqlalchemy import select
+
+    from app.models import Number
+
+    rows = (
+        await db.execute(
+            select(Number).where(
+                Number.phone_number.in_(sorted(ported)), Number.ported_in.is_(False)
+            )
+        )
+    ).scalars().all()
+    for row in rows:
+        row.ported_in = True
+    if rows:
+        await db.commit()
+        logger.info("bulkvs_sync: marked %d number(s) as ported-in", len(rows))

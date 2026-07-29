@@ -144,7 +144,13 @@ def test_recurring_rate_table():
         check(f"tier {tier} has a monthly rate", f"{b.DID_MONTHLY_PREFIX}{tier}" in by_code)
     check("tier 0 monthly = $0.06", by_code["did.monthly.tier.0"]["amount"] == "0.06")
     check("E911 = $0.49/number", by_code["e911.monthly"]["amount"] == "0.49")
-    check("DID setup = $0.25 one-time", by_code["did.setup"]["amount"] == "0.25")
+    # $0.05 per BulkVS's own pricing page. A widely-cited third-party review says $0.25, but
+    # that figure does not fit this account's observed balance: $25.00 funded and $24.76
+    # remaining only reconciles with a $0.05 setup on the one PURCHASED number.
+    check("DID setup = $0.05, not the $0.25 in circulation",
+          by_code["did.setup"]["amount"] == "0.05")
+    check("CNAM is priced (it IS billed, just outside the call record)",
+          by_code["cnam.dip"]["amount"] == "0.0020")
     check("toll-free monthly = $0.14", by_code["did.monthly.tollfree"]["amount"] == "0.14")
     check("web-sourced rates stay identifiable",
           by_code["did.setup"]["source"] == "web"

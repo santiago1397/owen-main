@@ -237,9 +237,12 @@ async def _recurring(db: AsyncSession, start: datetime, end: datetime) -> dict:
         )
         monthly_total += monthly + e911
 
+        # Setup applies only to PURCHASED numbers — a US port-in is free, so charging one
+        # would invent a fee that was never billed.
         setup = Decimal("0")
         if (
             setup_rate is not None
+            and not n.ported_in
             and n.activation_date is not None
             and start <= n.activation_date < end
         ):

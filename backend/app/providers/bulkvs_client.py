@@ -128,6 +128,47 @@ async def fetch_tn_records() -> list[BulkvsTn]:
         return parse_tn_records(resp.json())
 
 
+async def fetch_ported_numbers() -> set[str]:
+    """Every DID that arrived by PORT, as E.164, from `/portTn`.
+
+    Billing needs this because acquisition cost differs by route: a US port-in is FREE, while
+    buying a number from inventory costs a $0.05 setup fee. Without it the Billing tab charges
+    setup on every number and overstates one-time costs.
+
+    Two calls: `/portTn` lists orders, then each order is fetched for its TN list (the list
+    endpoint returns only OrderId/status, not the numbers). Any single order that fails to
+    load is skipped rather than losing the whole set — a partial answer is better than none,
+    and the sync re-runs on a schedule.
+    """
+    base = f"{settings.BULKVS_API_BASE.rstrip('/')}/portTn"
+    auth = (settings.BULKVS_API_USERNAME, settings.BULKVS_API_PASSWORD)
+    ported: set[str] = set()
+    async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+        resp = await client.get(base, auth=auth)
+        resp.raise_for_status()
+        orders = resp.json()
+        if not isinstance(orders, list):
+            return ported
+        for order in orders:
+            if not isinstance(order, dict):
+                continue
+            oid = order.get("OrderId") or order.get("OrderID")
+            if not oid:
+                continue
+            try:
+                detail = await client.get(base, params={"OrderId": str(oid)}, auth=auth)
+                detail.raise_for_status()
+                body = detail.json()
+            except Exception:  # noqa: BLE001 - skip this order, keep the rest
+                continue
+            if not isinstance(body, dict):
+                continue
+            for tn in body.get("TN List") or []:
+                if isinstance(tn, dict) and tn.get("TN"):
+                    ported.add(_to_e164(str(tn["TN"])))
+    return ported
+
+
 async def fetch_voice_cdr(start_epoch: int, end_epoch: int, call_type: str = "all") -> list[dict]:
     """GET /voice — BulkVS's OWN RATED call detail records.
 

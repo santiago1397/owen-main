@@ -163,8 +163,11 @@ SEED_RATES: list[dict] = [
     {"code": E911_MONTHLY, "label": "E911 per number", "unit": "per_month",
      "amount": "0.49", "source": "sheet"},
     # Not on the portal sheet — from public BulkVS pricing.
-    {"code": DID_SETUP, "label": "DID setup fee (one-time)", "unit": "per_event",
-     "amount": "0.25", "source": "web"},
+    # $0.05 per BulkVS's own pricing page for US origination numbers. (A widely-cited
+    # third-party review says $0.25; it does not fit this account's observed balance.)
+    # Charged on PURCHASED numbers only — US port-ins are free.
+    {"code": DID_SETUP, "label": "DID setup fee (purchased numbers only)", "unit": "per_event",
+     "amount": "0.05", "source": "web"},
     {"code": SMS_OUTBOUND, "label": "SMS outbound", "unit": "per_event",
      "amount": "0.0060", "source": "web"},
     {"code": SMS_INBOUND, "label": "SMS inbound", "unit": "per_event",

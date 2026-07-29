@@ -113,6 +113,10 @@ class Number(Base):
     # Carrier-side CNAM delivery. When on, BulkVS performs (and bills) a lookup per inbound
     # call, which at this account's rates is a larger line than the minutes themselves.
     cnam_enabled: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false())
+    # True when the DID arrived by PORT rather than purchase (mirrored from BulkVS /portTn).
+    # US ports are free; a purchased number pays a $0.05 setup fee — so billing must not
+    # charge setup on a ported DID.
+    ported_in: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false())
     # E911 is NOT reported by /tnRecord and no BulkVS endpoint exposes it, so it is operator-
     # set rather than synced. Defaults off.
     e911_enabled: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false())
