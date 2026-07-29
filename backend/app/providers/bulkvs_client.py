@@ -143,10 +143,17 @@ async def fetch_ported_numbers() -> set[str]:
     base = f"{settings.BULKVS_API_BASE.rstrip('/')}/portTn"
     auth = (settings.BULKVS_API_USERNAME, settings.BULKVS_API_PASSWORD)
     ported: set[str] = set()
+
+    def _body(resp):
+        """Parse a /portTn response. This endpoint answers **HTTP 300 Multiple Choices** with
+        a perfectly good JSON body — `raise_for_status()` rejects that, so only 4xx/5xx are
+        treated as failures here."""
+        if resp.status_code >= 400:
+            resp.raise_for_status()
+        return resp.json()
+
     async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
-        resp = await client.get(base, auth=auth)
-        resp.raise_for_status()
-        orders = resp.json()
+        orders = _body(await client.get(base, auth=auth))
         if not isinstance(orders, list):
             return ported
         for order in orders:
@@ -156,9 +163,7 @@ async def fetch_ported_numbers() -> set[str]:
             if not oid:
                 continue
             try:
-                detail = await client.get(base, params={"OrderId": str(oid)}, auth=auth)
-                detail.raise_for_status()
-                body = detail.json()
+                body = _body(await client.get(base, params={"OrderId": str(oid)}, auth=auth))
             except Exception:  # noqa: BLE001 - skip this order, keep the rest
                 continue
             if not isinstance(body, dict):
