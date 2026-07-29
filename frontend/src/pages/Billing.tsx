@@ -80,8 +80,9 @@ export default function Billing() {
         Call costs are <strong>BulkVS's own rated amounts</strong>, pulled from their billing
         records — not an estimate. Charges are per <strong>leg</strong>, which is what they
         meter: a call your flow forwards back out over the trunk bills twice, once inbound and
-        once outbound. Billed in {s?.increment_seconds ?? 6}-second increments. Monthly
-        per-number fees below are calculated from the published price sheet.
+        once outbound. Billed in {s?.increment_seconds ?? 6}-second increments. CNAM lookups
+        ($0.002 per inbound call) and the monthly per-number fees are calculated from the
+        published price sheet — BulkVS deducts those from the balance without itemising them.
       </p>
 
       {!range && <p className="muted">Pick a date range.</p>}
@@ -188,9 +189,11 @@ export default function Billing() {
                       )}
                     </td>
                     <td style={{ textAlign: "right" }}>{u.legs}</td>
-                    <td style={{ textAlign: "right" }}>{fmtSecs(u.billed_seconds)}</td>
+                    <td style={{ textAlign: "right" }}>
+                      {u.kind === "cnam" ? "—" : fmtSecs(u.billed_seconds)}
+                    </td>
                     <td style={{ textAlign: "right" }} className="muted">
-                      {money(u.rate_amount, 4)}/min
+                      {money(u.rate_amount, 4)}{u.kind === "cnam" ? " ea" : "/min"}
                     </td>
                     <td style={{ textAlign: "right" }}>{money(u.amount)}</td>
                   </tr>
@@ -261,7 +264,11 @@ export default function Billing() {
                 <td>{l.direction === "inbound" ? "in" : "out"}</td>
                 <td>{fmtPhone(l.our_number) || <span className="muted">—</span>}</td>
                 <td>
-                  {l.dest_unknown ? (
+                  {l.kind === "cnam" ? (
+                    <span className="muted" title="Caller-name lookup, billed per inbound call">
+                      CNAM lookup
+                    </span>
+                  ) : l.dest_unknown ? (
                     <span className="muted" title="Legacy row: destination was not recorded">
                       (not recorded)
                     </span>
@@ -269,8 +276,12 @@ export default function Billing() {
                     fmtPhone(l.other_party) || <span className="muted">—</span>
                   )}
                 </td>
-                <td style={{ textAlign: "right" }}>{fmtSecs(l.raw_billsec)}</td>
-                <td style={{ textAlign: "right" }}>{fmtSecs(l.billed_seconds)}</td>
+                <td style={{ textAlign: "right" }}>
+                  {l.kind === "cnam" ? "—" : fmtSecs(l.raw_billsec)}
+                </td>
+                <td style={{ textAlign: "right" }}>
+                  {l.kind === "cnam" ? "—" : fmtSecs(l.billed_seconds)}
+                </td>
                 <td style={{ textAlign: "right" }} className="muted">
                   {l.rate_amount != null ? money(l.rate_amount, 4) : "—"}
                 </td>

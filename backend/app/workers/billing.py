@@ -27,7 +27,7 @@ from sqlalchemy import delete, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app.core.config import settings
-from app.models import Call, CallCharge, Number, Provider
+from app.models import BillingRate, Call, CallCharge, Number, Provider
 from app.db import SessionLocal
 from app.providers import bulkvs_client
 from app.services import billing
@@ -130,20 +130,22 @@ def _number_for(charge, numbers: dict[str, Number]) -> Number | None:
 async def purge_estimated_charges() -> int:
     """One-shot cleanup of rows written by the superseded Asterisk-CDR estimate.
 
-    Removes the bogus per-call CNAM charges (BulkVS does not bill them) and any minutes rows
-    keyed by an Asterisk uniqueid, which the /voice scan re-creates keyed by BulkVS callID.
-    Safe to run repeatedly; a no-op once clean.
+    Removes minutes rows keyed by an Asterisk uniqueid, which the /voice scan re-creates
+    keyed by BulkVS callID. Safe to run repeatedly; a no-op once clean.
+
+    NOTE: this deliberately does NOT delete CNAM rows any more. An earlier version did,
+    because CNAM was believed unbilled; it is in fact charged per inbound call (recovered by
+    reconciling the account balance), so those rows are legitimate.
     """
     async with SessionLocal() as db:
         result = await db.execute(
             delete(CallCharge).where(
-                (CallCharge.kind == billing.KIND_CNAM)
-                | (CallCharge.rate_code.in_([
+                CallCharge.rate_code.in_([
                     billing.OUTBOUND_DOMESTIC,
                     *[f"{billing.INBOUND_TIER_PREFIX}{t}" for t in
                       ("0", "10", "1", "2", "3", "4", "AK", "PRI", "5", "6")],
                     billing.INBOUND_TOLLFREE,
-                ]))
+                ])
             )
         )
         await db.commit()
@@ -174,6 +176,9 @@ async def reconcile_charges(window_hours: int | None = None) -> int:
     unrated = 0
     async with SessionLocal() as db:
         numbers = await _load_numbers(db)
+        # The one usage charge NOT present in the /voice feed, so the only one still priced
+        # from our own rate table.
+        cnam_rate = await db.get(BillingRate, billing.CNAM_DIP)
         provider = (
             await db.execute(select(Provider).where(Provider.name == PROVIDER_NAME))
         ).scalar_one_or_none()
@@ -236,6 +241,38 @@ async def reconcile_charges(window_hours: int | None = None) -> int:
                 )
             )
             written += result.rowcount or 0
+
+            # CNAM dip: billed per INBOUND call but deducted from the balance rather than
+            # included in the /voice amount, so it has to be modelled from our rate table.
+            # Gated on the DID having CNAM enabled; where the DID could not be resolved, the
+            # record carrying a looked-up name is itself evidence a dip occurred.
+            if charge.direction == billing.VOICE_INBOUND and cnam_rate is not None:
+                dipped = (
+                    bool(getattr(number, "cnam_enabled", False))
+                    if number is not None else bool(charge.cnam)
+                )
+                if dipped:
+                    cn = dict(
+                        values,
+                        kind=billing.KIND_CNAM,
+                        raw_billsec=0,
+                        billed_seconds=0,
+                        rate_code=billing.CNAM_DIP,
+                        rate_amount=cnam_rate.amount,
+                        amount=billing.quantize_money(cnam_rate.amount),
+                        unrated=False,
+                        unrated_reason=None,
+                    )
+                    res = await db.execute(
+                        pg_insert(CallCharge)
+                        .values(id=_uuid.uuid4(), **cn)
+                        .on_conflict_do_update(
+                            index_elements=["uniqueid", "kind"],
+                            set_={k: v for k, v in cn.items()
+                                  if k not in ("uniqueid", "kind")},
+                        )
+                    )
+                    written += res.rowcount or 0
 
         await db.commit()
 

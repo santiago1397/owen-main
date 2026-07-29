@@ -68,10 +68,16 @@ E911_MONTHLY = "e911.monthly"
 
 # Charge kinds written to call_charges.
 KIND_MINUTES = "minutes"
-# NOTE: a per-call CNAM charge was previously written and is NOT billed. Live /voice records
-# show inbound `amount` equal to minutes alone (24s x $0.0003/60 = $0.00012, exactly), with
-# the CNAM value delivered as a free field on the record. The constant remains only so the
-# reconciler can purge the bogus rows it used to write.
+# CNAM IS billed, at $0.002 per inbound call — but NOT inside the /voice record, which is why
+# it was briefly (and wrongly) treated as free. Each inbound record's `amount` equals its
+# minutes exactly (24s x $0.0003/60 = $0.00012), with the looked-up name delivered as a
+# seemingly-free field. The dip is deducted from the account balance separately.
+#
+# It was recovered by reconciling the balance: $25.00 funded, $24.76 remaining = $0.2378
+# spent, and the ONLY combination of published BulkVS charges that lands on that figure is
+# voice + 1 setup + 2 monthly + 9 CNAM dips. Worth modelling despite its size — at $0.002 per
+# CALL rather than per minute it was 36% of this account's voice spend, and its share grows
+# as calls get shorter.
 KIND_CNAM = "cnam"
 
 # BulkVS bills in 6-second increments with a 6-second minimum. Sourced from public BulkVS
@@ -148,9 +154,9 @@ SEED_RATES: list[dict] = [
     {"code": OUTBOUND_DOMESTIC, "label": "Outbound Calling Domestic",
      "unit": "per_minute", "amount": "0.0040", "source": "sheet"},
     # --- additional services --------------------------------------------------------------
-    # Reference only: live /voice records show inbound `amount` equal to minutes alone, so
-    # CNAM is NOT charged per call on this account despite Cnam being enabled on the DIDs.
-    {"code": CNAM_DIP, "label": "CNAM lookup (not billed per call)", "unit": "per_event",
+    # Charged per INBOUND call on a CNAM-enabled DID, deducted from the balance rather than
+    # included in the /voice record's amount (see KIND_CNAM).
+    {"code": CNAM_DIP, "label": "CNAM lookup (per inbound call)", "unit": "per_event",
      "amount": "0.0020", "source": "sheet"},
     {"code": LRN_DIP, "label": "LRN lookup", "unit": "per_event",
      "amount": "0.0001", "source": "sheet"},

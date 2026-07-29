@@ -71,13 +71,15 @@ function Layout({ children }: { children: any }) {
         <NavLink to="/" end className={link}>Dashboard</NavLink>
         <NavLink to="/campaigns" className={link}>Campaign ROI</NavLink>
         <NavLink to="/calls" className={link}>Calls</NavLink>
-        <NavLink to="/billing" className={link}>Billing</NavLink>
         <NavLink to="/callers" className={link}>Callers</NavLink>
         <NavLink to="/emails" className={link}>Email Log</NavLink>
 
         <div className="navsection">Platform</div>
         <NavLink to="/inbox" className={link}>Inbox</NavLink>
         <NavLink to="/numbers" className={link}>Numbers</NavLink>
+        {/* Billing sits under Platform, not Attribution: it reports what the CARRIER charges
+            for running the BulkVS/Asterisk platform, not how calls attribute to campaigns. */}
+        <NavLink to="/billing" className={link}>Billing</NavLink>
         <NavLink to="/flows" className={link}>Call Flows</NavLink>
         <NavLink to="/messages" className={link}>Messages</NavLink>
         <NavLink to="/agents" className={link}>AI Agents</NavLink>
