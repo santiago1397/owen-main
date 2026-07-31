@@ -94,7 +94,7 @@ their own pipeline: `New → Contacted → Quoted → Won / Lost`.
 no campaign. Ad calls are **demand you paid to generate**. Mixing them puts sourceless jobs in
 the denominator of "close rate by lead source" — the number looks great and means nothing.
 
-### D6 — Opportunity reuse: open AND recent
+### D6 — Opportunity reuse: open AND recent ⚠ scope it PER PIPELINE, see 2026-07-29 findings
 ```
 qualifying call from a known contact:
     open opportunity, updated < 90 days ago?
@@ -333,10 +333,22 @@ note. Ratified by the owner after the narrower summary-only option was recommend
 so this widens disclosure to a third-party processor. Accepted deliberately — the team wants
 call content readable in the CRM without switching systems.
 
-### D14 — Workiz stays out of scope
+### D14 — Workiz stays out of scope ⚠ AMENDED 2026-07-24, see D14a
 Workiz (the field-service platform where jobs are scheduled/dispatched) is **not** integrated.
 No live sync, no one-off import, and no Workiz-shaped custom fields in GHL. GHL remains the
 sole source of closure and revenue per D8.
+
+### D14a — the one-off import happened anyway
+Owner decision, 2026-07-24, repeated 2026-07-28: a **single historical import** of a Workiz
+job export was executed, creating `workiz_*` custom fields, contacts, opportunities and
+calendar events in GHL. This contradicts two of D14's three clauses and they are hereby
+amended: **no live sync** still holds, but a bounded one-off import and Workiz-shaped custom
+fields are now sanctioned. Recorded in full in [`WORKIZ_IMPORT.md`](WORKIZ_IMPORT.md).
+
+The reason D14 was reopened is the one D14 itself named: GHL's `monetaryValue` is hand-typed
+and frequently 0, so revenue per lead source was understated. Workiz's `Total` is the only
+place the money exists. D14's own escape clause — *"if the gap proves large, reopen D14"* —
+is what was exercised.
 
 *Accepted risk, stated explicitly:* Workiz would hold real invoiced and paid amounts, whereas
 GHL's `monetaryValue` is hand-typed and frequently left at 0. **Revenue per lead source will
@@ -512,8 +524,10 @@ recordings 3.2 GB.
 
   **D5 may not need a new pipeline** — "Retail Repairs" already has the right shape.
 - **Custom-field scope: GRANTED** (owner updated the PIT, verified 2026-07-24). Was 401, now
-  `GET /locations/{id}/customFields` → **200**. D15 unblocked. The account currently has
-  **zero custom fields defined**, so all seven in D15 must be created.
+  `GET /locations/{id}/customFields` → **200**. D15 unblocked. ~~The account currently has
+  **zero custom fields defined**~~ — **superseded 2026-07-29: 20 opportunity custom fields now
+  exist** (D15's seven `owen_*`, twelve `workiz_*`, and `attribution_basis`). Write scope is
+  confirmed working: the import created fields itself.
 - **Scope audit — 7/8 pass:** customFields (all models), contacts search, opportunities
   search, opportunities pipelines, conversations search all return 200. Only
   `GET /locations/{id}` returns 401, which is **irrelevant** — no planned code path reads the
@@ -524,6 +538,99 @@ recordings 3.2 GB.
   back-sync endpoint. Opportunity fields include `status`, `pipelineStageId`, `monetaryValue`,
   `updatedAt`, **`lastStatusChangeAt`**, **`lastStageChangeAt`**, `customFields`, `source`,
   and a native `attributions` object worth inspecting before finalising D4.
+
+## GHL API behaviour — exercised against the LIVE account, 2026-07-29
+
+Everything below was observed while executing the Workiz re-import
+([`WORKIZ_IMPORT.md`](WORKIZ_IMPORT.md)): ~1,500 real requests including deletes, creates,
+updates and a full read-back. This supersedes "endpoint names here are from working
+knowledge" in Open Items — the surface is now proven, not assumed.
+
+Read this before writing any of Phase 1–5. Several items below invalidate assumptions the
+decisions above were written under.
+
+### Hard constraints
+
+**One opportunity per contact PER PIPELINE — not per contact.** A second card in the *same*
+pipeline is rejected with `400 OPPORTUNITY_NO_DUPLICATE`; a card in a *different* pipeline is
+fine. Verified both ways: 6 contacts held two cards each, every pair straddling AHS and
+Retail, while same-pipeline attempts failed. **There is no setting to change this** — every
+page under Settings → Opportunities & Pipelines was checked, and the only controls there
+concern owners and followers.
+
+> **Impacts D6.** "Opportunity reuse: open AND < 90 days" must select *within a pipeline*.
+> Across pipelines, reuse is not merely optional — a new card is legal and may be correct.
+
+**Deleting a contact CASCADES to its opportunities.** No warning, no confirmation, no undo.
+This destroyed a live Dispatch relay record during the import cleanup. Any bulk contact
+operation must assume it is also an opportunity operation.
+
+> **Reinforces D9/D21.** The cancelled backfill looks better than ever: the write paths into
+> contacts are the dangerous ones, and enrichment-only avoids them entirely.
+
+### Identity and ownership
+
+**Contact `source` is overwritten by whichever integration wrote last.** It is NOT an
+ownership marker and must never be used to decide what a given integration may delete. During
+cleanup, three contacts created by the Workiz import read `OWEN Email Ingest` because the
+relay had since touched them, and one relay contact read `Workiz Import` — and was deleted.
+
+**Tags MERGE on `POST /contacts/upsert`; they do not replace.** So a tag *is* a durable
+ownership marker where `source` is not. Any future OWEN write path should stamp its own tag.
+
+**`POST /contacts/upsert` 400s when the payload has neither phone nor email**
+(`"Pass at least one of number, email query parameter"`). `POST /contacts/` (plain create)
+accepts name-only. Rows with junk phone data are otherwise silently undeliverable.
+
+### Consistency and limits
+
+**The search index LAGS writes.** After deleting 260 contacts, an immediate re-read still
+returned 37 of them. They were genuinely gone; the index had not caught up. **Never treat an
+immediate post-write read as verification** — re-run, or wait.
+
+**Rate limit ≈ 900 rapid requests before `429`.** Hit while verifying 302 records at ~3
+requests each. Retry with backoff and honour `Retry-After`; without it a verifier reports
+phantom failures (missing tags, null phones) that are really throttled empty bodies.
+
+> **Impacts D7.** Cursor polling every ~10 min is fine, but any per-record fan-out
+> (fetching each opportunity to read its custom fields) needs pacing.
+
+**`401 {"message":"Command timed out"}` is a TRANSIENT error, not an auth failure.** Seen
+twice mid-run on otherwise-valid tokens; the same request succeeded on retry. Do not treat
+401 as fatal without inspecting the body.
+
+### Endpoint surface — all verified working
+
+| Endpoint | Notes |
+|---|---|
+| `GET /opportunities/pipelines?locationId=` | camelCase param. Returns stages with ids and exact names. |
+| `GET /opportunities/search?location_id=&limit=&page=` | **snake_case** param. Page-based. **`customFields` come back WITHOUT values.** |
+| `GET /opportunities/{id}` | Single fetch **does** return custom-field values. The only way to verify a written field. |
+| `POST /opportunities/` · `PUT /opportunities/{id}` · `DELETE /opportunities/{id}` | PUT needs `pipelineId`, `name`, `status`; send `pipelineStageId` too or the card can lose its stage. |
+| `GET /contacts/?locationId=&limit=&startAfterId=&startAfter=` | Cursor pagination. Use `meta.total` to know when to stop — do **not** break on a short page. |
+| `GET /contacts/{id}` · `POST /contacts/upsert` · `POST /contacts/` · `DELETE /contacts/{id}` | Upsert dedupes on phone **or email**. |
+| `GET|POST /contacts/{id}/notes` | Works. Notes die with their contact. |
+| `GET|POST /locations/{id}/customFields?model=opportunity` | Create is idempotent-by-name only if you check first; the API does not enforce uniqueness. |
+| `POST /calendars/` · `DELETE /calendars/{id}` | Create accepts `name`, `calendarType:"event"`, `slotDuration`, `availabilityType:0`. Deleting a calendar deletes **all its events**. Re-deleting returns `400 "The calendar is deleted"`. |
+| `POST /calendars/events/appointments` | `ignoreFreeSlotValidation:true` is required for historical bookings. `assignedUserId` silently does not stick. |
+
+**`GET /contacts/{id}/opportunities` returned an empty list** for contacts that demonstrably
+had opportunities. Do not rely on it; keep your own id ledger, or filter
+`/opportunities/search` by `contactId`.
+
+### Corrections to earlier statements in this document
+
+- The account no longer has "zero custom fields defined" — **20 exist** on the opportunity
+  model: D15's seven `owen_*` plus twelve `workiz_*` plus `attribution_basis`.
+- There are **four** pipelines, not three. `Local Garage Door`
+  (`egP4KZzNolXzDWtZIdSP`, New Lead → Contacted → Proposal Sent → Closed) belongs to a
+  different business sharing the location — a reason any bulk operation must be scoped, never
+  account-wide.
+- The AHS stage names in the table above were transcribed loosely. Exact strings, read from
+  the API: `New Lead`, `Inspection`, `Request the Approval (AHS)`, `Approved- Repair Schedule`
+  (note the space *after* the hyphen), `Repair in Process`, `Submit The Invoice`, `Call Back`,
+  `AHS Upgrades`, `Submit Invoices`. A wrong stage name does **not** error — the card is
+  created with no stage at all.
 
 ## Build order
 
@@ -561,10 +668,12 @@ All design questions are resolved. What remains is credentials and verification.
    `backend/.env` has none of them):
    - `OPENPHONE_API_KEY` — **done**, set on the server by the owner.
    - Confirm the existing `GHL_API_TOKEN` has custom-field **write** scope (D15).
-2. **Verify GHL v2 endpoint shapes** against current docs before coding — opportunity
-   search/filter-by-update-time, opportunity update, custom-field create, and inbound-message
-   logging. Endpoint names here are from working knowledge, **not verified against a live
-   account**; this is the first task of Phase 1.
+2. ~~**Verify GHL v2 endpoint shapes**~~ — **DONE 2026-07-29**, by executing the Workiz
+   re-import against the live account. See *GHL API behaviour* above: contacts (get/list/
+   upsert/create/delete), opportunities (search/get/create/update/delete), pipelines, custom
+   fields, notes, calendars and appointments are all proven, with their quirks recorded.
+   **Still unverified:** opportunity filter-by-update-time (the D7 cursor) and inbound-message
+   logging (D2's premium-webhook replacement). Those two remain a Phase 1 task.
 3. ~~Verify the OpenPhone API surface~~ — **DONE, see D11a.** Remaining sub-item: confirm
    whether `call-summaries.jobs` / `nextSteps` populate on a real conversation (the sampled
    call hit voicemail). Needs a call with actual dialogue.
@@ -591,7 +700,8 @@ All design questions are resolved. What remains is credentials and verification.
 | D11 | OpenPhone = follow-up touches, never leads | agreed |
 | D12 | Source funnel + actionable leaks list | agreed |
 | D13 | Full transcript to GHL note | agreed (owner override) |
-| D14 | Workiz out of scope; revenue understatement accepted | agreed |
+| D14 | Workiz out of scope; revenue understatement accepted | **amended by D14a** |
+| D14a | One-off Workiz import + `workiz_*` fields sanctioned; no live sync | agreed |
 | D15 | OWEN creates GHL custom fields via API | **DONE** — 7 fields live, ids recorded |
 | D16 | OpenPhone read-only, enforced structurally | agreed, client written + guard verified |
 | D17 | GHL decides outcomes; call signals advisory only | agreed |

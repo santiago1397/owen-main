@@ -94,6 +94,7 @@ owen-main-software/
 │       ├── workers/           ← job handlers + reconciler
 │       ├── analysis/          ← pluggable transcription + LLM analysis engines
 │       └── scripts/           ← create_admin, manage (CLI admin tools)
+│                                 + the Workiz→GHL toolchain (see GHL note below)
 │
 └── frontend/
     ├── Dockerfile             ← node build → nginx:alpine serve on :3333
@@ -211,7 +212,22 @@ into GHL leads. All disabled (no-op) unless `INBOUND_MAIL_HOST`/`INBOUND_MAIL_US
 | `twilio_client.py` | REST reconciliation client: `fetch_recent_calls`, `delete_recording`. |
 | `signalwire_client.py` | REST client. **The modern Voice API path** (`fetch_recent_calls_voice_logs`, `fetch_recordings_via_voice_logs`) is what actually works for this account; classic Compatibility-API functions kept unused as fallback. |
 | `ghl_client.py` | GoHighLevel inbound relays (shared `_post` helper): `post_inbound_message(payload)` → `GHL_INBOUND_WEBHOOK_URL` (inbound SMS); `post_call_summary(payload)` → `GHL_CALL_WEBHOOK_URL` (completed-call summary + AI analysis); `post_inbound_email(payload)` → `GHL_EMAIL_WEBHOOK_URL` (parsed job email). Plain JSON Workflow triggers, no auth. No-op when the URL is unset. Inbound-only — never sends outbound SMS. |
+| `ghl_api.py` | GoHighLevel **direct v2 API** client (Private Integration Token, not the webhook triggers): `upsert_contact`, `create_opportunity`, `add_contact_note`, `list_pipelines`, `resolve_stage_id`. This is the path `email_relay_ghl` actually takes when `GHL_API_TOKEN` + `GHL_LOCATION_ID` are set — it supersedes `ghl_client.post_inbound_email` and avoids GHL's per-execution premium charge. Has **no delete or update helpers**; the Workiz scripts call those endpoints directly. |
 | `dispatch_email.py` | Parser for Dispatch/AHS job-notification emails (see "Inbound email ingestion"). Pure functions, no I/O. |
+
+**Workiz → GHL one-off toolchain** (`app/scripts/`, run by hand from a throwaway container,
+never scheduled — spec W1/D21). What was imported and why is in
+[`WORKIZ_IMPORT.md`](WORKIZ_IMPORT.md); the *GHL API behaviour* section of
+[`GHL_SYNC_SPEC.md`](GHL_SYNC_SPEC.md) is the reference for anyone touching GHL from code.
+
+| Script | Purpose |
+|---|---|
+| `validate_workiz_export.py` | Gate 1 — encoding (raw bytes, never console output), columns, unmapped statuses, phones, dates, revenue drift. Exits 1 on anything blocking. |
+| `delete_workiz.py` | Gate 2 — removes a prior import's footprint. Dry run by default; `--csv` makes job numbers the authoritative identifier, because contact `source` is overwritten by the email relay. |
+| `import_workiz.py` | The import. Titles are `{Client} - {Type}`; resumable from a JSONL ledger written per row; reports revenue that reached no card. |
+| `verify_workiz.py` | Gate 3 — re-fetches every record from GHL and diffs it against the CSV. Opportunities fetched individually because search returns customFields with no values. |
+| `fix_workiz.py` | Post-hoc repair of stranded value and missing appointments. |
+| `restore_relay.py` | Re-relays a parsed Dispatch email whose GHL records were destroyed (deleting a GHL contact cascades to its opportunities). |
 
 ### Background worker (`app/worker.py`, `app/workers/`, `app/services/queue.py`)
 

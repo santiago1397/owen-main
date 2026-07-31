@@ -17,5 +17,9 @@ screenshots/
 test-results/
 playwright-report/
 
+# Workiz import run artifacts — the export CSV, delete plan and ledgers all carry
+# customer names, phones and revenue. Output only, never source.
+workiz_out/
+
 # Local Claude Code session config, not shared
 .claude/

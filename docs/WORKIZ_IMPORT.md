@@ -1,10 +1,144 @@
 # Workiz → GoHighLevel one-off import
 
-> **Executed 2026-07-24.** A single historical import of a Workiz job export into GHL — not an
-> integration. This is the explicit, bounded exception to
-> [`GHL_SYNC_SPEC.md`](GHL_SYNC_SPEC.md) **D21** (OWEN never creates GHL records).
+> **First executed 2026-07-24. Being redone 2026-07-28** — the first run's records are deleted
+> and a fresh export re-imported with customer-name titles. A single historical import of a
+> Workiz job export into GHL — not an integration. This is the explicit, bounded exception to
+> [`GHL_SYNC_SPEC.md`](GHL_SYNC_SPEC.md) **D21** (OWEN never creates GHL records) and to
+> **D14** (Workiz out of scope), which this supersedes for the import only.
 >
 > Source: `export_export (2).csv` — 299 jobs, 21 columns, exported 2026-07-24.
+
+---
+
+## Second run — EXECUTED 2026-07-29
+
+Source: `export_export (4).csv` — **302 jobs**, 21 columns. The 2026-07-24 records were
+removed by `app.scripts.delete_workiz` and re-created by the rewritten
+`app.scripts.import_workiz`.
+
+### Result
+
+| | |
+|---|---|
+| Deleted | 268 opportunities · 260 contacts · the old calendar and its 267 events |
+| Imported | **302 of 302 jobs** — 268 opportunities, 34 notes, 302 appointments |
+| Verified | 302/302 read back out of GHL and diffed against the CSV — titles, statuses, stages, custom-field values, contact tags, phones, encoding |
+| GHL now holds | 270 opportunities (268 ours + 2 Dispatch relay) · AHS 212 · Retail 58 |
+| Won in GHL | **$218,737** across 196 cards (open 39 / $32,458 · lost 35 / $7,350) |
+
+**Reconciliation against the CSV's $230,862 of Done work — a $12,125 gap, fully accounted:**
+
+- **$1,125** is genuinely stranded in a note. Guillermo Escala's contact already held a
+  *Dispatch relay* opportunity in the AHS pipeline, so GHL rejected his Workiz card. Folding
+  Workiz revenue into a relay card would corrupt a record OWEN does not own, so it was left
+  as a note deliberately.
+- **$11,000** sits on cards whose status is `open`, not `won`. Under `--duplicates sum` a
+  client's whole won total lands on the FIRST job for their (phone, pipeline); when that
+  first job is itself in progress, the card is open even though the money is earned.
+  *Fixable by placing the sum on the client's won job instead — not done, decide first.*
+
+Run 1 under-reported by $32,425 and nobody knew for months. This is $12,125 and it is
+printed at the end of every run.
+
+### Things the run discovered
+
+> The GHL-platform findings below are recorded in full, with their consequences for the
+> unbuilt sync phases, under **GHL API behaviour** in
+> [`GHL_SYNC_SPEC.md`](GHL_SYNC_SPEC.md). Read that one before writing any GHL code; this
+> list is the Workiz-shaped summary.
+
+- **A new Workiz status**, `In Progress (Request Approval  )` — with two spaces before the
+  paren. Unmapped it would have silently staged 2 jobs as *New Lead*. Both sides now
+  normalise whitespace before lookup (`norm_status` / `normStatus`).
+- **GHL's rule is one opportunity per contact PER PIPELINE**, not per contact. Six contacts
+  held two cards each, every pair straddling AHS and Retail. Summing is keyed accordingly.
+- **`source` is not a reliable identifier.** Three genuine Workiz opportunities sat on
+  contacts the email relay had re-sourced to `OWEN Email Ingest`. The delete now takes the
+  export and treats *job number present in the CSV* as authoritative.
+- **Deleting a contact cascades to its opportunities.** One Dispatch relay record (Guillermo
+  Escala, $125) was destroyed as collateral, because the import had touched his contact last
+  so it read `source: Workiz Import`. Rebuilt with `app.scripts.restore_relay` from the
+  parsed email OWEN still held — see that script for the pattern.
+- **GHL's search index lags deletes.** The post-delete re-read reported 37 contacts still
+  present that were already gone. Treat that check as advisory and re-run to confirm.
+- **The API rate-limits at ~900 requests in quick succession** (HTTP 429). `verify_workiz`
+  backs off; anything hammering per-record endpoints must too, or it reports phantom
+  failures.
+- **`/contacts/upsert` 400s when a row has neither phone nor email.** Job 25TNEL — a real
+  $100 Done job whose Workiz phone is the placeholder `1111111111` — now falls back to a
+  plain create rather than being dropped.
+
+### Scripts
+
+| | |
+|---|---|
+| `validate_workiz_export.py` | Gate 1. Encoding, columns, statuses, phones, dates, revenue drift. Exits 1 on anything blocking. |
+| `delete_workiz.py` | Gate 2. Dry run by default; `--csv` makes identification authoritative. |
+| `import_workiz.py` | The import. Ledger-resumable, reports stranded value. |
+| `verify_workiz.py` | Gate 3. Reads every record back OUT of GHL and diffs it against the CSV. |
+| `fix_workiz.py` | Repairs stranded value and missing appointments after the fact. |
+| `restore_relay.py` | Re-relays a parsed Dispatch email whose GHL records were destroyed. |
+
+Artifacts on the server, in `/opt/santiagoproperties/owen-main/workiz_out/`:
+`export.csv`, `workiz_ledger.jsonl` (302 entries — **this is how the next cleanup finds these
+records**), `workiz_delete_ledger.json`, `workiz_delete_plan.json`.
+
+### Decisions agreed with the owner
+
+| # | Decision |
+|---|---|
+| **W9** | **Opportunity titles are `{Client} - {Type}`.** The customer's name leads; the job number leaves the title entirely and lives only in `workiz_job_number`. |
+| **W10** | **Identity no longer comes from the title.** Three handles replace it: a ledger appended to disk per row, a `workiz-import` **tag** on every contact (tags merge on upsert, `source` does not), and the job number in a custom field. |
+| **W11** | **Delete scope is the first import's footprint only** — its opportunities, contacts with `source == "Workiz Import"`, its notes, and the dedicated calendar deleted whole. Not a full account wipe. |
+| **W12** | **W4 becomes canonical on both sides.** `frontend/src/lib/workizJobs.ts` was banking `done pending approval`, `Submitted` and `Pending (Collect Balance)` as won; it now agrees with the import that only `Done` is won. The `/campaigns` page reports lower revenue as a result, and that number is the correct one. |
+| **W13** | **`owen_campaign` uses the platform's real lead rule** — `_qualified()` from `app/api/attribution.py`, first touch, no date window. See *What was wrong with the first run's attribution* below. |
+| **W14** | **Multi-job clients**: if the location's duplicate-opportunity setting can be enabled, every job gets its own card (`--duplicates allow`). Otherwise the client's single card carries the **sum** of their won jobs (`--duplicates sum`, the default), closing the $32,425 hole. |
+
+### Runbook
+
+```
+1  python -m app.scripts.validate_workiz_export /data/new.csv     # GATE: approve report
+2  python -m app.scripts.delete_workiz                            # dry run
+                                                                  # GATE: approve the list,
+                                                                  #       read the CONFLICT section
+3  python -m app.scripts.delete_workiz --execute
+4  create a calendar "Workiz Jobs (imported)"  -> WORKIZ_CALENDAR_ID
+5  python -m app.scripts.import_workiz /data/new.csv --limit 10
+6  read those 10 records BACK OUT of GHL                          # GATE: approve
+7  python -m app.scripts.import_workiz /data/new.csv
+```
+
+Step 2 **must run before the rename is deployed** — it finds records by the *old*
+`{Job #} - ` title prefix, which the new titles do not have.
+
+Mount a volume for the ledger. The 2026-07-24 run printed its ledger to stdout inside a
+`docker compose run --rm` container, so the id list died with the container — which is the
+only reason step 2 has to reverse-engineer what to delete from opportunity names.
+
+### What was wrong with the first run's attribution
+
+The original `owen_campaigns()` query was:
+
+```sql
+SELECT cl.phone_number, max(cp.name)
+FROM callers cl JOIN calls c ON c.caller_id = cl.id AND c.number_id IS NOT NULL
+```
+
+Measured against `_qualified()` in `app/api/attribution.py`, which is the platform's actual
+definition of a lead, it was missing every filter: no `started_at IS NOT NULL` (so the ~25k
+Twilio backfill stubs counted), no duration floor (robocalls counted), no direction filter
+(**our own outbound dials counted as the customer calling that campaign**), and no window.
+`max(cp.name)` then broke ties alphabetically — in exactly the multi-campaign case the
+conflict table below is about.
+
+So the "83 of 264 phones (31%)" figure and every `attribution_basis` value written on
+2026-07-24 came from a rule the rest of the platform would reject. Expect the second run to
+match **fewer** phones, and some jobs to change campaign. Those numbers are the trustworthy
+ones.
+
+---
+
+## First run — 2026-07-24
 
 ## Result
 
@@ -14,7 +148,7 @@
 | Jobs recorded as notes instead | **31** (GHL one-opportunity-per-contact limit) |
 | Contacts | 263 (from 6) |
 | Calendar events | 267 on a dedicated calendar |
-| Custom fields created | 13 `workiz_*` + `attribution_basis` |
+| Custom fields created | 13 — **12** `workiz_*` plus `attribution_basis`. `owen_campaign` is **not** one of them: spec D15 created it (`LFG2NGPblzA9p03a0p1n`) and the import only reuses it. In a location without the D15 fields it is silently omitted from every card. |
 | Status split | won 198 · lost 35 · open 35 |
 | Pipeline split | AHS 210 · Retail Repairs 58 |
 | Won revenue visible in GHL | **$198,437** |
