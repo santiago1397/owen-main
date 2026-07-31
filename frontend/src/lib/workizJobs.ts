@@ -27,19 +27,37 @@ export type WorkizJob = {
 
 /** Workiz status -> commercial outcome. Revenue is only ever counted for `won`.
  *  Anything unmapped falls to `open` so a new Workiz status can never be silently
- *  banked as revenue. */
+ *  banked as revenue.
+ *
+ *  ONLY `Done` is won (spec W4, aligned here 2026-07-28). This module previously also
+ *  banked `done pending approval`, `Submitted` and `Pending (Collect Balance)` as won,
+ *  which made this page report higher revenue than the same jobs show in GHL — the two
+ *  were computing "won" by different rules and could never reconcile. `done pending
+ *  approval` in particular is revenue AT RISK: AHS has not approved it, and treating it
+ *  as earned overstates every campaign that carries AHS work.
+ *
+ *  STATUS_MAP in backend/app/scripts/import_workiz.py is the same table — keep them in step. */
 const OUTCOME: Record<string, JobOutcome> = {
   "Done": "won",
-  "done pending approval": "won",
-  "Pending (Collect Balance)": "won",
-  "Submitted": "won",
   "Canceled": "lost",
+  "done pending approval": "open",
+  "Submitted": "open",
+  "Pending (Collect Balance)": "open",
   "Pending (Estimate Follow Up)": "open",
   "Pending (New Roof Estimate)": "open",
   "In Progress (Inspections)": "open",
   "In Progress (Repair Schedule)": "open",
   "In Progress (Callback)": "open",
+  "In Progress (Request Approval)": "open",
 };
+
+/** Workiz writes inconsistent internal whitespace — the 2026-07-28 export contains
+ *  "In Progress (Request Approval  )" with two spaces before the paren. Looking that up
+ *  verbatim misses, and the job silently falls through to `open` with a spurious "unknown
+ *  status" warning. Mirrors norm_status() in app/scripts/import_workiz.py. */
+export function normStatus(s: string): string {
+  return (s || "").trim().replace(/\s+/g, " ").replace(/ \)/g, ")").replace(/\( /g, "(");
+}
 
 /** Workiz `Source` values that are a genuine acquisition-channel claim, mapped to the OWEN
  *  campaign they correspond to. Everything else (AHS, "Existig Customer", AI) is not a
@@ -135,7 +153,7 @@ export function parseWorkizCsv(text: string): { jobs: WorkizJob[]; errors: strin
   for (const r of rows.slice(1)) {
     const jobNumber = at(r, cols.jobNumber);
     if (!jobNumber) continue;
-    const status = at(r, cols.status);
+    const status = normStatus(at(r, cols.status));
     const source = at(r, cols.source);
     if (!OUTCOME[status]) errors.push(`Unknown Workiz status "${status}" on job ${jobNumber} — counted as open.`);
     const phoneRaw = at(r, cols.phone);
