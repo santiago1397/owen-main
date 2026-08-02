@@ -154,12 +154,21 @@ def main() -> None:
         check("with sql+content, a SELECT runs", code == 200, str(body)[:300])
         code, body = post("/api/ai/query", hdr, {"sql": "DELETE FROM calls"})
         check("a write is refused", code == 400)
+        # Match on `message` (the database's own words), NOT the whole body — the canned
+        # `hint` contains the word "permission", so matching str(body) would pass even when
+        # the query failed for an unrelated reason such as a missing pg_hba entry.
+        def denied(b):
+            return "permission denied" in ((b.get("detail") or {}).get("message") or "").lower()
+
         code, body = post("/api/ai/query", hdr, {"sql": "SELECT * FROM users"})
         check("SELECT on `users` is refused BY THE DATABASE ROLE, not by us",
-              code == 400 and "permission" in str(body).lower(), str(body)[:300])
+              code == 400 and denied(body), str(body)[:300])
         code, body = post("/api/ai/query", hdr, {"sql": "SELECT * FROM api_keys"})
         check("SELECT on `api_keys` is refused too",
-              code == 400 and "permission" in str(body).lower(), str(body)[:300])
+              code == 400 and denied(body), str(body)[:300])
+        code, body = post("/api/ai/query", hdr, {"sql": "WITH u AS (SELECT * FROM users) SELECT * FROM u"})
+        check("a CTE cannot smuggle a read of `users` past the role",
+              code == 400 and denied(body), str(body)[:300])
     else:
         check("without sql+content, /query answers 403 or 503", code in (403, 503))
 
