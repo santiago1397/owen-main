@@ -281,6 +281,43 @@ async def purge_estimates() -> None:
     print(f"purged {n} superseded estimated charge rows (run `cost-now` to repopulate)")
 
 
+async def reclassify_emails(dry_run: bool) -> None:
+    """Re-file already-stored `failed` emails that were never job notifications as `ignored`.
+
+    Rows written before the parser learned the difference are all marked 'failed', which
+    overstates the problem: on this account 4 of 5 were cancellations, notes and account mail.
+
+    Classification needs only the SUBJECT, so this re-runs the real predicate rather than
+    re-parsing bodies — no duplicated logic, and nothing can drift from what the poller does.
+    Only ever moves failed -> ignored; a genuine parse failure is never silenced.
+    """
+    from app.models import InboundEmail
+    from app.providers import dispatch_email
+
+    async with SessionLocal() as db:
+        rows = (await db.execute(
+            select(InboundEmail).where(InboundEmail.parse_status == dispatch_email.FAILED)
+        )).scalars().all()
+        moved = 0
+        for row in rows:
+            if dispatch_email.is_job_notification(row.subject):
+                print(f"  KEEP failed  job={row.job_id} {row.subject!r}")
+                continue
+            reason = dispatch_email.non_job_kind(row.subject)
+            print(f"  -> ignored ({reason})  {row.subject!r}")
+            if not dry_run:
+                row.parse_status = dispatch_email.IGNORED
+                row.parse_error = f"ignored: {reason} — carries no lead to relay"
+            moved += 1
+        if dry_run:
+            await db.rollback()
+            print(f"reclassify-emails (dry-run): {moved}/{len(rows)} would move to 'ignored'")
+            return
+        await db.commit()
+    print(f"reclassify-emails: {moved}/{len(rows)} moved to 'ignored'; "
+          f"{len(rows) - moved} remain genuine parse failures")
+
+
 # --- AI API keys ----------------------------------------------------------------------------
 # The UI (/api-keys) is the normal way to do this. These exist for bootstrapping — issuing the
 # first key on a fresh deployment, or recovering when nobody can log in.
@@ -399,6 +436,10 @@ def main() -> None:
     sub.add_parser("billing-purge-estimates",
                    help="One-time: drop charge rows written by the old local estimate")
 
+    re_ = sub.add_parser("reclassify-emails",
+                         help="Re-file stored non-job 'failed' emails as 'ignored'")
+    re_.add_argument("--dry-run", action="store_true", help="Show what would change, write nothing")
+
     ik = sub.add_parser("issue-key", help="Mint an AI API key (shown once). UI: /api-keys")
     ik.add_argument("--name", required=True, help="human label, e.g. 'claude-cli'")
     ik.add_argument("--scope", action="append", dest="scopes",
@@ -437,6 +478,8 @@ def main() -> None:
         asyncio.run(cost_now(args.hours))
     elif args.cmd == "billing-purge-estimates":
         asyncio.run(purge_estimates())
+    elif args.cmd == "reclassify-emails":
+        asyncio.run(reclassify_emails(args.dry_run))
     elif args.cmd == "issue-key":
         asyncio.run(issue_key(args.name, args.scopes, args.expires_days))
     elif args.cmd == "list-keys":

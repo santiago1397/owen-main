@@ -183,7 +183,10 @@ async def ingest_email(
             to_addr=msg.to_addr,
             subject=msg.subject,
             job_id=parsed.job_id,
-            parse_status="parsed" if parsed.ok else "failed",
+            # 'parsed' | 'failed' | 'ignored' — the parser decides. `ok` remains the relay
+            # gate (only 'parsed' relays); `status` separates a real problem from a Dispatch
+            # email that was never a lead in the first place.
+            parse_status=parsed.status,
             parse_error=parsed.error,
             fields=parsed.fields or None,
             raw=msg.raw,

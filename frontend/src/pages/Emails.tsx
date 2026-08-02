@@ -14,9 +14,12 @@ function RelayBadge({ status, relayed }: { status: string | null; relayed: boole
 }
 
 function ParseBadge({ status }: { status: string }) {
-  return status === "parsed"
-    ? <span className="badge new">parsed</span>
-    : <span className="badge spam">parse failed</span>;
+  if (status === "parsed") return <span className="badge new">parsed</span>;
+  // 'ignored' = Dispatch mail that was never a work order (cancellations, notes, account
+  // mail). Nothing went wrong and there was no lead to lose, so it must not read as red —
+  // showing these as failures made a healthy parser look broken.
+  if (status === "ignored") return <span className="badge prov">not a job</span>;
+  return <span className="badge spam">parse failed</span>;
 }
 
 function EmailDrawer({ id, onClose }: { id: string; onClose: () => void }) {
@@ -61,9 +64,14 @@ function EmailDrawer({ id, onClose }: { id: string; onClose: () => void }) {
 
         {e.parse_status !== "parsed" && (
           <div className="card" style={{ marginBottom: 12 }}>
-            <div className="l" style={{ marginBottom: 8 }}>Why it wasn't relayed</div>
+            <div className="l" style={{ marginBottom: 8 }}>
+              {e.parse_status === "ignored" ? "Why there is nothing to relay" : "Why it wasn't relayed"}
+            </div>
             <p className="muted" style={{ margin: 0 }}>
-              {e.parse_error || "Parsing failed — the raw email is stored below for inspection."}
+              {e.parse_status === "ignored"
+                ? (e.parse_error || "This Dispatch email is not a work order, so it carries no lead.") +
+                  " Nothing went wrong — no action needed."
+                : (e.parse_error || "Parsing failed — the raw email is stored below for inspection.")}
             </p>
           </div>
         )}
@@ -163,7 +171,8 @@ export default function Emails() {
         )}
       </div>
       <p className="muted" style={{ marginTop: 4 }}>
-        Every job-notification email pulled from the mailbox, and whether it was forwarded to GoHighLevel.
+        Every Dispatch email pulled from the mailbox, and whether it was forwarded to GoHighLevel.
+        “Not a job” means the email was a cancellation, a note, or account mail — there was no lead in it.
       </p>
 
       <div className="toolbar" style={{ flexWrap: "wrap", gap: 8, marginTop: 8 }}>
@@ -171,6 +180,7 @@ export default function Emails() {
           <option value="">any parse status</option>
           <option value="parsed">parsed</option>
           <option value="failed">parse failed</option>
+          <option value="ignored">not a job</option>
         </select>
         <select onChange={(e) => set("relay_status", e.target.value)}>
           <option value="">any relay status</option>

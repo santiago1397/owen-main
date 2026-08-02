@@ -10,6 +10,25 @@ and missing ones are simply absent. If a small set of REQUIRED fields can't be f
 mark the email `failed` (stored + flagged, never relayed) so a human can inspect it rather
 than pushing half-parsed junk to GHL. When Dispatch changes the template this is where it
 will break; keep it loud (parse_status='failed' + parse_error), never silent.
+
+**Not every Dispatch email is a job.** The mailbox also receives cancellations
+("AHS Canceled Job 70396099"), notes on existing jobs ("...sent you a note for job #..."),
+and account mail ("Welcome to Dispatch"). None of those is a lead, and none of them can
+possibly yield a customer name and service address — so treating a failure to extract those
+as an error is wrong twice over: it cries wolf, and it buries the one failure that matters
+in a pile of ones that don't. It did exactly that: 4 of 5 "parse failures" on this account
+were non-job mail, which made a healthy parser look like a broken one.
+
+So there are three outcomes, not two (see `Outcome`):
+  parsed  — a job notification we fully understood; relayed to GHL
+  failed  — a job notification we could NOT parse. A real problem. Stays loud.
+  ignored — not a job notification at all. Expected, filed, never relayed, never an error.
+
+Classification is deliberately INVERTED: an email is a job notification only if it looks
+like one, rather than being ignorable only if it matches a known-junk list. A Dispatch email
+type nobody has seen yet therefore lands in `ignored` instead of raising a false alarm — and
+the case that must never be silently dropped (a real confirmation we failed to read) is still
+caught, because the subject line says "Dispatch Email Confirmation" whatever the body does.
 """
 
 import re
@@ -22,6 +41,26 @@ SENDER = "notifications@dispatch.me"
 # Fields that must be present for an email to count as 'parsed' (and thus be relayed).
 REQUIRED = ("job_id", "customer_name", "service_address")
 
+# The three values `InboundEmail.parse_status` may take.
+PARSED = "parsed"
+FAILED = "failed"
+IGNORED = "ignored"
+
+# What makes an email a JOB NOTIFICATION — the only kind that can become a lead. Matched on
+# the subject, which stays stable even when the body template shifts.
+_JOB_SUBJECT = re.compile(r"Dispatch\s+E-?mail\s+Confirmation", re.IGNORECASE)
+
+# Recognized non-job mail, purely so the stored reason reads like a sentence instead of
+# "not a job notification". Anything unmatched is still ignored, just described generically.
+_NON_JOB_KINDS: tuple[tuple[re.Pattern, str], ...] = (
+    (re.compile(r"cancell?ed\s+job", re.IGNORECASE), "job cancellation"),
+    (re.compile(r"sent you a note", re.IGNORECASE), "note on an existing job"),
+    (re.compile(r"welcome to dispatch|account has been created", re.IGNORECASE),
+     "Dispatch account email"),
+    (re.compile(r"\breminder\b", re.IGNORECASE), "reminder"),
+    (re.compile(r"\b(rescheduled|reschedule)\b", re.IGNORECASE), "reschedule notice"),
+)
+
 
 @dataclass
 class ParsedEmail:
@@ -30,11 +69,29 @@ class ParsedEmail:
     job_id: str | None = None
     error: str | None = None
     missing: list[str] = field(default_factory=list)
+    # 'parsed' | 'failed' | 'ignored'. `ok` stays as the relay gate (only parsed relays), so
+    # existing callers keep working; `status` is what distinguishes a problem from a non-event.
+    status: str = PARSED
+    # Human phrase for why it was ignored, e.g. "job cancellation". None unless ignored.
+    ignored_reason: str | None = None
 
 
 def matches(from_addr: str | None) -> bool:
     """True if this email is from the Dispatch sender we handle."""
     return bool(from_addr) and SENDER.lower() in from_addr.lower()
+
+
+def is_job_notification(subject: str | None) -> bool:
+    """True if this subject is a work-order confirmation — the only kind that is a lead."""
+    return bool(subject) and bool(_JOB_SUBJECT.search(subject))
+
+
+def non_job_kind(subject: str | None) -> str:
+    """A human phrase for what a non-job email is, for the stored reason."""
+    for pattern, label in _NON_JOB_KINDS:
+        if subject and pattern.search(subject):
+            return label
+    return "not a job notification"
 
 
 def _strip_tags(s: str) -> str:
@@ -226,9 +283,23 @@ def parse(subject: str | None, text_body: str | None, html_body: str | None) -> 
     f = {k: v for k, v in f.items() if v is not None}
 
     missing = [k for k in REQUIRED if not f.get(k)]
-    if missing:
+    if not missing:
+        return ParsedEmail(ok=True, fields=f, job_id=f.get("job_id"), status=PARSED)
+
+    # Fields are missing. Whether that is a PROBLEM depends entirely on what this email is.
+    # A cancellation has no customer address to find, so failing to find one is not a failure.
+    # Note the ordering: a full extraction above wins regardless of subject, so an unexpected
+    # subject on a genuine job email is still parsed and relayed rather than ignored.
+    if not is_job_notification(subject):
+        reason = non_job_kind(subject)
         return ParsedEmail(
-            ok=False, fields=f, job_id=f.get("job_id"),
-            error="missing required fields: " + ", ".join(missing), missing=missing,
+            ok=False, fields=f, job_id=f.get("job_id"), missing=missing,
+            status=IGNORED, ignored_reason=reason,
+            error=f"ignored: {reason} — carries no lead to relay",
         )
-    return ParsedEmail(ok=True, fields=f, job_id=f.get("job_id"))
+
+    # A real work-order confirmation we could not read. This is the alarm worth having.
+    return ParsedEmail(
+        ok=False, fields=f, job_id=f.get("job_id"), status=FAILED,
+        error="missing required fields: " + ", ".join(missing), missing=missing,
+    )

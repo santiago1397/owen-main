@@ -108,23 +108,40 @@ async def errors(
         ]
 
     if "emails" in want and not linkedid:
+        # `parse_status='ignored'` is deliberately absent: those are Dispatch emails that were
+        # never work orders (cancellations, notes, account mail). They carry no lead and
+        # nothing went wrong, so they are not errors and do not belong in this list at all.
         rows = (await db.execute(
             select(InboundEmail).where(
                 InboundEmail.received_at >= cutoff,
                 (InboundEmail.parse_status == "failed") | (InboundEmail.relay_status == "failed"),
             ).order_by(InboundEmail.received_at.desc()).limit(limit)
         )).scalars().all()
-        items += [
-            {
+        for r in rows:
+            # A lead GoHighLevel rejected is not a software error — the pipeline did its job
+            # and the CRM said no. Classifying it as ERROR both overstates the fault and
+            # buries a real, actionable business item among stack traces. It gets its own
+            # source and severity so a caller can act on it without triaging it first.
+            stranded = r.relay_status == "failed"
+            customer = (r.fields or {}).get("customer_name") if r.fields else None
+            items.append({
                 "at": r.received_at.isoformat() if r.received_at else None,
-                "source": "email", "severity": "ERROR", "service": "worker",
+                "source": "lost_lead" if stranded else "email",
+                "severity": "ACTION_REQUIRED" if stranded else "ERROR",
+                "service": "worker",
                 "origin": f"email:{r.source or 'unknown'}",
-                "message": (r.parse_error or r.relay_error or "email failed")[:2000],
+                "message": (
+                    f"Lead not delivered to GoHighLevel: {customer or 'unknown customer'} "
+                    f"(job {r.job_id or '?'}). {(r.relay_error or '').splitlines()[0][:300]}"
+                    if stranded else (r.parse_error or "work-order email could not be read")[:2000]
+                ),
                 "detail": f"email_id={r.id} job_id={r.job_id} parse={r.parse_status} "
                           f"relay={r.relay_status} subject={r.subject!r}",
-            }
-            for r in rows
-        ]
+                "customer": customer,
+                "job_id": r.job_id,
+                # Both are recoverable by re-running the relay once the cause is fixed.
+                "retry": f"POST /api/emails/{r.id}/relay" if stranded else None,
+            })
 
     items.sort(key=lambda i: i["at"] or "", reverse=True)
     items = items[:limit]
@@ -138,6 +155,12 @@ async def errors(
     )).scalar_one()
 
     notes = [
+        "source='lost_lead' (severity ACTION_REQUIRED) is NOT a software error: the email "
+        "parsed correctly and GoHighLevel rejected it. Each one is a real customer who never "
+        "reached the CRM — report them as business items to chase, not as bugs. Retry with "
+        "the `retry` field once the cause is fixed.",
+        "Dispatch mail that is not a work order (cancellations, notes, account mail) is "
+        "classified 'ignored' and never appears here — it carries no lead and nothing failed.",
         f"Captured logs start at {settings.APP_LOG_CAPTURE_LEVEL} and are retained "
         f"{settings.APP_LOG_RETENTION_DAYS} days. Anything below that level exists only in the "
         f"container's Docker logs on the VPS.",
@@ -148,11 +171,19 @@ async def errors(
         notes.append(f"{dropped} log record(s) were dropped by this process under load and are "
                      f"NOT in the database.")
 
-    summary = (
-        f"No errors in the last {since}." if not items
-        else f"{len(items)} error/warning record(s) in the last {since}: "
-             + ", ".join(f"{v} from {k}s" for k, v in sorted(counts.items())) + "."
-    )
+    # Lost leads are counted and described separately so a caller never reports them as
+    # "N errors" — they are the one category here that costs money rather than uptime.
+    lost = counts.get("lost_lead", 0)
+    faults = len(items) - lost
+    if not items:
+        summary = f"No errors in the last {since}."
+    else:
+        bits = []
+        if faults:
+            bits.append(f"{faults} error/warning record(s)")
+        if lost:
+            bits.append(f"{lost} undelivered lead(s) needing action (not a malfunction)")
+        summary = f"In the last {since}: " + " and ".join(bits) + "."
     return ok(
         summary=summary,
         data={"items": items, "counts_by_source": counts, "captured_logs_in_window": total_captured},

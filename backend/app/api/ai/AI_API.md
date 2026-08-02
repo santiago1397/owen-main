@@ -168,9 +168,23 @@ The LLM's category mix. Only calls that were recorded → transcribed → analyz
 ### `GET /api/ai/leads/stats` — new leads *(scope: `read`)*
 `period`, `source` (e.g. `dispatch`), `group_by` = `day` · `week` · `source` · `brand` · `none`.
 
-A **lead** is a successfully **parsed** job-notification email. Also returns `parse_failed` and
-`relay_failed`: a rising `parse_failed` means the sender changed their template and leads are
-being dropped before they reach the CRM. Say so if it is non-zero.
+A **lead** is a successfully **parsed** job-notification email.
+
+Mind the three parse outcomes — they are not interchangeable:
+
+| `parse_status` | meaning | is it a problem? |
+|---|---|---|
+| `parsed` | a work order we fully read | no — it became a lead |
+| `ignored` | not a work order at all: a cancellation, a note on an existing job, Dispatch account mail | **no** — there was never a lead in it |
+| `failed` | a work order we could **not** read | **yes** — that lead was not relayed |
+
+Do not report `ignored` as a failure. Most Dispatch mail is not a work order, and counting it
+as broken makes a healthy parser look broken.
+
+`relay_failed` is different again and is the one that costs money: the email parsed fine and
+**GoHighLevel rejected it**, so a real customer never reached the CRM. That is a business item
+to chase, not a software error — see `/api/ai/errors`, where these appear as
+`source: "lost_lead"`.
 
 ### `GET /api/ai/messages/stats` *(scope: `read`)*
 SMS/MMS volume. `period`, `direction`, `group_by` = `day` · `direction` · `none`.
@@ -185,9 +199,18 @@ at $0 and counted in `unrated_legs` — when that is non-zero the real total is 
 
 ### `GET /api/ai/health/pipeline` — "is anything broken?" *(scope: `read`)*
 One request covering ingestion freshness, job-queue depth, dead jobs, relay failures, stuck
-recordings and telephony reachability, plus a derived `status` of `healthy` / `degraded` and a
-`problems` list in plain language. `degraded` means something needs a human, not that the
-platform is down.
+recordings and telephony reachability.
+
+It returns **two separate lists**, and you should report both:
+
+- **`problems`** — the software or its plumbing is misbehaving. These, and only these, set
+  `status` to `degraded`.
+- **`needs_attention`** — the software worked and a *business* outcome still needs a person:
+  leads GoHighLevel refused (also itemised in `stranded_leads`, with customer names and job
+  ids), work orders whose email could not be read. A healthy platform can still have these.
+
+`degraded` means something needs an engineer. An empty `problems` list with a non-empty
+`needs_attention` means the system is fine and somebody is losing leads.
 
 ### `GET /api/ai/errors` — what is going wrong *(scope: `logs`)*
 
@@ -202,6 +225,16 @@ platform is down.
 
 Unions three places OWEN records failure — captured log records, jobs that died after 5
 attempts, and failed email parses/relays — into one time-ordered list.
+
+**Not everything here is a bug.** Check `source`:
+
+- `log` / `job` / `email` (severity `ERROR`/`WARNING`) — something malfunctioned.
+- **`lost_lead`** (severity `ACTION_REQUIRED`) — the email parsed correctly and GoHighLevel
+  rejected it. Nothing is broken; a named customer simply never reached the CRM. Each carries
+  `customer`, `job_id` and a `retry` path. Report these as leads to chase, never as errors.
+
+Dispatch mail classified `ignored` (cancellations, notes, account mail) never appears here at
+all — it carries no lead and nothing failed.
 
 Two limits worth stating when you report from this: capture starts at **WARNING** (anything
 below exists only in Docker logs on the VPS), and it is **not retroactive** — nothing from

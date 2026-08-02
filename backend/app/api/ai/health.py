@@ -63,13 +63,28 @@ async def pipeline_health(
     emails_24h = (await db.execute(
         select(func.count()).select_from(InboundEmail).where(InboundEmail.received_at >= day_ago)
     )).scalar_one()
+    # Only 'failed' counts. 'ignored' means the email was never a job notification
+    # (cancellation, note on an existing job, Dispatch account mail) — expected traffic that
+    # carries no lead, and counting it here is what previously made a working parser look
+    # broken. See providers/dispatch_email.py.
     email_parse_failures_24h = (await db.execute(
         select(func.count()).select_from(InboundEmail)
         .where(InboundEmail.received_at >= day_ago, InboundEmail.parse_status == "failed")
     )).scalar_one()
+    email_ignored_24h = (await db.execute(
+        select(func.count()).select_from(InboundEmail)
+        .where(InboundEmail.received_at >= day_ago, InboundEmail.parse_status == "ignored")
+    )).scalar_one()
     email_relay_failures = (await db.execute(
         select(func.count()).select_from(InboundEmail).where(InboundEmail.relay_status == "failed")
     )).scalar_one()
+    # The identities behind that count, because "4 relay failures" is an abstraction and
+    # "Simon Kakon's roof job never reached the CRM" is a thing someone can act on.
+    stranded = (await db.execute(
+        select(InboundEmail.job_id, InboundEmail.fields, InboundEmail.received_at)
+        .where(InboundEmail.relay_status == "failed")
+        .order_by(InboundEmail.received_at.desc()).limit(25)
+    )).all()
 
     last_message = (await db.execute(select(func.max(Message.received_at)))).scalar_one()
 
@@ -114,14 +129,32 @@ async def pipeline_health(
     call_age = _age_minutes(last_call, now)
     mail_age = _age_minutes(last_email, now)
 
+    # Two lists, because they are two different jobs for two different people.
+    #
+    # `problems`  — the software or its plumbing is misbehaving. An engineer fixes these.
+    # `needs_attention` — the software worked correctly and a BUSINESS outcome still needs a
+    #   human: a lead GoHighLevel refused, a work order whose email we could not read. Filing
+    #   those under "errors" buries them among stack traces and, worse, invites the reader to
+    #   dismiss them as noise. They are the most valuable thing this endpoint reports.
     problems: list[str] = []
+    needs_attention: list[str] = []
+
     if dead_jobs:
         problems.append(f"{dead_jobs} job(s) dead after {MAX_ATTEMPTS} attempts")
-    if email_parse_failures_24h:
-        problems.append(f"{email_parse_failures_24h} email(s) failed to parse in the last 24h "
-                        f"(leads are being dropped)")
     if email_relay_failures:
-        problems.append(f"{email_relay_failures} email relay(s) to GoHighLevel failed")
+        who = ", ".join(
+            f"{(f or {}).get('customer_name') or 'unknown'} (job {jid or '?'})"
+            for jid, f, _ in stranded[:5]
+        )
+        needs_attention.append(
+            f"{email_relay_failures} parsed lead(s) never reached GoHighLevel: {who}"
+            + (" and others" if email_relay_failures > 5 else "")
+        )
+    if email_parse_failures_24h:
+        needs_attention.append(
+            f"{email_parse_failures_24h} work-order email(s) in the last 24h could not be read "
+            f"— those leads were not relayed"
+        )
     if stuck_recordings:
         problems.append(f"{stuck_recordings} recording(s) downloaded >6h ago but never transcribed")
     if call_age is not None and call_age > STALE_CALLS_MINUTES:
@@ -131,13 +164,29 @@ async def pipeline_health(
     if settings.ASTERISK_ENABLED and telephony["ari_reachable"] is False:
         problems.append("Asterisk ARI is unreachable")
 
+    # Only `problems` decide health. A lead GoHighLevel rejected is not the platform
+    # malfunctioning — but it is still surfaced in the summary, unconditionally, because a
+    # caller that reads only `status` must not miss it.
     healthy = not problems
+    parts = ["Pipeline healthy." if healthy else "Pipeline DEGRADED: " + "; ".join(problems) + "."]
+    if needs_attention:
+        parts.append("Needs attention (not a malfunction): " + "; ".join(needs_attention) + ".")
+
     return ok(
-        summary=("Pipeline healthy." if healthy
-                 else "Pipeline DEGRADED: " + "; ".join(problems) + "."),
+        summary=" ".join(parts),
         data={
             "status": "healthy" if healthy else "degraded",
             "problems": problems,
+            "needs_attention": needs_attention,
+            "stranded_leads": [
+                {
+                    "job_id": jid,
+                    "customer": (f or {}).get("customer_name"),
+                    "service": (f or {}).get("service"),
+                    "received_at": ts.isoformat() if ts else None,
+                }
+                for jid, f, ts in stranded
+            ],
             "ingestion": {
                 "last_call_at": last_call.isoformat() if last_call else None,
                 "minutes_since_last_call": call_age,
@@ -157,6 +206,7 @@ async def pipeline_health(
             },
             "relays": {
                 "email_parse_failures_24h": email_parse_failures_24h,
+                "email_ignored_non_job_24h": email_ignored_24h,
                 "email_relay_failures_total": email_relay_failures,
                 "calls_24h_not_relayed_to_ghl": unrelayed_calls,
             },
@@ -164,7 +214,11 @@ async def pipeline_health(
             "telephony": telephony,
         },
         notes=[
-            "`degraded` means something needs a human, not that the platform is down.",
+            "`status` reflects the PLATFORM only. `needs_attention` is separate: those items "
+            "mean the software worked and a business outcome still needs a person. Report both.",
+            "`email_ignored_non_job_24h` counts Dispatch mail that is not a work order "
+            "(cancellations, notes, account mail). It is normal traffic, not a failure, and "
+            "carries no lead.",
             "Call ingestion is polled every 5 minutes; a quiet night is normal for this business, "
             "so call staleness is only reported after 24h of silence.",
         ],

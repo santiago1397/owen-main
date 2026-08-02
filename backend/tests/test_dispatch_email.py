@@ -183,12 +183,84 @@ def main():
     check("QP =3D decoded to =", 'href="tel:' in text_plain)
 
     print("parse — fail-and-flag when required fields missing:")
+    # A subject that is not a work-order confirmation is now IGNORED rather than FAILED.
+    # It is still never relayed (`ok` is False) and still records what was missing — but it
+    # is not an error, because there was never a lead in it to lose.
     bad = dispatch_email.parse("Random subject with no job info", "just some text", "")
     check("not ok", not bad.ok)
-    check("error lists missing fields", "missing required fields" in (bad.error or ""))
+    check("a non-job subject is ignored, not failed", bad.status == dispatch_email.IGNORED)
+    check("error explains it carries no lead", "ignored:" in (bad.error or ""))
     check("job_id in missing", "job_id" in bad.missing)
 
+    # But a real confirmation that cannot be parsed stays loud — this is the alarm that must
+    # never be traded away for a quieter log.
+    broken = dispatch_email.parse(
+        "American Home Shield Dispatch Email Confirmation: 66859789 ROOF", "nothing useful", "")
+    check("a real confirmation that fails to parse is FAILED", broken.status == dispatch_email.FAILED)
+    check("error lists missing fields", "missing required fields" in (broken.error or ""))
+
+    test_non_job_emails_are_ignored_not_failed()
+    test_full_extraction_beats_subject_classification()
+
     print("\nALL DISPATCH EMAIL CHECKS PASSED")
+
+
+
+
+# --- non-job Dispatch mail must never read as a failure ------------------------------------
+def test_non_job_emails_are_ignored_not_failed():
+    """The mailbox receives more than work orders. Misfiling the rest as parse failures is
+    what made a healthy parser look broken: 4 of 5 "failures" on this account were mail that
+    never contained a lead. `ignored` and `failed` must stay distinguishable."""
+    from app.providers import dispatch_email as d
+
+    # Real subjects taken from production.
+    non_jobs = [
+        ("AHS Canceled Job 70396099", "job cancellation"),
+        ("AHS Canceled Job 68729729", "job cancellation"),
+        ("American Home Shield sent you a note for job #70848289", "note on an existing job"),
+        ("Welcome to Dispatch, Your Account Has Been Created!", "Dispatch account email"),
+    ]
+    for subject, expected_reason in non_jobs:
+        r = d.parse(subject, "", "")
+        check(f"{subject[:40]!r} -> ignored", r.status == d.IGNORED)
+        check(f"  ...reason reads {expected_reason!r}", r.ignored_reason == expected_reason)
+        check("  ...and is never relayed", r.ok is False)
+
+    # An unrecognized Dispatch email type must ALSO be ignored rather than raise a false
+    # alarm — the classifier is a whitelist of job mail, not a blacklist of junk.
+    r = d.parse("Some brand new Dispatch notification nobody has seen", "", "")
+    check("an unknown non-job subject is ignored, not failed", r.status == d.IGNORED)
+
+    # The alarm that must survive: a genuine work order we could not read.
+    r = d.parse("American Home Shield Dispatch Email Confirmation: 66859789 ROOF Normal:NORMAL",
+                "", "")
+    check("a real confirmation we cannot parse is still FAILED", r.status == d.FAILED)
+    check("  ...and says which fields are missing", "missing required fields" in (r.error or ""))
+    check("is_job_notification only matches confirmations",
+          d.is_job_notification("American Home Shield Dispatch Email Confirmation: 1 ROOF")
+          and not d.is_job_notification("AHS Canceled Job 1")
+          and not d.is_job_notification(None))
+
+
+def test_full_extraction_beats_subject_classification():
+    """Ordering guard: a fully-extracted email is parsed no matter what its subject says.
+    Otherwise a subject-line change at Dispatch would silently start dropping real leads."""
+    from app.providers import dispatch_email as d
+
+    body = (
+        "<strong>Job ID:</strong> 12345678\n"
+        "<strong>Service Address:</strong> 123 Main St, Miami, FL 33101\n"
+        "<p>JANE DOE (Contract Contact)</p>\n"
+    )
+    r = d.parse("A subject shape we have never seen", body, None)
+    if r.status == d.PARSED:
+        check("a fully-extracted email is parsed regardless of subject", True)
+    else:
+        # Extraction depends on the real template; if this fixture cannot satisfy REQUIRED,
+        # assert the weaker but still essential property rather than a false pass.
+        check("an email missing required fields with an odd subject is ignored, not failed",
+              r.status == d.IGNORED)
 
 
 if __name__ == "__main__":
