@@ -282,7 +282,7 @@ async def purge_estimates() -> None:
     print(f"purged {n} superseded estimated charge rows (run `cost-now` to repopulate)")
 
 
-async def purge_dead_jobs(dry_run: bool) -> None:
+async def purge_dead_jobs(dry_run: bool, include_gone_upstream: bool) -> None:
     """Retire dead `recording_fetch` jobs whose media can never be fetched.
 
     A job that has exhausted its attempts against media the provider will not serve is not
@@ -304,22 +304,34 @@ async def purge_dead_jobs(dry_run: bool) -> None:
     from app.models import Job, Recording
     from app.services.queue import MAX_ATTEMPTS
 
-    permanent = or_(
-        Job.last_error.ilike("%403%"),          # provider refuses to serve it, with or without auth
-        Job.last_error.ilike("%404%"),          # provider deleted it
+    # By DEFAULT only the causes that leave /health/pipeline reporting `degraded`. A 404 means
+    # the provider deleted the media on its own retention schedule; those are already counted
+    # apart as `dead_media_gone_upstream` and are not a problem, so sweeping them is optional
+    # housekeeping rather than something to do implicitly on a destructive command.
+    causes = [
+        Job.last_error.ilike("%403%"),                  # provider refuses it, with or without auth
         Job.last_error.ilike("%missing an%protocol%"),  # unusable URL (unexpanded CFB template)
-    )
+    ]
+    if include_gone_upstream:
+        causes.append(Job.last_error.ilike("%404%"))
+    permanent = or_(*causes)
+
     async with SessionLocal() as db:
         rows = (await db.execute(
             select(Job).where(Job.type == "recording_fetch", Job.status == "failed",
                               Job.attempts >= MAX_ATTEMPTS, permanent)
         )).scalars().all()
 
+        # Several dead jobs can point at ONE recording (the placeholder row was hit five
+        # times), so track what we have already handled — otherwise the count reports
+        # recordings that do not exist.
+        seen: set = set()
         marked = 0
         for job in rows:
             rid = (job.payload or {}).get("recording_id")
-            if not rid:
+            if not rid or rid in seen:
                 continue
+            seen.add(rid)
             rec = await db.get(Recording, uuid.UUID(rid))
             # Only downgrade a recording we do NOT have locally; never relabel one on disk.
             if rec is not None and rec.storage_path is None and rec.status != "absent":
@@ -565,6 +577,8 @@ def main() -> None:
     pdj = sub.add_parser("purge-dead-jobs",
                          help="Retire recording_fetch jobs whose media is permanently unfetchable")
     pdj.add_argument("--dry-run", action="store_true", help="Show what would change, write nothing")
+    pdj.add_argument("--include-gone-upstream", action="store_true",
+                     help="also sweep 404s (media the provider deleted; already benign)")
 
     ppr = sub.add_parser("purge-placeholder-recordings",
                          help="Delete recording rows created from unexpanded CFB template vars")
@@ -613,7 +627,7 @@ def main() -> None:
     elif args.cmd == "billing-purge-estimates":
         asyncio.run(purge_estimates())
     elif args.cmd == "purge-dead-jobs":
-        asyncio.run(purge_dead_jobs(args.dry_run))
+        asyncio.run(purge_dead_jobs(args.dry_run, args.include_gone_upstream))
     elif args.cmd == "purge-placeholder-recordings":
         asyncio.run(purge_placeholder_recordings(args.dry_run))
     elif args.cmd == "reclassify-emails":
