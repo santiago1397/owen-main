@@ -398,7 +398,10 @@ class InboundEmail(Base):
     subject: Mapped[str | None] = mapped_column(String)
     job_id: Mapped[str | None] = mapped_column(String, index=True)  # extracted natural key (e.g. AHS work-order #)
 
-    parse_status: Mapped[str] = mapped_column(String, default="failed")  # 'parsed' | 'failed'
+    # 'parsed'  — a work order we fully read; this is the only value that relays.
+    # 'failed'   — a work order we could NOT read. A real problem; a lead was lost.
+    # 'ignored'  — not a work order at all (cancellation, note, account mail). Not an error.
+    parse_status: Mapped[str] = mapped_column(String, default="failed")
     parse_error: Mapped[str | None] = mapped_column(Text)  # why parsing failed / which fields were missing
     fields: Mapped[dict | None] = mapped_column(JSONB)  # extracted structured data (what we relay)
     raw: Mapped[str | None] = mapped_column(Text)  # full raw RFC822 email, always kept

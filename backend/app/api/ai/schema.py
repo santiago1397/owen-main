@@ -54,8 +54,11 @@ TABLE_NOTES: dict[str, str] = {
         "Job-notification emails polled over IMAP (Dispatch / American Home Shield). THIS IS THE "
         "LEADS TABLE: a lead is a row with source='dispatch' AND parse_status='parsed'. Extracted "
         "data is in the `fields` JSONB (customer name, phone, address, service, brand). "
-        "parse_status='failed' means the sender's template changed and that lead never reached "
-        "GoHighLevel."
+        "parse_status has THREE values: 'parsed' (a work order we read), 'failed' (a work order we "
+        "could NOT read — a lost lead), and 'ignored' (not a work order at all: cancellation, note "
+        "on an existing job, account mail — never a lead, never an error; do not count these as "
+        "failures). Separately, relay_status='failed' means it parsed fine and GoHighLevel "
+        "rejected it — a real customer who never reached the CRM."
     ),
     "call_charges": (
         "BulkVS-rated cost per billable LEG, not per call — a forwarded call is billed twice "

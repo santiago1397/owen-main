@@ -3,7 +3,8 @@
 Powers the frontend "Email Log": every email the mailbox poller ingested, whether it
 parsed, and the truthful outcome of its GHL relay attempt (sent / skipped-not-configured /
 failed). `parse_status=failed` is the human-inspect queue (template changed / field missing)
-— nothing there is ever relayed. The detail view exposes `ghl_payload`: the exact JSON that
+— nothing there is ever relayed. `parse_status=ignored` is Dispatch mail that was never a work
+order (cancellations, notes, account mail): expected traffic, no lead in it, not a problem. The detail view exposes `ghl_payload`: the exact JSON that
 was (or would be) POSTed to GoHighLevel.
 """
 
@@ -43,7 +44,8 @@ def _summary(e: InboundEmail) -> dict:
 
 @router.get("")
 async def list_emails(
-    parse_status: str | None = Query(None, description="'parsed' | 'failed'"),
+    parse_status: str | None = Query(
+        None, description="'parsed' | 'failed' | 'ignored' (ignored = not a work order)"),
     relay_status: str | None = Query(None, description="'sent' | 'skipped_not_configured' | 'failed'"),
     relayed: bool | None = None,
     limit: int = Query(50, le=200),

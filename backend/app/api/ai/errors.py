@@ -85,12 +85,21 @@ async def errors(
         ]
 
     if "jobs" in want and not linkedid:
+        job_where = [
+            Job.last_error.is_not(None),
+            Job.created_at >= cutoff,
+            Job.status.in_(("failed", "pending")),
+        ]
+        if "emails" in want:
+            # A failed `email_relay_ghl` job and the email row it belongs to are ONE event.
+            # The email row is strictly richer — it names the customer, the job id and the
+            # retry path — so reporting the job row too would list the same lost lead twice,
+            # once correctly as ACTION_REQUIRED and once again as a generic ERROR, which is
+            # exactly the "lost leads look like bugs" problem this is meant to solve.
+            # Only suppressed when emails are in scope, so `source=jobs` still shows them.
+            job_where.append(Job.type != "email_relay_ghl")
         rows = (await db.execute(
-            select(Job).where(
-                Job.last_error.is_not(None),
-                Job.created_at >= cutoff,
-                Job.status.in_(("failed", "pending")),
-            ).order_by(Job.created_at.desc()).limit(limit)
+            select(Job).where(*job_where).order_by(Job.created_at.desc()).limit(limit)
         )).scalars().all()
         items += [
             {

@@ -4,6 +4,8 @@ An email pulled from the mailbox is parsed and upserted keyed on the RFC Message
 idempotency (re-polling the same message is safe). The raw email is always stored. Only
 *successfully parsed* emails get a GHL relay job enqueued; parse failures are stored with
 parse_status='failed' + parse_error and are never relayed (the agreed failure policy).
+Dispatch mail that was never a work order is stored as 'ignored' instead — see
+providers/dispatch_email.py for why that distinction matters.
 
 Returns (row, created) so the poller enqueues a relay job exactly once — on first insert.
 """

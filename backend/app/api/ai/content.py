@@ -161,7 +161,9 @@ async def recent_leads(
     date_from: datetime | None = None,
     date_to: datetime | None = None,
     source: str | None = None,
-    parse_status: str = Query("parsed", description="parsed | failed | all"),
+    parse_status: str = Query(
+        "parsed", description="parsed | failed | ignored | all. 'ignored' is Dispatch mail "
+                              "that was never a work order and contains no lead."),
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
     db: AsyncSession = Depends(get_db),
@@ -169,8 +171,9 @@ async def recent_leads(
 ) -> dict:
     """Individual leads from job-notification emails, with the extracted customer details.
 
-    `parse_status=failed` is the human-inspect queue: those emails could not be parsed, were
-    never relayed to GoHighLevel, and represent lost leads.
+    `parse_status=failed` is the human-inspect queue: work orders that could not be parsed,
+    were never relayed to GoHighLevel, and represent lost leads. `ignored` is the opposite —
+    mail that was never a work order (cancellations, notes, account mail); nothing was lost.
     """
     start, end, described = resolve_window(period, date_from, date_to)
     where = []
