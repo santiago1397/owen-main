@@ -21,7 +21,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.ai import periods
-from app.api.ai.deps import AuthedKey, require_scope
+from app.api.ai.deps import AuthedKey, require_scope, resolve_window
 from app.api.ai.envelope import NOTE_JUNK, NOTE_JUNK_INCLUDED, error_detail, ok
 from app.api.ai.filters import call_filters
 from app.core.apikeys import SCOPE_CONTENT
@@ -54,7 +54,7 @@ async def recent_calls(
     _: AuthedKey = Depends(require_scope(SCOPE_CONTENT)),
 ) -> dict:
     """Recent calls with attribution and, optionally, what the AI made of each one."""
-    start, end, described = periods.resolve(period, date_from, date_to)
+    start, end, described = resolve_window(period, date_from, date_to)
     where = call_filters(start, end, include_junk, min_duration, max_duration)
 
     total = (await db.execute(select(func.count()).select_from(Call).where(*where))).scalar_one()
@@ -172,7 +172,7 @@ async def recent_leads(
     `parse_status=failed` is the human-inspect queue: those emails could not be parsed, were
     never relayed to GoHighLevel, and represent lost leads.
     """
-    start, end, described = periods.resolve(period, date_from, date_to)
+    start, end, described = resolve_window(period, date_from, date_to)
     where = []
     if start is not None:
         where.append(InboundEmail.received_at >= start)

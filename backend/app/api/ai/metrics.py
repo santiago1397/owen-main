@@ -17,7 +17,7 @@ from sqlalchemy import Float, cast, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.ai import periods
-from app.api.ai.deps import AuthedKey, require_scope
+from app.api.ai.deps import AuthedKey, require_scope, resolve_window
 from app.api.ai.envelope import (
     NOTE_JUNK,
     NOTE_JUNK_INCLUDED,
@@ -42,21 +42,6 @@ from app.models import (
 )
 
 router = APIRouter(prefix="/api/ai", tags=["ai"])
-
-
-def _window(period, date_from, date_to):
-    try:
-        return periods.resolve(period, date_from, date_to)
-    except ValueError as exc:
-        raise HTTPException(
-            status.HTTP_400_BAD_REQUEST,
-            error_detail(
-                "unknown_period",
-                f"Unknown period {str(exc)!r}.",
-                hint="Use one of the named periods, or pass explicit date_from/date_to.",
-                valid_periods=periods.PERIODS,
-            ),
-        ) from exc
 
 
 def _series(rows) -> list[dict]:
@@ -87,7 +72,7 @@ async def call_stats(
     This is the workhorse: "how many calls did we get last week", "how many were under 45
     seconds", "how many from the AHS campaign", "how many went unanswered".
     """
-    start, end, described = _window(period, date_from, date_to)
+    start, end, described = resolve_window(period, date_from, date_to)
 
     campaign_id = number_id = None
     if campaign:
@@ -141,14 +126,17 @@ async def call_stats(
     unique_callers = (await db.execute(
         select(func.count(func.distinct(Call.caller_id))).where(*where, Call.caller_id.is_not(None))
     )).scalar_one()
-    # Always reported over the same window regardless of include_junk — this is the number
-    # that explains a gap between OWEN's dashboard and a raw provider report.
+    # How many calls matching THESE filters were junk — i.e. what the default view is hiding.
+    # It must carry the same campaign/number/duration/etc. scoping as `total`, just with the
+    # junk test flipped: reporting a whole-account junk figure next to a single campaign's
+    # total invites the reader to compare two numbers that do not belong together
+    # ("Craigslist: 69 calls, 751 junk"). Only the junk exclusion itself is dropped.
+    junk_where = call_filters(
+        start, end, True, min_duration, max_duration, campaign_id, number_id,
+        direction, call_status, answered, new_callers,
+    )
     junk_count = (await db.execute(
-        select(func.count()).select_from(Call).where(
-            REAL_CALL,
-            *( [Call.started_at >= start] if start is not None else [] ),
-            Call.started_at < end, IS_JUNK,
-        )
+        select(func.count()).select_from(Call).where(*junk_where, IS_JUNK)
     )).scalar_one()
 
     local_ts = func.timezone(settings.BUSINESS_TZ, Call.started_at)
@@ -221,7 +209,9 @@ async def call_stats(
             "unique_callers": unique_callers,
             "new_for_campaign": new_count,
             "returning_for_campaign": total - new_count,
-            "junk_calls_in_window": junk_count,
+            # Junk matching the same filters. With include_junk=false these were excluded from
+            # `total_calls`; with include_junk=true they are part of it.
+            "junk_calls_matching_filters": junk_count,
             "duration_seconds": {
                 "average": round(float(avg_s), 1) if avg_s is not None else None,
                 "median": round(float(p50), 1) if p50 is not None else None,
@@ -262,7 +252,7 @@ async def lead_stats(
     a rising `parse_failed` count means the sender changed their template and leads are being
     dropped on the floor, so it is surfaced in the summary rather than hidden.
     """
-    start, end, described = _window(period, date_from, date_to)
+    start, end, described = resolve_window(period, date_from, date_to)
 
     base = []
     if start is not None:
@@ -365,7 +355,7 @@ async def message_stats(
     _: AuthedKey = Depends(require_scope(SCOPE_READ)),
 ) -> dict:
     """SMS/MMS volume on the tracking numbers."""
-    start, end, described = _window(period, date_from, date_to)
+    start, end, described = resolve_window(period, date_from, date_to)
     where = []
     if start is not None:
         where.append(Message.received_at >= start)
@@ -427,7 +417,7 @@ async def billing_summary(
     (inbound minutes + outbound minutes), so leg counts here exceed call counts elsewhere by
     design. Recurring charges (DID rental, E911) are not in this feed.
     """
-    start, end, described = _window(period, date_from, date_to)
+    start, end, described = resolve_window(period, date_from, date_to)
     where = [CallCharge.started_at.is_not(None)]
     if start is not None:
         where.append(CallCharge.started_at >= start)
@@ -505,7 +495,7 @@ async def top_callers(
     _: AuthedKey = Depends(require_scope(SCOPE_READ)),
 ) -> dict:
     """Who called most in the window — repeat callers, and often the noisiest robocallers."""
-    start, end, described = _window(period, date_from, date_to)
+    start, end, described = resolve_window(period, date_from, date_to)
     where = call_filters(start, end, include_junk)
     rows = (await db.execute(
         select(Caller.phone_number, Caller.label, func.count(Call.id),
@@ -542,7 +532,7 @@ async def call_categories(
     Only calls with a recording that was transcribed AND analyzed appear here, so the total
     will be lower than call volume — that gap is reported rather than papered over.
     """
-    start, end, described = _window(period, date_from, date_to)
+    start, end, described = resolve_window(period, date_from, date_to)
     where = call_filters(start, end, include_junk)
     total = (await db.execute(select(func.count()).select_from(Call).where(*where))).scalar_one()
     category = func.coalesce(CallAnalysis.category_override, CallAnalysis.category)

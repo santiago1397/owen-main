@@ -8,6 +8,7 @@ from sqlalchemy import text
 from app.api import agents as agents_api
 from app.api import ai as ai_api
 from app.api import api_keys as api_keys_api
+from app.api.ai import deps as ai_deps
 from app.api import attribution as attribution_api
 from app.api import auth
 from app.api import billing as billing_api
@@ -51,6 +52,10 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Call Monitoring Platform", lifespan=lifespan)
+
+# Audits every /api/ai/* request against the key that made it (a no-op for every other path).
+# Registered before CORS so it wraps the whole chain and sees the final status code.
+app.middleware("http")(ai_deps.usage_middleware)
 
 if settings.cors_origins:
     app.add_middleware(

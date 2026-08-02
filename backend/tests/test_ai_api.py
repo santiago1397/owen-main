@@ -15,6 +15,7 @@ No DB, no network. Covers the four places this feature can be quietly, expensive
 Run: python -m tests.test_ai_api
 """
 
+import pathlib
 import sys
 from datetime import datetime, timezone
 
@@ -228,12 +229,77 @@ def test_envelope():
     check("errors can carry the valid values", e["valid"] == ["a"])
 
 
+# --- 6. regressions ------------------------------------------------------------------
+def test_regressions():
+    """Three defects found by auditing the first deploy against production."""
+    print("\nregressions:")
+    from fastapi import HTTPException
+
+    from app.api.ai import content, metrics
+    from app.api.ai.deps import resolve_window
+
+    # 1. The content endpoints called periods.resolve directly, so a typo'd period raised
+    #    ValueError and became a 500 — while /calls/stats returned a helpful 400.
+    try:
+        resolve_window("last_fortnight", None, None)
+        check("a bad period raises HTTPException, not ValueError", False)
+    except HTTPException as exc:
+        check("a bad period is a 400, not a 500", exc.status_code == 400)
+        check("...and lists the valid periods", "valid_periods" in exc.detail)
+    except ValueError:
+        check("a bad period is a 400, not a 500 (still raising ValueError)", False)
+
+    src = pathlib.Path(content.__file__).read_text(encoding="utf-8")
+    check("content endpoints go through the shared resolver",
+          "periods.resolve(" not in src and "resolve_window(" in src)
+    src = pathlib.Path(metrics.__file__).read_text(encoding="utf-8")
+    check("metric endpoints go through the same resolver",
+          "periods.resolve(" not in src and "resolve_window(" in src)
+
+    # 2. junk_calls was computed over the whole window, ignoring campaign/number filters —
+    #    so a single campaign's stats reported the account-wide junk figure beside its own
+    #    total, inviting a wrong comparison ("Craigslist: 69 calls, 751 junk").
+    # REAL_CALL + max_duration + campaign_id = 3 clauses (no window passed here).
+    scoped = call_filters(campaign_id="c", max_duration=45, include_junk=True)
+    check("the junk count carries the same scoping filters as the total",
+          len(scoped) == 3 and scoped[0] is REAL_CALL)
+    check("...but drops the junk exclusion itself",
+          not any(c is NOT_JUNK for c in scoped))
+    check("junk_calls_matching_filters is the reported field name",
+          "junk_calls_matching_filters" in pathlib.Path(metrics.__file__).read_text(encoding="utf-8"))
+
+    # 3. Only /query recorded api_key_usage, so a read-only key showed "0 requests in 24h"
+    #    in the UI no matter how heavily it was used.
+    from app.api.ai import deps
+    check("a usage middleware exists to audit every AI request",
+          hasattr(deps, "usage_middleware"))
+    src = pathlib.Path(deps.__file__).read_text(encoding="utf-8")
+    check("...scoped to /api/ai so it never touches other routes",
+          'startswith("/api/ai")' in src)
+    check("...and skips requests a route already recorded (no double-count)",
+          "ai_usage_recorded" in src)
+    import app.main as main_mod
+    check("the middleware is actually registered on the app",
+          any("usage_middleware" in str(getattr(mw, "kwargs", {})) or
+              "usage_middleware" in repr(mw) for mw in main_mod.app.user_middleware)
+          or any(getattr(f, "__name__", "") == "usage_middleware"
+                 for f in [getattr(mw, "cls", None) for mw in main_mod.app.user_middleware]
+                 if f) or _middleware_registered(main_mod))
+
+
+def _middleware_registered(main_mod) -> bool:
+    """Starlette wraps @app.middleware('http') functions in BaseHTTPMiddleware; the function
+    itself is buried in the options, so look for it by name across the whole repr."""
+    return "usage_middleware" in repr(main_mod.app.user_middleware)
+
+
 def run():
     test_periods()
     test_filters()
     test_sql_guard()
     test_keys()
     test_envelope()
+    test_regressions()
     print("\nALL AI API CHECKS PASSED")
 
 

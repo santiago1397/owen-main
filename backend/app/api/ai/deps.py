@@ -27,6 +27,7 @@ from fastapi import Depends, Header, HTTPException, Request, status
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.ai import periods
 from app.api.ai.envelope import error_detail
 from app.core.apikeys import SCOPES, extract_key, hash_key
 from app.core.config import settings
@@ -147,6 +148,28 @@ async def authenticate(
     return key
 
 
+def resolve_window(period, date_from, date_to):
+    """Resolve a time window, turning a bad `period` into a 400 that lists the valid ones.
+
+    Shared by every endpoint that takes a window. It lives here rather than in `periods.py`
+    so that module stays free of HTTP concerns and unit-testable on its own — and it is
+    shared rather than copied because the copy is exactly what went wrong: the content
+    endpoints called `periods.resolve` directly and answered 500 on a typo'd period.
+    """
+    try:
+        return periods.resolve(period, date_from, date_to)
+    except ValueError as exc:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            error_detail(
+                "unknown_period",
+                f"Unknown period {str(exc)!r}.",
+                hint="Use one of the named periods, or pass explicit date_from/date_to.",
+                valid_periods=periods.PERIODS,
+            ),
+        ) from exc
+
+
 def require_scope(scope: str):
     """Dependency factory: gate a route on one scope."""
 
@@ -167,6 +190,28 @@ def require_scope(scope: str):
 
 
 # --- audit ---------------------------------------------------------------------------
+async def usage_middleware(request: Request, call_next):
+    """Record every `/api/ai/*` request, not just the interesting ones.
+
+    Without this only `/query` was audited, because that route records itself. A key issued
+    to an outside integration would then show "0 requests in 24h" in the UI no matter how
+    hard it was being used — the audit trail would be quietly missing precisely the traffic
+    it exists to show.
+
+    `/query` still records itself (it alone knows the SQL and the row count) and flags the
+    request so it is not counted twice.
+    """
+    if not request.url.path.startswith("/api/ai"):
+        return await call_next(request)
+    started = time.monotonic()
+    response = await call_next(request)
+    key = getattr(request.state, "ai_key", None)
+    if key is not None and not getattr(request.state, "ai_usage_recorded", False):
+        await record_usage(key.id, request.url.path, response.status_code,
+                           int((time.monotonic() - started) * 1000))
+    return response
+
+
 async def record_usage(
     key_id: str | None,
     endpoint: str,

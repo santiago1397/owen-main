@@ -148,8 +148,12 @@ only a URL and a key.
 | `include_junk` | `true` = also count <=13s and never-connected calls |
 | `group_by` | `day` (default) · `hour_of_day` · `campaign` · `number` · `status` · `none` |
 
-Returns totals, answered/unanswered, unique callers, new vs returning, junk count for the
-window, duration stats (average, **median**, p90, min, max, total) and the requested breakdown.
+Returns totals, answered/unanswered, unique callers, new vs returning, duration stats
+(average, **median**, p90, min, max, total) and the requested breakdown.
+
+`junk_calls_matching_filters` is how many calls matching *the same filters* were junk — i.e.
+what the default view is hiding from you. It carries your campaign/number/duration filters, so
+it is directly comparable to `total_calls` rather than being a whole-account figure.
 
 Durations report a real median via `percentile_cont`, not a mean — the average is dragged hard
 by the long tail of short calls.

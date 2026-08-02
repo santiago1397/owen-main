@@ -189,8 +189,8 @@ def main() -> None:
                   f"(ai={calls['data']['total_calls']} dashboard={dash['total_calls']})",
                   calls["data"]["total_calls"] == dash["total_calls"])
             check(f"junk count matches "
-                  f"(ai={calls['data']['junk_calls_in_window']} dashboard={dash['junk_calls']})",
-                  calls["data"]["junk_calls_in_window"] == dash["junk_calls"])
+                  f"(ai={calls['data']['junk_calls_matching_filters']} dashboard={dash['junk_calls']})",
+                  calls["data"]["junk_calls_matching_filters"] == dash["junk_calls"])
             check(f"new-for-campaign matches "
                   f"(ai={calls['data']['new_for_campaign']} dashboard={dash['new_for_campaign']})",
                   calls["data"]["new_for_campaign"] == dash["new_for_campaign"])

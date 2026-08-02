@@ -181,6 +181,9 @@ async def run_query(
                               "intentional and cannot be granted."),
         ) from exc
     finally:
+        # This route records itself because it alone knows the SQL and the row count.
+        # Flag the request so the usage middleware does not log it a second time.
+        request.state.ai_usage_recorded = True
         await record_usage(
             key.id, request.url.path, code, int((time.monotonic() - started) * 1000),
             rows=len(rows), sql=statement[:20000], err=err,
