@@ -4,6 +4,10 @@ import { api } from "../api";
 
 // Human-friendly label + badge class for each relay outcome.
 function RelayBadge({ status, relayed }: { status: string | null; relayed: boolean }) {
+  if (status === "cancellation_noted")
+    return <span className="badge new" title="The cancellation was noted on the customer's card in GoHighLevel">cancellation noted</span>;
+  if (status === "skipped_no_original")
+    return <span className="badge" title="The cancelled job never reached GoHighLevel, so there is nothing to annotate">no original in GHL</span>;
   if (status === "sent_as_note")
     // The customer already occupied the pipeline's single opportunity slot, so this job
     // reached GHL as a note on the existing card rather than a card of its own. Delivered,
@@ -23,6 +27,10 @@ function ParseBadge({ status }: { status: string }) {
   // 'ignored' = Dispatch mail that was never a work order (cancellations, notes, account
   // mail). Nothing went wrong and there was no lead to lose, so it must not read as red —
   // showing these as failures made a healthy parser look broken.
+  if (status === "cancellation")
+    // AHS cancelled a job it had already dispatched. Not a lead and not a failure, but not
+    // ignorable either — it is noted against the customer in GHL.
+    return <span className="badge" title="The sender cancelled this job; noted on the customer in GoHighLevel">cancellation</span>;
   if (status === "ignored") return <span className="badge prov">not a job</span>;
   return <span className="badge spam">parse failed</span>;
 }
@@ -185,6 +193,7 @@ export default function Emails() {
           <option value="">any parse status</option>
           <option value="parsed">parsed</option>
           <option value="failed">parse failed</option>
+          <option value="cancellation">cancellation</option>
           <option value="ignored">not a job</option>
         </select>
         <select onChange={(e) => set("relay_status", e.target.value)}>

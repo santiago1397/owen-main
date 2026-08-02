@@ -279,6 +279,12 @@ async def lead_stats(
         select(func.count()).select_from(InboundEmail)
         .where(*parsed, InboundEmail.relay_status == "sent_as_note")
     )).scalar_one()
+    # Jobs AHS dispatched and then cancelled. Not leads and not failures — but leads that
+    # evaporated, which is worth knowing when reading a lead count.
+    cancellations = (await db.execute(
+        select(func.count()).select_from(InboundEmail)
+        .where(*base, InboundEmail.parse_status == "cancellation")
+    )).scalar_one()
     unique_jobs = (await db.execute(
         select(func.count(func.distinct(InboundEmail.job_id))).where(*parsed, InboundEmail.job_id.is_not(None))
     )).scalar_one()
@@ -323,6 +329,8 @@ async def lead_stats(
     summary = f"{total} new leads (parsed job emails) {window}; {relayed} reached GoHighLevel"
     if failed:
         summary += f"; {failed} emails FAILED to parse and were not relayed"
+    if cancellations:
+        summary += f"; {cancellations} job(s) were cancelled by the sender"
     if relay_failed:
         summary += f"; {relay_failed} relay attempts failed"
 
@@ -340,6 +348,7 @@ async def lead_stats(
             "unique_job_ids": unique_jobs,
             "relayed_to_ghl": relayed,
             "relayed_as_note_on_existing_card": relayed_as_note,
+            "cancellations": cancellations,
             "not_yet_relayed": total - relayed,
             "parse_failed": failed,
             "relay_failed": relay_failed,

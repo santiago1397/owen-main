@@ -55,10 +55,13 @@ TABLE_NOTES: dict[str, str] = {
         "LEADS TABLE: a lead is a row with source='dispatch' AND parse_status='parsed'. Extracted "
         "data is in the `fields` JSONB (customer name, phone, address, service, brand). "
         "parse_status has THREE values: 'parsed' (a work order we read), 'failed' (a work order we "
-        "could NOT read — a lost lead), and 'ignored' (not a work order at all: cancellation, note "
-        "on an existing job, account mail — never a lead, never an error; do not count these as "
-        "failures). Separately, relay_status='failed' means it parsed fine and GoHighLevel "
-        "rejected it — a real customer who never reached the CRM."
+        "could NOT read — a lost lead), 'cancellation' (the sender cancelled a job it had already "
+        "dispatched — not a lead, but noted against the customer in GHL), and 'ignored' (not a "
+        "work order at all: a note on an existing job, account mail — never a lead, never an "
+        "error; do not count these as failures). Separately, relay_status='failed' means it "
+        "parsed fine and GoHighLevel rejected it — a real customer who never reached the CRM; "
+        "'sent_as_note' means it was delivered as a note because the customer already held the "
+        "pipeline's single opportunity slot."
     ),
     "call_charges": (
         "BulkVS-rated cost per billable LEG, not per call — a forwarded call is billed twice "

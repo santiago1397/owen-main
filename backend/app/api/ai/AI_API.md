@@ -175,7 +175,8 @@ Mind the three parse outcomes — they are not interchangeable:
 | `parse_status` | meaning | is it a problem? |
 |---|---|---|
 | `parsed` | a work order we fully read | no — it became a lead |
-| `ignored` | not a work order at all: a cancellation, a note on an existing job, Dispatch account mail | **no** — there was never a lead in it |
+| `cancellation` | the sender cancelled a job it had already dispatched | no — but it's a lead that evaporated, and it's noted on the customer in GHL |
+| `ignored` | not a work order at all: a note on an existing job, Dispatch account mail | **no** — there was never a lead in it |
 | `failed` | a work order we could **not** read | **yes** — that lead was not relayed |
 
 Do not report `ignored` as a failure. Most Dispatch mail is not a work order, and counting it
@@ -185,6 +186,11 @@ as broken makes a healthy parser look broken.
 **GoHighLevel rejected it**, so a real customer never reached the CRM. That is a business item
 to chase, not a software error — see `/api/ai/errors`, where these appear as
 `source: "lost_lead"`.
+
+`relayed_as_note_on_existing_card` is not a failure: GoHighLevel permits one opportunity per
+contact per pipeline, so a repeat customer's second job is attached to their existing card as a
+note instead of getting one of its own. It reached the CRM; there is just no separate card to
+find for that job number.
 
 ### `GET /api/ai/messages/stats` *(scope: `read`)*
 SMS/MMS volume. `period`, `direction`, `group_by` = `day` · `direction` · `none`.

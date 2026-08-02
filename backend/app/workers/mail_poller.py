@@ -46,7 +46,7 @@ async def poll_mailbox() -> None:
         return
 
     handled_uids: list[bytes] = []
-    relayed = failed = ignored = 0
+    relayed = failed = ignored = cancelled = 0
     async with SessionLocal() as db:
         for msg in fetched:
             if not msg.message_id:
@@ -64,6 +64,13 @@ async def poll_mailbox() -> None:
                 if created and parsed.ok:
                     await queue.enqueue(db, "email_relay_ghl", {"email_id": str(row.id)})
                     relayed += 1
+                elif created and parsed.status == dispatch_email.CANCELLATION:
+                    # Not a lead, but actionable: the same relay job notes it against the
+                    # customer the original job created. Enqueued like any other relay so it
+                    # gets the queue's retry and backoff.
+                    await queue.enqueue(db, "email_relay_ghl", {"email_id": str(row.id)})
+                    cancelled += 1
+                    logger.info("mail_poller: job cancellation for %s", parsed.job_id)
                 elif created and parsed.status == dispatch_email.IGNORED:
                     # Not a job notification (cancellation, note, account mail). Expected and
                     # filed, so log at INFO — a WARNING here would be captured into app_logs
@@ -90,5 +97,5 @@ async def poll_mailbox() -> None:
         except Exception:  # noqa: BLE001 - non-fatal; DB dedupe still prevents reprocessing
             logger.warning("mail_poller: mark_seen failed for %d uids", len(handled_uids))
 
-    logger.info("mail_poller: handled=%d relayed=%d parse_failed=%d ignored_non_job=%d",
-                len(handled_uids), relayed, failed, ignored)
+    logger.info("mail_poller: handled=%d relayed=%d cancellations=%d parse_failed=%d "
+                "ignored_non_job=%d", len(handled_uids), relayed, cancelled, failed, ignored)

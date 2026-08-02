@@ -202,6 +202,7 @@ def main():
     test_non_job_emails_are_ignored_not_failed()
     test_full_extraction_beats_subject_classification()
     test_duplicate_opportunity_is_not_a_failure()
+    test_cancellations_are_classified_and_carry_the_job_number()
 
     print("\nALL DISPATCH EMAIL CHECKS PASSED")
 
@@ -215,10 +216,10 @@ def test_non_job_emails_are_ignored_not_failed():
     never contained a lead. `ignored` and `failed` must stay distinguishable."""
     from app.providers import dispatch_email as d
 
-    # Real subjects taken from production.
+    # Real subjects taken from production. Cancellations are NOT here — they carry a job
+    # number and an action, so they get their own status; see
+    # test_cancellations_are_classified_and_carry_the_job_number.
     non_jobs = [
-        ("AHS Canceled Job 70396099", "job cancellation"),
-        ("AHS Canceled Job 68729729", "job cancellation"),
         ("American Home Shield sent you a note for job #70848289", "note on an existing job"),
         ("Welcome to Dispatch, Your Account Has Been Created!", "Dispatch account email"),
     ]
@@ -304,6 +305,43 @@ def test_duplicate_opportunity_is_not_a_failure():
     check("DuplicateOpportunity carries the existing opportunity id",
           dup.existing_id == "6sS72KhoDY0KpgQJilHT")
     check("...and is an Exception the handler can catch", isinstance(dup, Exception))
+
+
+
+
+def test_cancellations_are_classified_and_carry_the_job_number():
+    """A cancellation is neither a lead nor ignorable: AHS is saying dispatched work is off.
+    It must be picked out with its job number so the CRM can be annotated — otherwise a card
+    sits open in the pipeline for work nobody will do."""
+    from app.providers import dispatch_email as d
+
+    for subject, job in [
+        ("AHS Canceled Job 70396099", "70396099"),
+        ("AHS Canceled Job 68729729", "68729729"),
+        ("AHS Cancelled Job #12345678", "12345678"),   # British spelling + hash
+        ("American Home Shield canceled job 999111", "999111"),
+    ]:
+        r = d.parse(subject, "", "")
+        check(f"{subject[:34]!r} -> cancellation", r.status == d.CANCELLATION)
+        check(f"  ...job number {job} extracted", r.job_id == job)
+        check("  ...and it is never relayed as a lead", r.ok is False)
+        check("  ...fields carry the cancelled job id",
+              (r.fields or {}).get("cancelled_job_id") == job)
+
+    check("cancelled_job_id ignores a normal confirmation",
+          d.cancelled_job_id("American Home Shield Dispatch Email Confirmation: 66450639 ROOF") is None)
+    check("cancelled_job_id ignores None", d.cancelled_job_id(None) is None)
+
+    # A cancellation subject without a parseable number is not actionable, so it must fall
+    # back to `ignored` rather than pretend it knows which job was cancelled.
+    r = d.parse("AHS Canceled Job", "", "")
+    check("a cancellation with no job number falls back to ignored", r.status == d.IGNORED)
+
+    # And the other classifications must be unaffected.
+    check("a note is still ignored",
+          d.parse("American Home Shield sent you a note for job #7", "", "").status == d.IGNORED)
+    check("a real unreadable confirmation is still failed",
+          d.parse("American Home Shield Dispatch Email Confirmation: 1 ROOF", "", "").status == d.FAILED)
 
 
 if __name__ == "__main__":

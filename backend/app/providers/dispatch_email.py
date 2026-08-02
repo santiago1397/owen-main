@@ -41,14 +41,22 @@ SENDER = "notifications@dispatch.me"
 # Fields that must be present for an email to count as 'parsed' (and thus be relayed).
 REQUIRED = ("job_id", "customer_name", "service_address")
 
-# The three values `InboundEmail.parse_status` may take.
+# The values `InboundEmail.parse_status` may take.
 PARSED = "parsed"
 FAILED = "failed"
 IGNORED = "ignored"
+# A cancellation is NOT a lead and NOT ignorable: AHS is telling us work that was dispatched
+# is no longer happening. It carries one fact — which job — and that fact belongs in the CRM,
+# because otherwise a card sits open in the pipeline for work nobody is going to do.
+CANCELLATION = "cancellation"
 
 # What makes an email a JOB NOTIFICATION — the only kind that can become a lead. Matched on
 # the subject, which stays stable even when the body template shifts.
 _JOB_SUBJECT = re.compile(r"Dispatch\s+E-?mail\s+Confirmation", re.IGNORECASE)
+
+# "AHS Canceled Job 70396099" / "Cancelled Job #70396099". The job number is the only thing
+# a cancellation carries and the only thing we need to act on it.
+_CANCELLATION_SUBJECT = re.compile(r"cancell?ed\s+job\s*#?\s*(\d{4,})", re.IGNORECASE)
 
 # Recognized non-job mail, purely so the stored reason reads like a sentence instead of
 # "not a job notification". Anything unmatched is still ignored, just described generically.
@@ -84,6 +92,14 @@ def matches(from_addr: str | None) -> bool:
 def is_job_notification(subject: str | None) -> bool:
     """True if this subject is a work-order confirmation — the only kind that is a lead."""
     return bool(subject) and bool(_JOB_SUBJECT.search(subject))
+
+
+def cancelled_job_id(subject: str | None) -> str | None:
+    """The job number an 'AHS Canceled Job NNNN' subject refers to, or None."""
+    if not subject:
+        return None
+    m = _CANCELLATION_SUBJECT.search(subject)
+    return m.group(1) if m else None
 
 
 def non_job_kind(subject: str | None) -> str:
@@ -290,6 +306,18 @@ def parse(subject: str | None, text_body: str | None, html_body: str | None) -> 
     # A cancellation has no customer address to find, so failing to find one is not a failure.
     # Note the ordering: a full extraction above wins regardless of subject, so an unexpected
     # subject on a genuine job email is still parsed and relayed rather than ignored.
+
+    # A cancellation is actionable even though it is not a lead, so it is picked out before
+    # the generic ignore. Its job number is the whole payload.
+    cancelled = cancelled_job_id(subject)
+    if cancelled:
+        return ParsedEmail(
+            ok=False,  # never relayed as a lead — it creates no contact and no opportunity
+            fields={"source": SOURCE, "kind": CANCELLATION, "cancelled_job_id": cancelled},
+            job_id=cancelled, missing=missing, status=CANCELLATION,
+            error=f"job {cancelled} was cancelled by the sender",
+        )
+
     if not is_job_notification(subject):
         reason = non_job_kind(subject)
         return ParsedEmail(

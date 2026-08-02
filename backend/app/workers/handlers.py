@@ -34,7 +34,14 @@ from app.models import (
     Recording,
     Transcription,
 )
-from app.providers import bulkvs_client, ghl_api, ghl_client, signalwire_client, twilio_client
+from app.providers import (
+    bulkvs_client,
+    dispatch_email,
+    ghl_api,
+    ghl_client,
+    signalwire_client,
+    twilio_client,
+)
 from app.services import emails, messages as messages_svc, queue, sms
 
 logger = logging.getLogger("worker.handlers")
@@ -480,6 +487,14 @@ async def handle_email_relay_ghl(db: AsyncSession, payload: dict) -> None:
         logger.info("email_relay_ghl: %s already relayed, skipping", em.message_id)
         return
     now = datetime.now(timezone.utc)
+
+    # A cancellation is not a lead — it creates no contact and no opportunity — but it IS
+    # actionable: without it a card sits open in the pipeline for work nobody will do. It gets
+    # its own path, which notes the cancellation on the customer the original job created.
+    if em.parse_status == dispatch_email.CANCELLATION:
+        await _relay_cancellation(db, em, now)
+        return
+
     if em.parse_status != "parsed":
         em.relay_status = "skipped_not_parsed"
         em.relayed_at = now
@@ -524,6 +539,69 @@ async def handle_email_relay_ghl(db: AsyncSession, payload: dict) -> None:
     await db.commit()
     logger.info("email_relay_ghl: relayed %s (job_id=%s) to GHL via %s as %s",
                 em.message_id, em.job_id, result.get("mode"), em.relay_status)
+
+
+async def _relay_cancellation(db: AsyncSession, em: InboundEmail, now: datetime) -> None:
+    """Note an AHS job cancellation against the customer whose original job created the card.
+
+    Deliberately additive, matching how a duplicate job is handled: the note says the job was
+    cancelled and leaves the opportunity's stage and status alone. Closing a card automatically
+    would be a judgement about work OWEN cannot see — the crew may already have been paid, or
+    the job re-dispatched under a new number (which is exactly what happened with 68729729 ->
+    68730389, seventy-six seconds apart).
+
+    The customer is found by looking up the ORIGINAL job's email and reusing the contact id its
+    relay recorded. If that job never reached GoHighLevel there is nothing to annotate, and
+    that is recorded honestly rather than treated as a failure.
+    """
+    cancelled_job = (em.fields or {}).get("cancelled_job_id") or em.job_id
+    original = (await db.execute(
+        select(InboundEmail).where(
+            InboundEmail.job_id == cancelled_job,
+            InboundEmail.parse_status == "parsed",
+            InboundEmail.relayed_to_ghl.is_(True),
+        ).order_by(InboundEmail.received_at.desc()).limit(1)
+    )).scalar_one_or_none() if cancelled_job else None
+
+    contact_id = ((original.relay_result or {}).get("contact_id") if original else None)
+    if not settings.ghl_api_enabled or not contact_id:
+        # No original in GHL (or no API configured) — nothing to annotate. Not a failure:
+        # a cancellation for a job we never relayed is simply a no-op.
+        em.relay_status = "skipped_no_original"
+        em.relay_error = None
+        em.relay_result = {"mode": "cancellation", "cancelled_job_id": cancelled_job,
+                           "original_found": False}
+        em.relayed_at = now
+        await db.commit()
+        logger.info("email_relay_ghl: cancellation for job %s has no relayed original in GHL; "
+                    "nothing to annotate", cancelled_job)
+        return
+
+    body = (
+        f"JOB CANCELLED by the sender: job {cancelled_job}.\n\n"
+        f"American Home Shield cancelled this dispatch. The opportunity has been left open and "
+        f"unchanged — check whether the work was already done, or whether it was re-dispatched "
+        f"under a new job number."
+    )
+    try:
+        await ghl_api.add_contact_note(contact_id, body)
+    except Exception as exc:  # noqa: BLE001 - record and re-raise so the queue retries
+        em.relay_status = "failed"
+        em.relay_error = str(exc)[:2000]
+        em.relayed_at = now
+        await db.commit()
+        raise
+
+    em.relayed_to_ghl = True
+    em.relay_status = "cancellation_noted"
+    em.relay_error = None
+    em.relay_result = {"mode": "cancellation", "cancelled_job_id": cancelled_job,
+                       "original_found": True, "contact_id": contact_id,
+                       "original_email_id": str(original.id), "note_added": True}
+    em.relayed_at = now
+    await db.commit()
+    logger.info("email_relay_ghl: noted cancellation of job %s on contact %s",
+                cancelled_job, contact_id)
 
 
 async def _relay_via_api(em: InboundEmail) -> dict:

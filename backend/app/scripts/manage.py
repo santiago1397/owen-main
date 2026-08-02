@@ -9,6 +9,7 @@ Examples (inside the app container, or locally via the venv):
 
 import argparse
 import asyncio
+import uuid
 
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -281,41 +282,166 @@ async def purge_estimates() -> None:
     print(f"purged {n} superseded estimated charge rows (run `cost-now` to repopulate)")
 
 
+async def purge_dead_jobs(dry_run: bool) -> None:
+    """Retire dead `recording_fetch` jobs whose media can never be fetched.
+
+    A job that has exhausted its attempts against media the provider will not serve is not
+    work waiting to happen — nothing will ever retry it, and it keeps /health/pipeline stuck
+    on `degraded`, which drains the word of meaning.
+
+    The failure is not discarded, it is MOVED to where it belongs: the recording row is marked
+    `status='absent'` (the same marker the 404 path already uses) so "we know about this
+    recording and its audio is gone" survives, and only the queue row is deleted. Deleting the
+    job alone would have lost that.
+
+    Strictly scoped to recording_fetch jobs that are dead AND whose error is a permanent
+    upstream refusal (403/404) or an unusable URL. A dead job from any other cause is left
+    alone — those are the ones a human should still see.
+    """
+    from sqlalchemy import delete as sa_delete
+    from sqlalchemy import or_
+
+    from app.models import Job, Recording
+    from app.services.queue import MAX_ATTEMPTS
+
+    permanent = or_(
+        Job.last_error.ilike("%403%"),          # provider refuses to serve it, with or without auth
+        Job.last_error.ilike("%404%"),          # provider deleted it
+        Job.last_error.ilike("%missing an%protocol%"),  # unusable URL (unexpanded CFB template)
+    )
+    async with SessionLocal() as db:
+        rows = (await db.execute(
+            select(Job).where(Job.type == "recording_fetch", Job.status == "failed",
+                              Job.attempts >= MAX_ATTEMPTS, permanent)
+        )).scalars().all()
+
+        marked = 0
+        for job in rows:
+            rid = (job.payload or {}).get("recording_id")
+            if not rid:
+                continue
+            rec = await db.get(Recording, uuid.UUID(rid))
+            # Only downgrade a recording we do NOT have locally; never relabel one on disk.
+            if rec is not None and rec.storage_path is None and rec.status != "absent":
+                print(f"  mark absent: recording {rec.id} sid={rec.provider_recording_sid!r}")
+                if not dry_run:
+                    rec.status = "absent"
+                marked += 1
+
+        if dry_run:
+            await db.rollback()
+            print(f"purge-dead-jobs (dry-run): {len(rows)} dead job(s) would be removed, "
+                  f"{marked} recording(s) marked absent")
+            return
+        await db.execute(sa_delete(Job).where(Job.id.in_([j.id for j in rows])))
+        await db.commit()
+    print(f"purge-dead-jobs: removed {len(rows)} permanently-failed recording_fetch job(s); "
+          f"marked {marked} recording(s) absent (their audio is unavailable upstream)")
+
+
+async def purge_placeholder_recordings(dry_run: bool) -> None:
+    """Delete recording rows that are not recordings.
+
+    A SignalWire Call Flow Builder webhook can fire with its template variables unexpanded,
+    producing a row whose provider_recording_sid is the literal string '%{call.recording.sid}'.
+    That is a placeholder, not a call artifact: it can never be fetched, and because the sid is
+    unique every such webhook collapses onto the same poisoned row.
+
+    Refuses to touch anything with audio on disk or a transcript, so a real recording can never
+    be caught by the pattern.
+    """
+    from sqlalchemy import delete as sa_delete
+
+    from app.models import Recording, Transcription
+
+    async with SessionLocal() as db:
+        rows = (await db.execute(
+            select(Recording).where(Recording.provider_recording_sid.like("%\\%{%"))
+        )).scalars().all()
+        removable = []
+        for rec in rows:
+            has_transcript = (await db.execute(
+                select(Transcription.id).where(Transcription.recording_id == rec.id).limit(1)
+            )).scalar_one_or_none()
+            if rec.storage_path is not None or has_transcript:
+                print(f"  KEEP {rec.id} sid={rec.provider_recording_sid!r} — has audio/transcript")
+                continue
+            print(f"  delete placeholder: {rec.id} sid={rec.provider_recording_sid!r}")
+            removable.append(rec.id)
+        if dry_run:
+            await db.rollback()
+            print(f"purge-placeholder-recordings (dry-run): {len(removable)}/{len(rows)} would be deleted")
+            return
+        if removable:
+            await db.execute(sa_delete(Recording).where(Recording.id.in_(removable)))
+        await db.commit()
+    print(f"purge-placeholder-recordings: deleted {len(removable)} placeholder row(s)")
+
+
 async def reclassify_emails(dry_run: bool) -> None:
-    """Re-file already-stored `failed` emails that were never job notifications as `ignored`.
+    """Re-derive `parse_status` for already-stored non-parsed emails.
 
-    Rows written before the parser learned the difference are all marked 'failed', which
-    overstates the problem: on this account 4 of 5 were cancellations, notes and account mail.
+    Rows written before the parser learned to tell these apart are all marked 'failed', which
+    badly overstates the problem: on this account 4 of 5 were cancellations, notes and account
+    mail. Re-running the classifier moves each to what it actually is —
 
-    Classification needs only the SUBJECT, so this re-runs the real predicate rather than
+        cancellation : the sender cancelled a job (actionable; relayed as a note)
+        ignored      : not a work order at all (no lead, no action)
+        failed       : a real work order we could not read (left alone, still loud)
+
+    Classification needs only the SUBJECT, so this calls the real predicates rather than
     re-parsing bodies — no duplicated logic, and nothing can drift from what the poller does.
-    Only ever moves failed -> ignored; a genuine parse failure is never silenced.
+    Never touches a 'parsed' row, and never silences a genuine parse failure.
+
+    Newly-identified cancellations get a relay job enqueued so they reach GoHighLevel like a
+    freshly-received one would.
     """
     from app.models import InboundEmail
     from app.providers import dispatch_email
 
     async with SessionLocal() as db:
         rows = (await db.execute(
-            select(InboundEmail).where(InboundEmail.parse_status == dispatch_email.FAILED)
+            select(InboundEmail).where(
+                InboundEmail.parse_status.in_([dispatch_email.FAILED, dispatch_email.IGNORED])
+            ).order_by(InboundEmail.received_at)
         )).scalars().all()
-        moved = 0
+
+        changed, to_relay = 0, []
         for row in rows:
-            if dispatch_email.is_job_notification(row.subject):
+            cancelled = dispatch_email.cancelled_job_id(row.subject)
+            if cancelled:
+                want, why = dispatch_email.CANCELLATION, f"job {cancelled} was cancelled by the sender"
+                fields = {**(row.fields or {}), "source": dispatch_email.SOURCE,
+                          "kind": dispatch_email.CANCELLATION, "cancelled_job_id": cancelled}
+            elif not dispatch_email.is_job_notification(row.subject):
+                reason = dispatch_email.non_job_kind(row.subject)
+                want, why, fields = (dispatch_email.IGNORED,
+                                     f"ignored: {reason} — carries no lead to relay", row.fields)
+            else:
                 print(f"  KEEP failed  job={row.job_id} {row.subject!r}")
                 continue
-            reason = dispatch_email.non_job_kind(row.subject)
-            print(f"  -> ignored ({reason})  {row.subject!r}")
+
+            if row.parse_status == want:
+                continue
+            print(f"  {row.parse_status} -> {want}  {row.subject!r}")
+            changed += 1
             if not dry_run:
-                row.parse_status = dispatch_email.IGNORED
-                row.parse_error = f"ignored: {reason} — carries no lead to relay"
-            moved += 1
+                row.parse_status = want
+                row.parse_error = why
+                row.fields = fields
+                if want == dispatch_email.CANCELLATION:
+                    row.job_id = cancelled
+                    to_relay.append(row.id)
+
         if dry_run:
             await db.rollback()
-            print(f"reclassify-emails (dry-run): {moved}/{len(rows)} would move to 'ignored'")
+            print(f"reclassify-emails (dry-run): {changed}/{len(rows)} would change")
             return
         await db.commit()
-    print(f"reclassify-emails: {moved}/{len(rows)} moved to 'ignored'; "
-          f"{len(rows) - moved} remain genuine parse failures")
+        for eid in to_relay:
+            await queue.enqueue(db, "email_relay_ghl", {"email_id": str(eid)})
+    print(f"reclassify-emails: {changed}/{len(rows)} reclassified; "
+          f"{len(to_relay)} cancellation(s) enqueued for relay")
 
 
 # --- AI API keys ----------------------------------------------------------------------------
@@ -436,6 +562,14 @@ def main() -> None:
     sub.add_parser("billing-purge-estimates",
                    help="One-time: drop charge rows written by the old local estimate")
 
+    pdj = sub.add_parser("purge-dead-jobs",
+                         help="Retire recording_fetch jobs whose media is permanently unfetchable")
+    pdj.add_argument("--dry-run", action="store_true", help="Show what would change, write nothing")
+
+    ppr = sub.add_parser("purge-placeholder-recordings",
+                         help="Delete recording rows created from unexpanded CFB template vars")
+    ppr.add_argument("--dry-run", action="store_true", help="Show what would change, write nothing")
+
     re_ = sub.add_parser("reclassify-emails",
                          help="Re-file stored non-job 'failed' emails as 'ignored'")
     re_.add_argument("--dry-run", action="store_true", help="Show what would change, write nothing")
@@ -478,6 +612,10 @@ def main() -> None:
         asyncio.run(cost_now(args.hours))
     elif args.cmd == "billing-purge-estimates":
         asyncio.run(purge_estimates())
+    elif args.cmd == "purge-dead-jobs":
+        asyncio.run(purge_dead_jobs(args.dry_run))
+    elif args.cmd == "purge-placeholder-recordings":
+        asyncio.run(purge_placeholder_recordings(args.dry_run))
     elif args.cmd == "reclassify-emails":
         asyncio.run(reclassify_emails(args.dry_run))
     elif args.cmd == "issue-key":
