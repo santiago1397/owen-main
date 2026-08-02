@@ -131,10 +131,15 @@ async def pipeline_health(
                Recording.downloaded_at < stuck_window)
     )).scalar_one()
 
+    # The completed-call relay only runs when GHL_CALL_WEBHOOK_URL is set. With it unset the
+    # relay is switched OFF, so every call is "not relayed" — reporting that as a count reads
+    # like a backlog of failures when nothing is failing and nothing is meant to happen.
+    # (The EMAIL relay is separate and uses the direct API; only calls depend on this URL.)
+    call_relay_enabled = bool(settings.GHL_CALL_WEBHOOK_URL)
     unrelayed_calls = (await db.execute(
         select(func.count()).select_from(Call)
         .where(REAL_CALL, Call.started_at >= day_ago, Call.relayed_to_ghl.is_(False))
-    )).scalar_one()
+    )).scalar_one() if call_relay_enabled else None
 
     telephony = {"asterisk_enabled": settings.ASTERISK_ENABLED, "ari_reachable": None,
                  "trunk_registered": None}
@@ -235,6 +240,9 @@ async def pipeline_health(
                 "email_parse_failures_24h": email_parse_failures_24h,
                 "email_ignored_non_job_24h": email_ignored_24h,
                 "email_relay_failures_total": email_relay_failures,
+                # Off by configuration, not broken: null when GHL_CALL_WEBHOOK_URL is unset,
+                # in which case no call is ever meant to reach GoHighLevel.
+                "call_relay_to_ghl_enabled": call_relay_enabled,
                 "calls_24h_not_relayed_to_ghl": unrelayed_calls,
             },
             "recordings": {
@@ -251,6 +259,10 @@ async def pipeline_health(
             "`email_ignored_non_job_24h` counts Dispatch mail that is not a work order "
             "(cancellations, notes, account mail). It is normal traffic, not a failure, and "
             "carries no lead.",
+            "`calls_24h_not_relayed_to_ghl` is null when `call_relay_to_ghl_enabled` is false: "
+            "the completed-call relay to GoHighLevel is switched off (GHL_CALL_WEBHOOK_URL is "
+            "unset), so no call is expected to reach the CRM and there is no backlog. Email "
+            "relaying is separate and unaffected.",
             "`dead_media_gone_upstream` and `archive_untranscribed_by_design` are reported "
             "for completeness and are NOT problems: the first is media the telephony provider "
             "deleted on its own retention schedule, the second is the historical backfill, "
