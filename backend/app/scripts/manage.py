@@ -390,6 +390,61 @@ async def purge_placeholder_recordings(dry_run: bool) -> None:
     print(f"purge-placeholder-recordings: deleted {len(removable)} placeholder row(s)")
 
 
+async def reparse_emails(dry_run: bool) -> None:
+    """Re-run the CURRENT parser over stored `failed` emails and relay any that now parse.
+
+    A parser fix should be retroactive. The full RFC822 message is kept on every row for
+    exactly this reason, so a template variant learned today can recover a lead that was
+    dropped weeks ago — without going back to the mailbox, which has long since marked it read.
+
+    Re-parsing goes through the same `mailbox._body_parts` decode the poller uses, so what the
+    parser sees here is what it would have seen live; nothing is reconstructed by hand.
+
+    Only touches rows currently marked `failed`, and only ever upgrades them to `parsed`. A row
+    that still fails is left exactly as it was.
+    """
+    import email as _email
+
+    from app.models import InboundEmail
+    from app.providers import dispatch_email
+    from app.services import mailbox
+
+    async with SessionLocal() as db:
+        rows = (await db.execute(
+            select(InboundEmail).where(InboundEmail.parse_status == dispatch_email.FAILED)
+        )).scalars().all()
+
+        recovered = []
+        for row in rows:
+            if not row.raw:
+                print(f"  SKIP {row.id} — no raw message stored")
+                continue
+            msg = _email.message_from_string(row.raw)
+            text_body, html_body = mailbox._body_parts(msg)
+            parsed = dispatch_email.parse(row.subject, text_body, html_body)
+            if parsed.status != dispatch_email.PARSED:
+                print(f"  still {parsed.status}: job={row.job_id} — {parsed.error}")
+                continue
+            name = (parsed.fields or {}).get("customer_name")
+            print(f"  RECOVERED job={parsed.job_id} customer={name!r}")
+            if not dry_run:
+                row.parse_status = dispatch_email.PARSED
+                row.parse_error = None
+                row.fields = parsed.fields
+                row.job_id = parsed.job_id or row.job_id
+                row.relay_status = "pending"
+                recovered.append(row.id)
+
+        if dry_run:
+            await db.rollback()
+            print(f"reparse-emails (dry-run): {len(rows)} failed row(s) examined")
+            return
+        await db.commit()
+        for eid in recovered:
+            await queue.enqueue(db, "email_relay_ghl", {"email_id": str(eid)})
+    print(f"reparse-emails: {len(recovered)}/{len(rows)} now parse and were enqueued for relay")
+
+
 async def reclassify_emails(dry_run: bool) -> None:
     """Re-derive `parse_status` for already-stored non-parsed emails.
 
@@ -584,6 +639,10 @@ def main() -> None:
                          help="Delete recording rows created from unexpanded CFB template vars")
     ppr.add_argument("--dry-run", action="store_true", help="Show what would change, write nothing")
 
+    rp = sub.add_parser("reparse-emails",
+                        help="Re-run the current parser over stored 'failed' emails; relay any that now parse")
+    rp.add_argument("--dry-run", action="store_true", help="Show what would change, write nothing")
+
     re_ = sub.add_parser("reclassify-emails",
                          help="Re-file stored non-job 'failed' emails as 'ignored'")
     re_.add_argument("--dry-run", action="store_true", help="Show what would change, write nothing")
@@ -630,6 +689,8 @@ def main() -> None:
         asyncio.run(purge_dead_jobs(args.dry_run, args.include_gone_upstream))
     elif args.cmd == "purge-placeholder-recordings":
         asyncio.run(purge_placeholder_recordings(args.dry_run))
+    elif args.cmd == "reparse-emails":
+        asyncio.run(reparse_emails(args.dry_run))
     elif args.cmd == "reclassify-emails":
         asyncio.run(reclassify_emails(args.dry_run))
     elif args.cmd == "issue-key":

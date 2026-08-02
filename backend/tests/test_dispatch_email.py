@@ -203,6 +203,7 @@ def main():
     test_full_extraction_beats_subject_classification()
     test_duplicate_opportunity_is_not_a_failure()
     test_cancellations_are_classified_and_carry_the_job_number()
+    test_contact_name_accepts_markdown_and_html_emphasis()
 
     print("\nALL DISPATCH EMAIL CHECKS PASSED")
 
@@ -342,6 +343,54 @@ def test_cancellations_are_classified_and_carry_the_job_number():
           d.parse("American Home Shield sent you a note for job #7", "", "").status == d.IGNORED)
     check("a real unreadable confirmation is still failed",
           d.parse("American Home Shield Dispatch Email Confirmation: 1 ROOF", "", "").status == d.FAILED)
+
+
+
+
+def test_contact_name_accepts_markdown_and_html_emphasis():
+    """Dispatch emphasises contact names EITHER as <strong> or as **markdown**, inconsistently
+    between sends. Handling only <strong> silently cost this account a lead (job 66859789):
+    no customer_name means the REQUIRED check fails and the email is never relayed."""
+    from app.providers import dispatch_email as d
+
+    # Both blocks are verbatim from production, differing only in emphasis style.
+    html_style = (
+        "<h1>Customer Information</h1>\n"
+        '<p><strong>THERESA  ANTON</strong> (Dispatch Contact)</p>\n'
+        '<p><strong>HOME:</strong><a href="tel:+19547267261">(954) 726-7261</a></p>\n'
+        '<p><strong>THERESA  ANTON</strong> (Contract Contact)</p>\n'
+        '<p><strong>Home:</strong><a href="tel:+19547267261">(954) 726-7261</a></p>\n'
+        "<h1>Autho Link</h1>\n"
+    )
+    markdown_style = (
+        "<h1>Customer Information</h1>\n"
+        '<p>**KARINA GRIMALDI ** (Dispatch Contact)</p>\n'
+        '<p><strong>HOME:</strong><a href="tel:+17862855527">(786) 285-5527</a></p>\n'
+        '<p>**KARINA GRIMALDI ** (Contract Contact)</p>\n'
+        '<p><strong>Home:</strong><a href="tel:+17862855527">(786) 285-5527</a></p>\n'
+        "<h1>Autho Link</h1>\n"
+    )
+    for label, block, expected, phone in [
+        ("<strong>", html_style, "Theresa  Anton", "+19547267261"),
+        ("**markdown**", markdown_style, "Karina Grimaldi", "+17862855527"),
+    ]:
+        contacts = d._parse_contacts(block)
+        check(f"{label}: two contacts parsed", len(contacts) == 2)
+        # _clean collapses runs of whitespace, so compare on collapsed text.
+        got = " ".join((contacts[0].get("name") or "").upper().split())
+        check(f"{label}: name extracted", got == " ".join(expected.upper().split()))
+        check(f"{label}: role extracted", contacts[0].get("role") == "Dispatch Contact")
+        check(f"{label}: phone zipped in document order", contacts[0].get("phone") == phone)
+        contract = next((c for c in contacts if "contract" in (c.get("role") or "").lower()), None)
+        check(f"{label}: the Contract Contact is identifiable", contract is not None)
+
+    # The markdown form must survive the whole parse and satisfy the REQUIRED check, which is
+    # the actual failure this fixes — a name alone is not enough without job_id + address.
+    body = ("Dispatch E-mail Confirmation\n" + markdown_style +
+            "<h1>Covered Property Address</h1>\n<p>123 Main St\nMIAMI, FL 33186</p>\n")
+    r = d.parse("American Home Shield Dispatch Email Confirmation: 66859789 ROOF", body, None)
+    check("markdown-emphasised name yields a customer_name",
+          (r.fields or {}).get("customer_name", "").upper() == "KARINA GRIMALDI")
 
 
 if __name__ == "__main__":

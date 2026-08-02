@@ -163,11 +163,26 @@ def _parse_subject(subject: str | None) -> dict:
     return out
 
 
+# A contact name in the Customer Information block, emphasised EITHER as HTML or as markdown:
+#
+#   <p><strong>THERESA  ANTON</strong> (Contract Contact)</p>
+#   <p>**KARINA GRIMALDI ** (Contract Contact)</p>
+#
+# Dispatch's template emits both — the plain-text alternative is a markdown/HTML hybrid and the
+# emphasis style is not consistent between sends. Handling only `<strong>` silently cost this
+# account a lead (job 66859789), because a missing customer_name fails the REQUIRED check and
+# the email is never relayed. Both spellings are the same fact; parse both.
+_CONTACT_NAME = re.compile(
+    r"(?:<strong>\s*([^<]+?)\s*</strong>|\*\*\s*([^*]+?)\s*\*\*)\s*\(([^)]+)\)"
+)
+
+
 def _parse_contacts(text: str) -> list[dict]:
-    """Customer Information block: pairs of `<strong>NAME</strong> (Role)` with the tel:
-    link on the following line. Zipped in document order."""
+    """Customer Information block: pairs of emphasised `NAME (Role)` with the tel: link on the
+    following line, zipped in document order. Name emphasis may be `<strong>` or `**markdown**`."""
     block = _section(text, "Customer Information") or ""
-    names = re.findall(r"<strong>\s*([^<]+?)\s*</strong>\s*\(([^)]+)\)", block)
+    # Each match yields (html_name, markdown_name, role) — exactly one name group is set.
+    names = [(html or md, role) for html, md, role in _CONTACT_NAME.findall(block)]
     phones = re.findall(r"tel:(\+?\d[\d\-\s()]*)", block)
     contacts = []
     for i, (name, role) in enumerate(names):
