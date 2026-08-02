@@ -93,19 +93,42 @@ async def pipeline_health(
             select(Job.status, func.count()).group_by(Job.status)
         )).all()
     }
+    # A job that died because the PROVIDER no longer has the media is not a fault in OWEN and
+    # no amount of engineering will revive it: Twilio deletes recordings on its own retention
+    # schedule, and `recordings.status` is already set to 'absent' for these. Counting them as
+    # dead jobs put ~388 permanent, unfixable entries in front of the ~30 that are real.
+    GONE_UPSTREAM = Job.last_error.ilike("%404%")
     dead_jobs = (await db.execute(
         select(func.count()).select_from(Job)
-        .where(Job.status == "failed", Job.attempts >= MAX_ATTEMPTS)
+        .where(Job.status == "failed", Job.attempts >= MAX_ATTEMPTS, ~GONE_UPSTREAM)
+    )).scalar_one()
+    dead_gone_upstream = (await db.execute(
+        select(func.count()).select_from(Job)
+        .where(Job.status == "failed", Job.attempts >= MAX_ATTEMPTS, GONE_UPSTREAM)
     )).scalar_one()
     oldest_pending = (await db.execute(
         select(func.min(Job.run_after)).where(Job.status == "pending")
     )).scalar_one()
 
-    # A recording downloaded but never transcribed means the pipeline stalled between stages.
+    # A recording downloaded but never transcribed CAN mean the pipeline stalled between
+    # stages — but only for recordings that went through the live pipeline. The one-off
+    # historical backfill deliberately passes skip_transcribe=True (a pure audio+metadata
+    # mirror, no OpenAI cost, and untranscribed audio is never pruned by retention), so it
+    # leaves tens of thousands of intentionally-untranscribed files behind forever. Bounding
+    # this to the last 7 days keeps a genuine stall visible within hours without a historical
+    # backfill screaming permanently: 26,393 files from one July backfill were being reported
+    # as a pipeline problem.
+    stuck_window = now - timedelta(days=7)
     stuck_recordings = (await db.execute(
         select(func.count()).select_from(Recording)
         .where(Recording.storage_path.is_not(None), Recording.transcribed.is_(False),
-               Recording.downloaded_at < now - timedelta(hours=6))
+               Recording.downloaded_at < now - timedelta(hours=6),
+               Recording.downloaded_at >= stuck_window)
+    )).scalar_one()
+    untranscribed_archive = (await db.execute(
+        select(func.count()).select_from(Recording)
+        .where(Recording.storage_path.is_not(None), Recording.transcribed.is_(False),
+               Recording.downloaded_at < stuck_window)
     )).scalar_one()
 
     unrelayed_calls = (await db.execute(
@@ -156,7 +179,8 @@ async def pipeline_health(
             f"— those leads were not relayed"
         )
     if stuck_recordings:
-        problems.append(f"{stuck_recordings} recording(s) downloaded >6h ago but never transcribed")
+        problems.append(f"{stuck_recordings} recent recording(s) downloaded >6h ago but never "
+                        f"transcribed — the pipeline may be stalled between stages")
     if call_age is not None and call_age > STALE_CALLS_MINUTES:
         problems.append(f"no call ingested in {round(call_age / 60)}h")
     if mail_age is not None and mail_age > STALE_MAIL_MINUTES and emails_24h == 0:
@@ -202,6 +226,9 @@ async def pipeline_health(
                 "done": job_counts.get("done", 0),
                 "failed": job_counts.get("failed", 0),
                 "dead": dead_jobs,
+                # Counted apart from `dead` on purpose: the provider deleted the media, so
+                # these can never succeed and are not an OWEN fault.
+                "dead_media_gone_upstream": dead_gone_upstream,
                 "oldest_pending_run_after": oldest_pending.isoformat() if oldest_pending else None,
             },
             "relays": {
@@ -210,7 +237,12 @@ async def pipeline_health(
                 "email_relay_failures_total": email_relay_failures,
                 "calls_24h_not_relayed_to_ghl": unrelayed_calls,
             },
-            "recordings": {"downloaded_but_never_transcribed_over_6h": stuck_recordings},
+            "recordings": {
+                "recent_downloaded_but_never_transcribed": stuck_recordings,
+                # Informational, never a problem: the historical backfill copied audio
+                # deliberately without transcribing it.
+                "archive_untranscribed_by_design": untranscribed_archive,
+            },
             "telephony": telephony,
         },
         notes=[
@@ -219,6 +251,11 @@ async def pipeline_health(
             "`email_ignored_non_job_24h` counts Dispatch mail that is not a work order "
             "(cancellations, notes, account mail). It is normal traffic, not a failure, and "
             "carries no lead.",
+            "`dead_media_gone_upstream` and `archive_untranscribed_by_design` are reported "
+            "for completeness and are NOT problems: the first is media the telephony provider "
+            "deleted on its own retention schedule, the second is the historical backfill, "
+            "which copied audio without transcribing it on purpose. Do not report either as "
+            "something to fix.",
             "Call ingestion is polled every 5 minutes; a quiet night is normal for this business, "
             "so call staleness is only reported after 24h of silence.",
         ],

@@ -18,6 +18,26 @@ from app.core.config import settings
 logger = logging.getLogger("ghl_api")
 
 
+def _raise_for_status(resp: httpx.Response, what: str) -> None:
+    """Raise on non-2xx with GHL's OWN explanation attached.
+
+    `resp.raise_for_status()` produces only "Client error '400 Bad Request' for url ...",
+    which is what four stranded leads were diagnosed with for a week: it says a request was
+    rejected but never why. GHL always answers with a JSON body naming the offending field
+    or rule, so that body is the entire diagnostic value of the failure — and it was being
+    discarded one line before it reached `inbound_emails.relay_error`.
+
+    Truncated because it lands in a DB column and a log line, and GHL can echo the payload.
+    """
+    if resp.is_success:
+        return
+    body = (resp.text or "").strip().replace("\n", " ")[:800]
+    raise httpx.HTTPStatusError(
+        f"GHL {what} failed: HTTP {resp.status_code} — {body or '(empty response body)'}",
+        request=resp.request, response=resp,
+    )
+
+
 def _headers() -> dict:
     return {
         "Authorization": f"Bearer {settings.GHL_API_TOKEN}",
@@ -43,7 +63,7 @@ async def upsert_contact(payload: dict) -> dict:
         resp = await client.post(
             f"{settings.GHL_API_BASE}/contacts/upsert", json=payload, headers=_headers()
         )
-        resp.raise_for_status()
+        _raise_for_status(resp, "contact upsert")
         return resp.json()
 
 
@@ -53,7 +73,7 @@ async def create_opportunity(payload: dict) -> dict:
         resp = await client.post(
             f"{settings.GHL_API_BASE}/opportunities/", json=payload, headers=_headers()
         )
-        resp.raise_for_status()
+        _raise_for_status(resp, "opportunity create")
         return resp.json()
 
 
@@ -64,7 +84,7 @@ async def add_contact_note(contact_id: str, body: str) -> None:
             f"{settings.GHL_API_BASE}/contacts/{contact_id}/notes",
             json={"body": body}, headers=_headers(),
         )
-        resp.raise_for_status()
+        _raise_for_status(resp, "add note")
 
 
 async def list_pipelines() -> list[dict]:
@@ -74,7 +94,7 @@ async def list_pipelines() -> list[dict]:
             f"{settings.GHL_API_BASE}/opportunities/pipelines",
             params={"locationId": settings.GHL_LOCATION_ID}, headers=_headers(),
         )
-        resp.raise_for_status()
+        _raise_for_status(resp, "list pipelines")
         return resp.json().get("pipelines", [])
 
 
