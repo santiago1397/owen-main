@@ -6,6 +6,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
 
 from app.api import agents as agents_api
+from app.api import ai as ai_api
+from app.api import api_keys as api_keys_api
 from app.api import attribution as attribution_api
 from app.api import auth
 from app.api import billing as billing_api
@@ -30,6 +32,8 @@ from app.webhooks import signalwire as signalwire_webhooks
 from app.webhooks import twilio as twilio_webhooks
 
 from app.core.calllog import setup_logging
+from app.core.logcapture import install as install_log_capture
+from app.services.ro_role import sync_grants
 
 setup_logging()
 
@@ -38,6 +42,11 @@ setup_logging()
 async def lifespan(app: FastAPI):
     # Both app and worker migrate at startup behind an advisory lock (one wins).
     run_migrations()
+    # After migrations, so the handler's INSERT target exists on a first-ever boot.
+    install_log_capture("app")
+    # Re-applied every boot: `GRANT SELECT ON ALL TABLES` only covers tables that existed when
+    # it ran, so any migration adding a table would otherwise leave it unreadable to /api/ai/query.
+    sync_grants()
     yield
 
 
@@ -68,6 +77,10 @@ app.include_router(messages_api.router)
 app.include_router(inbox_api.router)
 app.include_router(health_api.router)
 app.include_router(telephony_api.router)
+# Key management is JWT-authed (the UI's surface); the AI API is API-key-authed. A machine
+# credential must never be able to mint or widen another machine credential.
+app.include_router(api_keys_api.router)
+app.include_router(ai_api.router)
 app.include_router(twilio_webhooks.router)
 app.include_router(signalwire_webhooks.router)
 app.include_router(bulkvs_webhooks.router)

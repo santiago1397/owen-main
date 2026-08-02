@@ -269,6 +269,18 @@ export const api = {
       body: JSON.stringify(body),
     }),
   settings: () => request("/api/settings"),
+  // AI API key management. These are JWT-authed like everything else here — an API key can
+  // never mint or widen another API key. `createApiKey` returns the plaintext secret exactly
+  // once; it is hashed on the server and cannot be retrieved again.
+  apiKeys: () => request("/api/api-keys"),
+  createApiKey: (body: { name: string; scopes: string[]; expires_in_days?: number | null }) =>
+    request("/api/api-keys", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }),
+  revokeApiKey: (id: string) => request(`/api/api-keys/${id}`, { method: "DELETE" }),
+  apiKeyUsage: (id: string) => request(`/api/api-keys/${id}/usage`),
   playUrl: (recordingId: string) => request(`/api/recordings/${recordingId}/play`),
   emails: (filters: Record<string, any>) => request(`/api/emails${qs(filters)}`),
   email: (id: string) => request(`/api/emails/${id}`),

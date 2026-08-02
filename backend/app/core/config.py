@@ -56,6 +56,33 @@ class Settings(BaseSettings):
     # Business timezone for all daily/weekly/monthly bucketing
     BUSINESS_TZ: str = "America/New_York"
 
+    # --- AI API (/api/ai/*) -----------------------------------------------------------
+    # Machine-facing, API-key-authed, read-only. See docs/AI_API.md.
+    AI_API_ENABLED: bool = True
+    # Per-key token bucket. /query gets its own, much tighter limit because one bad SELECT
+    # costs far more than one metric lookup on a 1-CPU container.
+    AI_API_RATE_LIMIT_PER_MIN: int = 60
+    AI_API_SQL_RATE_LIMIT_PER_MIN: int = 10
+    # Hard bounds on an ad-hoc query. The row cap is applied by wrapping the statement, so a
+    # caller cannot opt out of it by omitting LIMIT.
+    AI_API_SQL_TIMEOUT_SECONDS: int = 10
+    AI_API_SQL_DEFAULT_LIMIT: int = 200
+    AI_API_SQL_MAX_LIMIT: int = 5000
+    # Read-only Postgres login used ONLY by /api/ai/query. Created by hand once (needs
+    # CREATEROLE, which the container user does not have); grants are then maintained
+    # automatically at startup by app/services/ro_role.py. Leave empty to disable /query
+    # cleanly — the endpoint answers 503 with instructions rather than falling back to the
+    # read/write app role.
+    POSTGRES_RO_USER: str = ""
+    POSTGRES_RO_PASSWORD: str = ""
+    # Retention for the AI API's own tables (the worker's sweep trims both).
+    API_USAGE_RETENTION_DAYS: int = 30
+    APP_LOG_RETENTION_DAYS: int = 14
+    # Log records at or above this level are mirrored into `app_logs` so /api/ai/errors can
+    # see them. Deliberately WARNING: INFO would mirror every `call.*` trace line into
+    # Postgres. Set to ERROR to capture less, or INFO temporarily to debug something live.
+    APP_LOG_CAPTURE_LEVEL: str = "WARNING"
+
     # Twilio credentials (per SERVER_SETUP.md: secrets live in .env.prod).
     # Single primary account; also the fallback when TWILIO_ACCOUNTS is unset.
     TWILIO_ACCOUNT_SID: str = ""
@@ -432,6 +459,25 @@ class Settings(BaseSettings):
             f"postgresql+asyncpg://{self.POSTGRES_USER}:{self.POSTGRES_PASSWORD}"
             f"@{self.POSTGRES_HOST}:{self.POSTGRES_PORT}/{self.POSTGRES_DB}"
         )
+
+    @property
+    def readonly_database_url(self) -> str | None:
+        """DSN for the SELECT-only role behind /api/ai/query, or None when unconfigured.
+
+        Returning None (rather than silently reusing `database_url`) is the point: the
+        read-only role IS the security boundary for ad-hoc SQL, so without it the endpoint
+        must refuse to run, not run with write credentials.
+        """
+        if not self.POSTGRES_RO_USER or not self.POSTGRES_RO_PASSWORD:
+            return None
+        return (
+            f"postgresql+asyncpg://{self.POSTGRES_RO_USER}:{self.POSTGRES_RO_PASSWORD}"
+            f"@{self.POSTGRES_HOST}:{self.POSTGRES_PORT}/{self.POSTGRES_DB}"
+        )
+
+    @property
+    def ai_sql_enabled(self) -> bool:
+        return self.AI_API_ENABLED and self.readonly_database_url is not None
 
 
 @lru_cache

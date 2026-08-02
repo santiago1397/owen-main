@@ -281,6 +281,62 @@ async def purge_estimates() -> None:
     print(f"purged {n} superseded estimated charge rows (run `cost-now` to repopulate)")
 
 
+# --- AI API keys ----------------------------------------------------------------------------
+# The UI (/api-keys) is the normal way to do this. These exist for bootstrapping — issuing the
+# first key on a fresh deployment, or recovering when nobody can log in.
+
+
+async def issue_key(name: str, scopes: list[str] | None, expires_days: int | None) -> None:
+    from datetime import datetime, timedelta, timezone
+
+    from app.core.apikeys import SCOPES, display_prefix, generate_key, hash_key, normalize_scopes
+    from app.models import ApiKey
+
+    unknown = [s for s in (scopes or []) if s.lower() not in SCOPES]
+    if unknown:
+        raise SystemExit(f"unknown scope(s): {', '.join(unknown)}. Valid: {', '.join(SCOPES)}")
+    resolved = normalize_scopes(scopes)
+    plaintext = generate_key()
+    async with SessionLocal() as db:
+        db.add(ApiKey(
+            name=name, key_prefix=display_prefix(plaintext), key_hash=hash_key(plaintext),
+            scopes=resolved,
+            expires_at=(datetime.now(timezone.utc) + timedelta(days=expires_days)
+                        if expires_days else None),
+        ))
+        await db.commit()
+    print(f"key issued: {name}  scopes={','.join(resolved)}")
+    print(f"\n  {plaintext}\n")
+    print("This is the ONLY time the key is shown — it is stored hashed and cannot be recovered.")
+
+
+async def list_keys() -> None:
+    from app.models import ApiKey
+
+    async with SessionLocal() as db:
+        rows = (await db.execute(select(ApiKey).order_by(ApiKey.created_at.desc()))).scalars().all()
+    print(f"{'name':24} {'prefix':16} {'scopes':28} {'state':9} last used")
+    for r in rows:
+        state = "revoked" if r.revoked_at else ("active" if r.active else "inactive")
+        used = r.last_used_at.strftime("%Y-%m-%d %H:%M") if r.last_used_at else "never"
+        print(f"{r.name[:24]:24} {r.key_prefix:16} {','.join(r.scopes or [])[:28]:28} {state:9} {used}")
+
+
+async def revoke_key(name: str) -> None:
+    from datetime import datetime, timezone
+
+    from app.models import ApiKey
+
+    async with SessionLocal() as db:
+        row = (await db.execute(select(ApiKey).where(ApiKey.name == name))).scalar_one_or_none()
+        if row is None:
+            raise SystemExit(f"no api key named {name!r} (see `list-keys`)")
+        row.revoked_at = datetime.now(timezone.utc)
+        row.active = False
+        await db.commit()
+    print(f"revoked: {name}")
+
+
 def main() -> None:
     p = argparse.ArgumentParser(prog="manage")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -343,6 +399,17 @@ def main() -> None:
     sub.add_parser("billing-purge-estimates",
                    help="One-time: drop charge rows written by the old local estimate")
 
+    ik = sub.add_parser("issue-key", help="Mint an AI API key (shown once). UI: /api-keys")
+    ik.add_argument("--name", required=True, help="human label, e.g. 'claude-cli'")
+    ik.add_argument("--scope", action="append", dest="scopes",
+                    help="read | content | sql | logs (repeatable; default: read)")
+    ik.add_argument("--expires-days", type=int)
+
+    sub.add_parser("list-keys", help="Show issued AI API keys")
+
+    rk = sub.add_parser("revoke-key", help="Revoke an AI API key by name")
+    rk.add_argument("--name", required=True)
+
     args = p.parse_args()
     if args.cmd == "add-campaign":
         asyncio.run(add_campaign(args.name, args.source))
@@ -370,6 +437,12 @@ def main() -> None:
         asyncio.run(cost_now(args.hours))
     elif args.cmd == "billing-purge-estimates":
         asyncio.run(purge_estimates())
+    elif args.cmd == "issue-key":
+        asyncio.run(issue_key(args.name, args.scopes, args.expires_days))
+    elif args.cmd == "list-keys":
+        asyncio.run(list_keys())
+    elif args.cmd == "revoke-key":
+        asyncio.run(revoke_key(args.name))
 
 
 if __name__ == "__main__":

@@ -25,6 +25,7 @@ from sqlalchemy import (
     false,
     func,
 )
+from sqlalchemy import true as sa_true
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -615,3 +616,89 @@ class User(Base):
     role: Mapped[str] = mapped_column(String, default="admin")
     active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class ApiKey(Base):
+    """A machine credential for the AI API (`/api/ai/*`). Never a user session.
+
+    The plaintext key is shown exactly once at creation and never stored. `key_hash` is a
+    plain SHA-256 (not argon2 like `users.password_hash`): the secret is 32 bytes of CSPRNG
+    entropy, so there is nothing to brute-force, and this is verified on EVERY request —
+    a deliberate KDF would put ~100ms of argon2 on the hot path for no security gain.
+
+    `key_prefix` is the first few characters of the plaintext, stored in the clear purely so
+    the UI can show which key a row refers to.
+
+    Scopes are read-only capabilities, stored as a JSON list (see app/core/apikeys.py):
+      read    — curated metrics: counts, durations, series, pipeline health
+      content — transcripts, call summaries, SMS bodies, customer PII from parsed emails
+      sql     — the guarded read-only /query endpoint
+      logs    — /errors: captured warnings, failed jobs, failed relays
+    """
+
+    __tablename__ = "api_keys"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_uuid)
+    name: Mapped[str] = mapped_column(String)  # human label, e.g. 'claude-cli' | 'reporting-app'
+    key_prefix: Mapped[str] = mapped_column(String, index=True)  # display only, e.g. 'owen_sk_7Fq3'
+    key_hash: Mapped[str] = mapped_column(String, unique=True, index=True)  # sha256 hex of the plaintext
+    scopes: Mapped[list] = mapped_column(JSONB, default=list)  # ['read', 'logs', ...]
+
+    active: Mapped[bool] = mapped_column(Boolean, default=True, server_default=sa_true())
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    created_by_user_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class ApiKeyUsage(Base):
+    """One AI-API request. This is the audit trail for keys you hand to someone else.
+
+    Written best-effort AFTER the response is produced — a failure to log must never fail a
+    request. `sql` is populated only for /query, which is the whole point: you can see exactly
+    what an external integration asked the database, not just that it asked something.
+
+    Trimmed by the worker's retention sweep (API_USAGE_RETENTION_DAYS).
+    """
+
+    __tablename__ = "api_key_usage"
+    __table_args__ = (Index("ix_api_key_usage_key_at", "api_key_id", "at"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_uuid)
+    api_key_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("api_keys.id", ondelete="CASCADE"))
+    endpoint: Mapped[str] = mapped_column(String)  # route path, e.g. '/api/ai/calls/stats'
+    status_code: Mapped[int] = mapped_column(Integer, default=200)
+    duration_ms: Mapped[int] = mapped_column(Integer, default=0)
+    rows: Mapped[int | None] = mapped_column(Integer)  # rows returned, when meaningful
+    sql: Mapped[str | None] = mapped_column(Text)  # /query only — the statement that ran
+    error: Mapped[str | None] = mapped_column(Text)
+    at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
+
+
+class AppLog(Base):
+    """WARNING+ log records captured from BOTH the app and the worker container.
+
+    Docker's json-file logs are the real log stream, but they live on the VPS behind SSH and
+    the app container cannot read the worker's. Mirroring the serious records into Postgres is
+    what makes `/api/ai/errors` possible at all — and it survives container restarts, which
+    rotated json-file logs do not.
+
+    Deliberately NOT the whole log stream: capture starts at WARNING (APP_LOG_CAPTURE_LEVEL)
+    so this stays small on a box running native Postgres. Trimmed by the retention sweep.
+    """
+
+    __tablename__ = "app_logs"
+    __table_args__ = (Index("ix_app_logs_at_level", "at", "level"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_uuid)
+    at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
+    service: Mapped[str] = mapped_column(String, index=True)  # 'app' | 'worker'
+    level: Mapped[str] = mapped_column(String, index=True)  # WARNING | ERROR | CRITICAL
+    logger: Mapped[str | None] = mapped_column(String)
+    message: Mapped[str] = mapped_column(Text)
+    # Call correlation when the record came from a `call.*` line — lets /errors answer
+    # "what went wrong on this call" without parsing free text.
+    linkedid: Mapped[str | None] = mapped_column(String, index=True)
+    traceback: Mapped[str | None] = mapped_column(Text)

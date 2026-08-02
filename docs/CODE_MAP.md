@@ -138,6 +138,9 @@ The whole schema in one file. Tables (PK type in parens):
 - **`inbound_emails`** (uuid) — job-notification emails pulled over IMAP. `message_id` (unique = idempotency), `source`, `from/to/subject`, `job_id`, `parse_status` (`parsed`/`failed`) + `parse_error`, `fields` jsonb (extracted data), `raw` (full email, always kept), `relayed_to_ghl`/`relayed_at` (relay-once guard), `received_at`. Only `parsed` rows relay to GHL.
 - **`jobs`** (uuid) — durable queue. `type`, `payload`, `status`, `attempts`, `last_error`, `run_after`, `locked_at`.
 - **`users`** (uuid) — `email` unique, `password_hash` (argon2), `role`, `active`.
+- **`api_keys`** (uuid) — AI-API machine credentials. `name`, `key_prefix` (display only), `key_hash` (SHA-256 unique — the plaintext is never stored), `scopes` jsonb, `active`/`revoked_at`/`expires_at`, `last_used_at`.
+- **`api_key_usage`** (uuid) — one row per AI-API request: `api_key_id`, `endpoint`, `status_code`, `duration_ms`, `rows`, `sql` (populated for `/query`), `error`. Trimmed at `API_USAGE_RETENTION_DAYS`.
+- **`app_logs`** (uuid) — WARNING+ records mirrored from the app **and** worker: `service`, `level`, `logger`, `message`, `linkedid` (parsed from `call.*` lines), `traceback`. Trimmed at `APP_LOG_RETENTION_DAYS`. **Not retroactive** — only records emitted since this shipped.
 
 Migrations live in `backend/alembic/versions/` as a 7-step linear chain (initial
 schema → composite call indexes → recording-sid unique → transcriptions + analysis →
@@ -258,7 +261,38 @@ Selected at runtime by `settings.TRANSCRIPTION_ENGINE` / `settings.ANALYSIS_ENGI
 | `recordings.py` | `GET /api/recordings/{id}/play` (JWT → short-lived playback token) · `GET /api/recordings/stream?token=` (**no JWT** — token-authed, streams the file so `<audio>` works) |
 | `emails.py` | `GET /api/emails` (inbound emails; filter `parse_status`/`relayed`, paginated) · `GET /api/emails/{id}` (full detail incl. extracted `fields` + raw). `parse_status=failed` is the human-inspect queue. |
 | `settings.py` | `GET /api/settings` (masked creds, webhook URLs to paste into providers, active engines, categories, inbound-email poller status) |
+| `api_keys.py` | `GET/POST /api/api-keys` · `DELETE /api/api-keys/{id}` (revoke) · `GET /api/api-keys/{id}/usage`. **JWT-authed on purpose** — an API key must never be able to mint or widen another API key. The plaintext secret is returned by POST and nowhere else. |
 | `deps.py` | `current_user` JWT dependency; `SHORT_CALL_MAX_DURATION_SECONDS=1` (≤1s misdials hidden by default). |
+
+### The AI API (`app/api/ai/`) — machine-facing, API-key-authed, read-only
+
+A third access-control surface alongside user JWTs and webhook signatures: `/api/ai/*` is what
+an AI agent or an outside integration talks to. **Full manual: [`AI_API.md`](../backend/app/api/ai/AI_API.md)**,
+served verbatim at `GET /api/ai/docs` so a caller with only a URL and a key can bootstrap itself.
+
+| File | Responsibility |
+|---|---|
+| `deps.py` | Key auth (SHA-256 lookup by hash), scope gating, per-key token-bucket rate limiting, best-effort `api_key_usage` audit. 4xx bodies carry a `hint` — a machine caller cannot ask a follow-up question. |
+| `envelope.py` | The `{summary, data, applied_filters, notes}` shape every endpoint returns, plus the standing caveats (phantom rows, junk, dead `is_spam`). |
+| `periods.py` | Named windows (`today`, `last_7d`, `last_month`, …) resolved in `BUSINESS_TZ` by localizing the boundary — never by UTC arithmetic, which is wrong twice a year. |
+| `filters.py` | **What counts as a call.** `started_at IS NOT NULL` is applied always and is not overridable; junk uses the *same objects* as `api/junk.py` so the AI API and dashboard cannot drift. |
+| `metrics.py` | `/calls/stats` (the workhorse), `/calls/top-callers`, `/calls/categories`, `/leads/stats`, `/messages/stats`, `/billing/summary`. |
+| `health.py` | `/health/pipeline` — ingestion freshness, queue depth, dead jobs, relay failures, stuck recordings, telephony, with a derived `healthy`/`degraded` verdict. |
+| `content.py` | `/calls/recent`, `/calls/{id}/transcript`, `/leads/recent` — gated on `content` because these carry transcripts and customer PII. |
+| `errors.py` | `/errors` — unions captured `app_logs`, dead/failing `jobs.last_error`, and failed email parses/relays into one list. |
+| `schema.py` | `/schema` — live `information_schema` introspection plus prose and the caveats needed to write a correct query. |
+| `query.py` | `/query` — one read-only statement, run as `owen_ro`. **The DB role is the boundary**, not the regex checks; those exist to turn an opaque Postgres error into an actionable one. Requires `sql` **and** `content`. |
+| `root.py` | `/api/ai` index and `/api/ai/docs` (serves `AI_API.md`). Any valid key, any scope. |
+
+Scopes: `read` (metrics) · `content` (transcripts + PII) · `sql` · `logs`. All read-only —
+nothing in this API can mutate platform data. Keys live in `api_keys` (SHA-256, revocable,
+optionally expiring) and are managed at **`/api-keys`** in the UI.
+
+Supporting pieces outside `api/ai/`:
+- `core/apikeys.py` — minting, hashing, scope vocabulary, header extraction (`X-OWEN-Key` or `Authorization: Bearer`).
+- `core/logcapture.py` — a bounded-queue + daemon-thread `logging.Handler` mirroring WARNING+ from **both** containers into `app_logs`. Never blocks, never raises, drops under load rather than slowing a call.
+- `services/ro_role.py` — re-applies `owen_ro`'s grants at every startup (a one-time `GRANT … ON ALL TABLES` would silently miss tables added by later migrations) and revokes `users` / `api_keys` / `api_key_usage` last. The role itself is created by hand once; that needs `CREATEROLE`, which the app user deliberately lacks.
+- `cli/owen.py` — stdlib-only CLI wrapping every endpoint, for agents with a shell. See [`cli/README.md`](../cli/README.md).
 
 `calls`/`dashboard` read `calls` left-joined to `call_analysis`, using
 `coalesce(override, model_value)` so human overrides win.
@@ -313,3 +347,6 @@ baked in) and serves it with nginx on `:3333`. `nginx.conf` does SPA fallback
 | Add another email sender/format | new parser in `providers/` + branch in `workers/mail_poller.py` (widen the IMAP sender filter) |
 | Change the DB schema | new Alembic migration in `backend/alembic/versions/` + `models/models.py` |
 | Register a tracking number | `make manage args='add-number …'` (see README) |
+| Let an AI query OWEN | Issue a key at `/api-keys` in the UI, then point it at `GET /api/ai/docs` |
+| Add an AI-API metric | `api/ai/metrics.py` + an entry in `api/ai/root.py::ENDPOINTS` + a section in `api/ai/AI_API.md` |
+| See what's breaking in prod | `GET /api/ai/errors?since=6h` (or `owen errors --since 6h`) |

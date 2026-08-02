@@ -13,6 +13,7 @@ import InCallModal from "./components/InCallModal";
 import IncomingCallModal from "./components/IncomingCallModal";
 import { SoftphoneProvider } from "./lib/softphoneContext";
 import Agents from "./pages/Agents";
+import ApiKeys from "./pages/ApiKeys";
 import Attribution from "./pages/Attribution";
 import Billing from "./pages/Billing";
 import Callers from "./pages/Callers";
@@ -85,6 +86,9 @@ function Layout({ children }: { children: any }) {
         <NavLink to="/agents" className={link}>AI Agents</NavLink>
 
         <div className="navsection">System</div>
+        {/* Its own page rather than a Settings section: Settings is a read-only status
+            display, and issuing a credential is a write with a one-time secret reveal. */}
+        <NavLink to="/api-keys" className={link}>API Keys</NavLink>
         <NavLink to="/settings" className={link}>Settings</NavLink>
 
         <div style={{ flex: 1 }} />
@@ -142,6 +146,7 @@ export default function App() {
       <Route path="/agents" element={<Protected><Agents /></Protected>} />
       <Route path="/callers" element={<Protected><Callers /></Protected>} />
       <Route path="/emails" element={<Protected><Emails /></Protected>} />
+        <Route path="/api-keys" element={<Protected><ApiKeys /></Protected>} />
         <Route path="/settings" element={<Protected><Settings /></Protected>} />
       </Routes>
     </SoftphoneProvider>

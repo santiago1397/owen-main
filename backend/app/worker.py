@@ -30,6 +30,7 @@ from app.workers.mail_poller import poll_mailbox
 from app.workers.reconciler import reconcile_recent
 
 from app.core.calllog import setup_logging
+from app.core.logcapture import install as install_log_capture
 
 setup_logging()
 logger = logging.getLogger("worker")
@@ -89,12 +90,44 @@ async def retention_sweep() -> None:
                 removed, settings.RECORDING_RETENTION_DAYS)
 
 
+async def observability_sweep() -> None:
+    """Trim the AI API's own tables so they cannot grow without bound.
+
+    `app_logs` and `api_key_usage` are written on a hot path (every warning, every request) and
+    nothing else ever deletes from them. Both are diagnostics with a short useful life — a
+    six-month-old rate-limit rejection tells you nothing — so a plain age-based delete is
+    right, and keeping the windows short keeps the tables small on a box running native
+    Postgres alongside everything else.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    from sqlalchemy import delete
+
+    from app.models import ApiKeyUsage, AppLog
+
+    now = datetime.now(timezone.utc)
+    async with SessionLocal() as db:
+        logs = (await db.execute(
+            delete(AppLog).where(AppLog.at < now - timedelta(days=settings.APP_LOG_RETENTION_DAYS))
+        )).rowcount
+        usage = (await db.execute(
+            delete(ApiKeyUsage).where(
+                ApiKeyUsage.at < now - timedelta(days=settings.API_USAGE_RETENTION_DAYS)
+            )
+        )).rowcount
+        await db.commit()
+    logger.info("observability sweep: pruned %s app_logs (>%sd) and %s api_key_usage rows (>%sd)",
+                logs, settings.APP_LOG_RETENTION_DAYS, usage, settings.API_USAGE_RETENTION_DAYS)
+
+
 def build_scheduler() -> AsyncIOScheduler:
     sched = AsyncIOScheduler(timezone="UTC")
     # Polling is the primary ingestion path for Call Flow Builder numbers (no per-status
     # webhooks), so keep it frequent — calls/recordings should surface within minutes.
     sched.add_job(reconcile_recent, "interval", minutes=5, id="reconcile")
     sched.add_job(retention_sweep, "interval", hours=6, id="retention")
+    # Trims app_logs / api_key_usage. Same cadence as the recording sweep: both are janitorial.
+    sched.add_job(observability_sweep, "interval", hours=6, id="observability_retention")
     # Inbound-email ingestion (Hostinger IMAP). Only scheduled when a mailbox is configured
     # — otherwise it's a no-op and there's no point waking up for it.
     if mail_enabled():
@@ -135,6 +168,9 @@ def build_scheduler() -> AsyncIOScheduler:
 
 async def main() -> None:
     run_migrations()
+    # After migrations so `app_logs` exists; tagged 'worker' because both containers run the
+    # same image and knowing which one produced a record is most of the value in /api/ai/errors.
+    install_log_capture("worker")
     scheduler = build_scheduler()
     scheduler.start()
     # Asterisk ARI-WebSocket ingestion consumer (ticket 04) — flag-gated; with

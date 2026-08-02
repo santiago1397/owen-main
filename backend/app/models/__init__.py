@@ -1,5 +1,8 @@
 from app.models.models import (
     Agent,
+    ApiKey,
+    ApiKeyUsage,
+    AppLog,
     AppSetting,
     AgentVersion,
     Base,
@@ -28,6 +31,9 @@ from app.models.models import (
 
 __all__ = [
     "Agent",
+    "ApiKey",
+    "ApiKeyUsage",
+    "AppLog",
     "AppSetting",
     "AgentVersion",
     "Base",

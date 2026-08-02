@@ -107,6 +107,47 @@ make deploy                       # ff-only pull, build, up, healthcheck
    `https://api.<APP_DOMAIN>/webhooks/twilio/status` and `/recording`.
 9. Place a real call → confirm rows in `calls` + `call_events`.
 
+## AI API — letting an agent query OWEN
+
+`/api/ai/*` is a read-only, API-key-authed surface for AI agents and outside integrations:
+call volume and durations with any filter, leads from AHS/Dispatch job emails, SMS, telephony
+spend, pipeline health, error logs, and guarded ad-hoc SQL.
+
+**Manual: [`backend/app/api/ai/AI_API.md`](backend/app/api/ai/AI_API.md)** — also served live at
+`GET /api/ai/docs`, so an agent given only the base URL and a key can teach itself the API in
+one request.
+
+1. Issue a key at **API Keys** in the UI (or `make issue-key n=claude-cli s='read content sql logs'`).
+   The secret is shown once and stored only as a SHA-256 hash.
+2. Scopes, all read-only: `read` (metrics) · `content` (transcripts + customer PII) ·
+   `sql` (`POST /api/ai/query`) · `logs` (`GET /api/ai/errors`).
+3. Shell users: `cli/owen.py` wraps every endpoint — see [`cli/README.md`](cli/README.md).
+
+```bash
+curl -H "X-OWEN-Key: owen_sk_..." "https://api.$APP_DOMAIN/api/ai/calls/stats?period=last_week&max_duration=45"
+```
+
+**One deployment step is manual**, because it needs `CREATEROLE` and the app's database user
+deliberately does not have it. Without it everything except `POST /api/ai/query` works, and
+`/query` answers 503 with instructions rather than falling back to read/write credentials:
+
+```bash
+sudo -u postgres psql -d callmon -c "CREATE ROLE owen_ro LOGIN PASSWORD 'strong-password' \
+    NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT;"
+# then set POSTGRES_RO_USER / POSTGRES_RO_PASSWORD in .env.prod and restart
+```
+
+Grants are applied and re-applied automatically on every app start (including revoking SELECT
+on `users`, `api_keys` and `api_key_usage`), so migrations that add tables need no follow-up.
+
+After deploying, cross-check the numbers against the dashboard:
+
+```bash
+export OWEN_API_URL=https://api.$APP_DOMAIN OWEN_API_KEY=owen_sk_... \
+       OWEN_EMAIL=you@domain OWEN_PASSWORD='...'
+make ai-smoke
+```
+
 ## Layout
 
 ```
