@@ -4,6 +4,11 @@ import { api } from "../api";
 
 // Human-friendly label + badge class for each relay outcome.
 function RelayBadge({ status, relayed }: { status: string | null; relayed: boolean }) {
+  if (status === "sent_as_note")
+    // The customer already occupied the pipeline's single opportunity slot, so this job
+    // reached GHL as a note on the existing card rather than a card of its own. Delivered,
+    // but worth distinguishing — there is no card to find for this job number.
+    return <span className="badge new" title="GoHighLevel allows one opportunity per contact per pipeline, so this job was added as a note on the customer's existing card">added as note</span>;
   if (relayed || status === "sent") return <span className="badge new">sent to GHL</span>;
   if (status === "skipped_not_configured")
     return <span className="badge" title="GHL email webhook not configured yet">GHL not configured</span>;
@@ -185,6 +190,7 @@ export default function Emails() {
         <select onChange={(e) => set("relay_status", e.target.value)}>
           <option value="">any relay status</option>
           <option value="sent">sent to GHL</option>
+          <option value="sent_as_note">added as note</option>
           <option value="skipped_not_configured">GHL not configured</option>
           <option value="failed">relay failed</option>
         </select>

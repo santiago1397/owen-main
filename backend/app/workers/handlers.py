@@ -513,13 +513,17 @@ async def handle_email_relay_ghl(db: AsyncSession, payload: dict) -> None:
         await db.commit()
         raise
     em.relayed_to_ghl = True
-    em.relay_status = "sent"
+    # 'sent_as_note' when the customer already held the pipeline's single opportunity slot, so
+    # the job reached GoHighLevel as a note rather than its own card. Still delivered — hence
+    # relayed_to_ghl=True and no retry — but kept distinguishable from a relay that produced a
+    # card, because "there is no card for this job" is a thing someone may want to find.
+    em.relay_status = "sent_as_note" if result.get("duplicate_of_existing_opportunity") else "sent"
     em.relay_error = None
     em.relay_result = result
     em.relayed_at = now
     await db.commit()
-    logger.info("email_relay_ghl: relayed %s (job_id=%s) to GHL via %s",
-                em.message_id, em.job_id, result.get("mode"))
+    logger.info("email_relay_ghl: relayed %s (job_id=%s) to GHL via %s as %s",
+                em.message_id, em.job_id, result.get("mode"), em.relay_status)
 
 
 async def _relay_via_api(em: InboundEmail) -> dict:
@@ -534,16 +538,36 @@ async def _relay_via_api(em: InboundEmail) -> dict:
         raise RuntimeError(f"GHL upsert_contact returned no id: {contact_resp}")
 
     pipeline_id, stage_id = await ghl_api.resolve_stage_id()
-    opp_resp = await ghl_api.create_opportunity(
-        emails.build_opportunity_body(fields, contact_id, pipeline_id, stage_id, loc)
-    )
-    opportunity_id = ghl_api._extract_id(opp_resp, "opportunity")
+    # GoHighLevel permits ONE opportunity per contact per pipeline, so a repeat customer's
+    # second job is refused outright. That is a rule, not a failure — the customer is already
+    # on the board. Reuse the existing card and carry on to the note below, which is where the
+    # new job's details were always meant to land; previously create_opportunity raised first
+    # and the job details were dropped while the relay retried forever and reported a lost lead.
+    duplicate_of = None
+    try:
+        opp_resp = await ghl_api.create_opportunity(
+            emails.build_opportunity_body(fields, contact_id, pipeline_id, stage_id, loc)
+        )
+        opportunity_id = ghl_api._extract_id(opp_resp, "opportunity")
+    except ghl_api.DuplicateOpportunity as dup:
+        opportunity_id = dup.existing_id
+        duplicate_of = dup.existing_id
+        logger.info("email_relay_ghl: contact %s already has opportunity %s in pipeline %s; "
+                    "attaching job %s as a note instead",
+                    contact_id, dup.existing_id, pipeline_id, em.job_id)
 
     note_added = False
     description = emails.ghl_payload(em).get("job_description")
     if description:
+        # On the duplicate path this note is the ONLY record of the new job in GHL, so say so
+        # plainly at the top — otherwise it reads like a note about the card it is attached to.
+        body = (
+            f"NEW AHS JOB for an existing customer (job {em.job_id}). GoHighLevel allows one "
+            f"opportunity per contact per pipeline, so this job could not get its own card.\n\n"
+            f"{description}"
+        ) if duplicate_of else description
         try:
-            await ghl_api.add_contact_note(contact_id, description)
+            await ghl_api.add_contact_note(contact_id, body)
             note_added = True
         except Exception as exc:  # noqa: BLE001 - note is non-critical; job card already exists
             logger.warning("email_relay_ghl: note add failed for contact %s: %s", contact_id, exc)
@@ -555,6 +579,10 @@ async def _relay_via_api(em: InboundEmail) -> dict:
         "pipeline_id": pipeline_id,
         "stage_id": stage_id,
         "note_added": note_added,
+        # Set only on the duplicate path: no new card was created, and the job lives in the
+        # note. Drives relay_status='sent_as_note' so this stays distinguishable from a
+        # relay that produced its own opportunity.
+        "duplicate_of_existing_opportunity": duplicate_of,
     }
 
 

@@ -18,6 +18,21 @@ from app.core.config import settings
 logger = logging.getLogger("ghl_api")
 
 
+class DuplicateOpportunity(Exception):
+    """GoHighLevel refused a second opportunity for a contact in the same pipeline.
+
+    This is a RULE, not a fault: GHL allows one opportunity per contact per pipeline, so any
+    repeat customer's second job is rejected with OPPORTUNITY_NO_DUPLICATE. Left as a generic
+    error it looks like a lost lead and retries forever; it is neither. GHL helpfully returns
+    the id of the opportunity already occupying that slot, which is what lets the relay attach
+    the new job to the right card instead of dropping it.
+    """
+
+    def __init__(self, existing_id: str | None, detail: str) -> None:
+        super().__init__(detail)
+        self.existing_id = existing_id
+
+
 def _raise_for_status(resp: httpx.Response, what: str) -> None:
     """Raise on non-2xx with GHL's OWN explanation attached.
 
@@ -68,11 +83,25 @@ async def upsert_contact(payload: dict) -> dict:
 
 
 async def create_opportunity(payload: dict) -> dict:
-    """POST /opportunities/ — create a deal in a pipeline. Opp id at ['opportunity']['id']."""
+    """POST /opportunities/ — create a deal in a pipeline. Opp id at ['opportunity']['id'].
+
+    Raises `DuplicateOpportunity` (carrying the existing opportunity's id) when the contact
+    already holds one in this pipeline, so the caller can attach to it rather than fail.
+    """
     async with httpx.AsyncClient(timeout=30) as client:
         resp = await client.post(
             f"{settings.GHL_API_BASE}/opportunities/", json=payload, headers=_headers()
         )
+        if resp.status_code == 400:
+            try:
+                body = resp.json()
+            except ValueError:
+                body = {}
+            if body.get("code") == "OPPORTUNITY_NO_DUPLICATE":
+                raise DuplicateOpportunity(
+                    (body.get("meta") or {}).get("existingId"),
+                    body.get("message") or "duplicate opportunity for this contact",
+                )
         _raise_for_status(resp, "opportunity create")
         return resp.json()
 

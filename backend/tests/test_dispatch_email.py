@@ -201,6 +201,7 @@ def main():
 
     test_non_job_emails_are_ignored_not_failed()
     test_full_extraction_beats_subject_classification()
+    test_duplicate_opportunity_is_not_a_failure()
 
     print("\nALL DISPATCH EMAIL CHECKS PASSED")
 
@@ -261,6 +262,48 @@ def test_full_extraction_beats_subject_classification():
         # assert the weaker but still essential property rather than a false pass.
         check("an email missing required fields with an odd subject is ignored, not failed",
               r.status == d.IGNORED)
+
+
+
+
+def test_duplicate_opportunity_is_not_a_failure():
+    """GoHighLevel allows one opportunity per contact per pipeline, so a repeat customer's
+    second job is refused with OPPORTUNITY_NO_DUPLICATE. That is a rule, not a lost lead:
+    the relay must reuse the existing card, attach the job as a note, and stop retrying.
+    All four of this account's 'lost leads' were this."""
+    import httpx
+
+    from app.providers import ghl_api
+
+    # The exact body GoHighLevel returned in production.
+    body = {
+        "statusCode": 400,
+        "message": "Can not create duplicate opportunity for the contact.",
+        "code": "OPPORTUNITY_NO_DUPLICATE",
+        "meta": {"existingId": "6sS72KhoDY0KpgQJilHT"},
+        "error": "Bad Request",
+    }
+    req = httpx.Request("POST", "https://services.leadconnectorhq.com/opportunities/")
+    resp = httpx.Response(400, json=body, request=req)
+
+    # _raise_for_status must carry GHL's own words — losing them is what made these
+    # undiagnosable for a week.
+    try:
+        ghl_api._raise_for_status(resp, "opportunity create")
+        check("non-2xx raises", False)
+    except httpx.HTTPStatusError as exc:
+        check("the failure message carries GHL's explanation",
+              "duplicate opportunity" in str(exc).lower())
+        check("...and the status code", "400" in str(exc))
+
+    check("a 2xx does not raise", ghl_api._raise_for_status(httpx.Response(200, request=req), "x") is None)
+
+    # The typed exception must expose the existing id, which is what lets the relay attach
+    # the new job to the right card instead of dropping it.
+    dup = ghl_api.DuplicateOpportunity("6sS72KhoDY0KpgQJilHT", body["message"])
+    check("DuplicateOpportunity carries the existing opportunity id",
+          dup.existing_id == "6sS72KhoDY0KpgQJilHT")
+    check("...and is an Exception the handler can catch", isinstance(dup, Exception))
 
 
 if __name__ == "__main__":

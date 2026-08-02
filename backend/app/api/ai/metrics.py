@@ -272,6 +272,13 @@ async def lead_stats(
     relay_failed = (await db.execute(
         select(func.count()).select_from(InboundEmail).where(*base, InboundEmail.relay_status == "failed")
     )).scalar_one()
+    # Delivered, but as a note on the customer's existing card rather than a new opportunity —
+    # GoHighLevel allows only one per contact per pipeline. Counted separately so it is never
+    # mistaken for either a clean card or a failure.
+    relayed_as_note = (await db.execute(
+        select(func.count()).select_from(InboundEmail)
+        .where(*parsed, InboundEmail.relay_status == "sent_as_note")
+    )).scalar_one()
     unique_jobs = (await db.execute(
         select(func.count(func.distinct(InboundEmail.job_id))).where(*parsed, InboundEmail.job_id.is_not(None))
     )).scalar_one()
@@ -332,6 +339,7 @@ async def lead_stats(
             "leads": total,
             "unique_job_ids": unique_jobs,
             "relayed_to_ghl": relayed,
+            "relayed_as_note_on_existing_card": relayed_as_note,
             "not_yet_relayed": total - relayed,
             "parse_failed": failed,
             "relay_failed": relay_failed,
