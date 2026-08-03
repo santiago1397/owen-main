@@ -123,6 +123,28 @@ class AsteriskAriClient:
             return  # unplayable prompt (TTS failed): skip playback, flow continues
         await self._post(f"/ari/channels/{channel_id}/play", params={"media": uri})
 
+    async def _start_playback(
+        self, channel_id: str, uri: str,
+    ) -> tuple[str, asyncio.Queue] | None:
+        """Start a playback with a CLIENT-assigned id and return `(playback_id, queue)`, or None
+        if ARI refused. Pair with `dtmf.unregister_playback` in a finally.
+
+        The id is pre-assigned for the same reason channels are (`_originate_with_id`): it lets
+        the completion queue be registered BEFORE ARI is called. Registering it after the POST
+        returned left a window in which a playback that ends immediately — above all one Asterisk
+        FAILS to open, e.g. a missing sound file — published its PlaybackFinished into a registry
+        nobody was watching yet. `push_playback` dropped it, and the waiter then sat on dead air
+        until its own timeout instead of moving on at once."""
+        pb_id = uuid.uuid4().hex
+        queue = dtmf.register_playback(pb_id)
+        data = await self._post_json(
+            f"/ari/channels/{channel_id}/play", params={"media": uri, "playbackId": pb_id},
+        )
+        if not isinstance(data, dict) or not data.get("id"):
+            dtmf.unregister_playback(pb_id)
+            return None
+        return pb_id, queue
+
     async def _resolve_media(self, media: str) -> str | None:
         """Prompt string -> ARI media URI (Ticket 15.2).
 
@@ -201,11 +223,10 @@ class AsteriskAriClient:
         uri = await self._resolve_media(str(media))
         if not uri:
             return ""
-        data = await self._post_json(f"/ari/channels/{channel_id}/play", params={"media": uri})
-        pb_id = data.get("id") if isinstance(data, dict) else None
-        if not pb_id:
+        started = await self._start_playback(channel_id, uri)
+        if not started:
             return ""
-        pb_queue = dtmf.register_playback(str(pb_id))
+        pb_id, pb_queue = started
         getters = {
             asyncio.ensure_future(pb_queue.get()),
             asyncio.ensure_future(queue.get()),
@@ -502,19 +523,16 @@ class AsteriskAriClient:
         uri = await self._resolve_media(str(media))
         if not uri:
             return
-        data = await self._post_json(
-            f"/ari/channels/{channel_id}/play", params={"media": uri}
-        )
-        pb_id = data.get("id") if isinstance(data, dict) else None
-        if not pb_id:
+        started = await self._start_playback(channel_id, uri)
+        if not started:
             return
-        wait_queue = dtmf.register_playback(str(pb_id))
+        pb_id, wait_queue = started
         try:
             await asyncio.wait_for(wait_queue.get(), timeout=timeout_s)
         except asyncio.TimeoutError:
             pass
         finally:
-            dtmf.unregister_playback(str(pb_id))
+            dtmf.unregister_playback(pb_id)
 
     async def voicemail(
         self, channel_id: str, *, greeting, name: str,
@@ -704,11 +722,10 @@ class AsteriskAriClient:
         uri = await self._resolve_media(str(media))
         if not uri:
             return True
-        data = await self._post_json(f"/ari/channels/{channel_id}/play", params={"media": uri})
-        pb_id = data.get("id") if isinstance(data, dict) else None
-        if not pb_id:
+        started = await self._start_playback(channel_id, uri)
+        if not started:
             return True
-        pb_queue = dtmf.register_playback(str(pb_id))
+        pb_id, pb_queue = started
         loop = asyncio.get_running_loop()
         deadline = loop.time() + timeout_s
         try:

@@ -383,10 +383,14 @@ class Settings(BaseSettings):
         return [u.strip() for u in self.TURN_URLS.split(",") if u.strip()]
 
     # --- Manual operator OUTBOUND calling (Ticket 14, additive, gated on ASTERISK_ENABLED) ---
-    # ARI media URI played to the CALLEE before the operator is bridged in — the outbound
-    # analogue of the inbound flow's entry recording-consent notice (recording is on by
-    # default for outbound calls). A "sound:" prompt provisioned on the Asterisk host.
-    OUTBOUND_CONSENT_MEDIA: str = "sound:owen/outbound-recording-consent"
+    # Notice played to the CALLEE before the operator is bridged in — the outbound analogue of
+    # the inbound flow's entry recording-consent notice (recording is on by default for outbound
+    # calls). Plain text, TTS-synthesized like INBOUND_CONSENT_MEDIA and any flow prompt; a
+    # "sound:"/"recording:" URI is still honoured. It must NOT default to a hand-provisioned
+    # sound name: the previous default, `sound:owen/outbound-recording-consent`, was never
+    # shipped to the Asterisk host, so every outbound call opened on a playback Asterisk could
+    # not find ("File owen/outbound-recording-consent does not exist in any format").
+    OUTBOUND_CONSENT_MEDIA: str = "This call may be recorded for quality and training purposes."
     # Recording ON by default for manual outbound calls; flip off only to disable it globally.
     OUTBOUND_RECORDING_ENABLED: bool = True
 

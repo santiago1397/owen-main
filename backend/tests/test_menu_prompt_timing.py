@@ -26,7 +26,6 @@ from app.flows import dtmf
 from app.providers.asterisk_client import AsteriskAriClient
 
 CHAN = "1785263998.9"
-PB_ID = "pb-1"
 
 
 def check(name, cond):
@@ -41,13 +40,18 @@ class StubAri(AsteriskAriClient):
     def __init__(self):  # noqa: D107 - deliberately skips the real __init__ (no settings/httpx)
         self.played: list[str] = []
         self.deleted: list[str] = []
+        self.playback_id: str = ""
 
     async def _resolve_media(self, media):
         return f"sound:{media}"
 
     async def _post_json(self, path, params=None, json=None):
-        self.played.append((params or {}).get("media"))
-        return {"id": PB_ID}
+        params = params or {}
+        self.played.append(params.get("media"))
+        # Real ARI echoes back the CLIENT-assigned playbackId (see `_start_playback`), so the
+        # id the completion event must be keyed on is the one the client generated.
+        self.playback_id = str(params.get("playbackId") or "")
+        return {"id": self.playback_id}
 
     async def _post(self, path, params=None):
         self.played.append((params or {}).get("media"))
@@ -58,9 +62,9 @@ class StubAri(AsteriskAriClient):
         return True
 
 
-async def _finish_prompt_after(delay: float) -> None:
+async def _finish_prompt_after(delay: float, ari: "StubAri") -> None:
     await asyncio.sleep(delay)
-    dtmf.push_playback(PB_ID, {"type": "PlaybackFinished"})
+    dtmf.push_playback(ari.playback_id, {"type": "PlaybackFinished"})
 
 
 async def _press_after(delay: float, digit: str) -> None:
@@ -81,7 +85,7 @@ def test_timer_starts_after_prompt():
         dtmf.register_digits(CHAN)
         ari = StubAri()
         try:
-            asyncio.ensure_future(_finish_prompt_after(1.2))
+            asyncio.ensure_future(_finish_prompt_after(1.2, ari))
             asyncio.ensure_future(_press_after(1.4, "1"))
             started = time.monotonic()
             got = await ari.read_digit(CHAN, prompt="press 1 or 2", timeout_s=0.6, max_digits=1)
@@ -103,14 +107,14 @@ def test_barge_in_stops_prompt():
         dtmf.register_digits(CHAN)
         ari = StubAri()
         try:
-            asyncio.ensure_future(_finish_prompt_after(5.0))  # long prompt, never reached
+            asyncio.ensure_future(_finish_prompt_after(5.0, ari))  # long prompt, never reached
             asyncio.ensure_future(_press_after(0.05, "2"))
             started = time.monotonic()
             got = await ari.read_digit(CHAN, prompt="press 1 or 2", timeout_s=0.6, max_digits=1)
             elapsed = time.monotonic() - started
             check("barge-in digit returned", got == "2")
             check("returned without waiting out the prompt", elapsed < 1.0)
-            check("playback stopped", ari.deleted == [f"/ari/playbacks/{PB_ID}"])
+            check("playback stopped", ari.deleted == [f"/ari/playbacks/{ari.playback_id}"])
         finally:
             dtmf.unregister_digits(CHAN)
 
@@ -124,7 +128,7 @@ def test_silence_after_prompt_times_out():
         dtmf.register_digits(CHAN)
         ari = StubAri()
         try:
-            asyncio.ensure_future(_finish_prompt_after(0.30))
+            asyncio.ensure_future(_finish_prompt_after(0.30, ari))
             got = await ari.read_digit(CHAN, prompt="press 1 or 2", timeout_s=0.6, max_digits=1)
             check("no input -> None", got is None)
         finally:
@@ -142,7 +146,7 @@ def test_multi_digit_across_prompt_boundary():
         try:
             asyncio.ensure_future(_press_after(0.05, "4"))       # barge-in
             asyncio.ensure_future(_press_after(0.30, "2"))       # after the stop
-            asyncio.ensure_future(_finish_prompt_after(5.0))     # superseded by barge-in
+            asyncio.ensure_future(_finish_prompt_after(5.0, ari))     # superseded by barge-in
             got = await ari.read_digit(CHAN, prompt="extension?", timeout_s=0.8, max_digits=2)
             check("both digits collected in order", got == "42")
         finally:
