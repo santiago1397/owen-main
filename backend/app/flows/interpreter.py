@@ -84,6 +84,13 @@ class AriControl(Protocol):
 
     async def answer(self, channel_id: str) -> None: ...
     async def play(self, channel_id: str, media: str) -> None: ...
+    # Blocking playback: returns only once the prompt has FINISHED (the client correlates the
+    # WS PlaybackFinished). OPTIONAL on this protocol — the minimum surface is the
+    # fire-and-forget `play` above, and `_play_to_completion` falls back to it when a client
+    # (or a test fake) doesn't implement this.
+    async def play_and_wait(
+        self, channel_id: str, media: str, *, timeout_s: float = 30.0
+    ) -> None: ...
     async def record(self, channel_id: str, name: str) -> None: ...
     async def read_digit(
         self, channel_id: str, *, prompt: Optional[str], timeout_s: float, max_digits: int
@@ -334,8 +341,31 @@ class FlowInterpreter:
             await self.ari.record(self.channel_id, self._rec_name("play"))
         media = self._interp(self._media(node))
         if media:
-            await self.ari.play(self.channel_id, media)
+            await self._play_to_completion(media)
         return "default"
+
+    async def _play_to_completion(self, media: str) -> None:
+        """Play a `play` node's prompt and BLOCK until it has finished.
+
+        Returning early here is not cosmetic. The overwhelmingly common use of a `play` node is
+        a recording-consent notice sitting immediately before a `dial`, and the fire-and-forget
+        `play` returns as soon as ARI ACCEPTS the playback — so the interpreter advanced to
+        `dial`, originated the outbound leg and bridged it while the notice was still
+        mid-sentence. Observed live on this flow: flow.node.play and flow.node.dial were
+        emitted 13ms apart. FL is all-party consent (ARCHITECTURE.md #17), so a notice the
+        caller never hears is worse than no notice at all.
+
+        `play_and_wait` (which correlates the WS PlaybackFinished) is the same blocking op the
+        unassigned-DID default handler already uses for exactly this reason — see
+        `runtime._handle_unassigned`. It is resolved defensively because AriControl's minimum
+        surface is the fire-and-forget `play`; a client that implements only that still works,
+        just without the wait. Both paths are best-effort in the client: an unplayable prompt
+        or a missed finished-event returns rather than dead-airing the caller."""
+        play_and_wait = getattr(self.ari, "play_and_wait", None)
+        if play_and_wait is None:
+            await self.ari.play(self.channel_id, media)
+            return
+        await play_and_wait(self.channel_id, media)
 
     async def _h_hours(self, node: dict) -> Optional[str]:
         return "open" if evaluate_hours(node, self.now(), self.business_tz) else "closed"
