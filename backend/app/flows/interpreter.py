@@ -95,11 +95,17 @@ class AriControl(Protocol):
     async def read_digit(
         self, channel_id: str, *, prompt: Optional[str], timeout_s: float, max_digits: int
     ) -> Optional[str]: ...
+    # `record_name`, when set, records the BRIDGE once both legs are joined — NOT the caller's
+    # channel. Recording a channel BEFORE bridging makes Asterisk refuse the bridge outright
+    # ("Channel <id> currently recording", HTTP 409), which is exactly how a forwarded call
+    # silently became 25s of dead air; see `_h_dial`.
     async def dial_number(
-        self, channel_id: str, number: str, *, caller_id: Optional[str], timeout_s: float
+        self, channel_id: str, number: str, *, caller_id: Optional[str], timeout_s: float,
+        record_name: Optional[str] = None,
     ) -> str: ...
     async def dial_operator(
-        self, channel_id: str, operators: list, *, caller_id: Optional[str], timeout_s: float
+        self, channel_id: str, operators: list, *, caller_id: Optional[str], timeout_s: float,
+        record_name: Optional[str] = None,
     ) -> str: ...
     async def voicemail(
         self, channel_id: str, *, greeting: Optional[str], name: str,
@@ -390,8 +396,14 @@ class FlowInterpreter:
         kind = node.get("target_kind") or node.get("kind")
         timeout_s = float(node.get("timeout", 25))
         caller_id = node.get("caller_id")
-        if node.get("record"):
-            await self.ari.record(self.channel_id, self._rec_name("dial"))
+        # `record` on a DIAL node records the BRIDGE, after both legs are joined — it does NOT
+        # start a channel recording here. Starting one on the caller's channel first is what
+        # the old code did, and Asterisk then rejects the bridge with
+        #   409 {"message":"Channel <id> currently recording"}
+        # so the caller and the dialled party never got connected: 25s of dead air with a
+        # caller-only recording (live call 1785953643.61). `ring_and_bridge` always recorded
+        # the bridge for this reason; the dial path now does the same.
+        record_name = self._rec_name("dial") if node.get("record") else None
 
         # Operator-target (Ticket 13): dial one operator (individual) or a group of operators
         # (first-to-answer). An offline/unavailable operator never answers, so the unwired/
@@ -401,7 +413,8 @@ class FlowInterpreter:
             if not operators:
                 return _ERROR  # operator target with no operators configured
             return await self.ari.dial_operator(
-                self.channel_id, operators, caller_id=caller_id, timeout_s=timeout_s
+                self.channel_id, operators, caller_id=caller_id, timeout_s=timeout_s,
+                record_name=record_name,
             )
 
         # NUMBER target (default). `target`/`number` holds the E.164 to reach over the trunk;
@@ -410,7 +423,8 @@ class FlowInterpreter:
         if not target:
             return _ERROR
         result = await self.ari.dial_number(
-            self.channel_id, target, caller_id=caller_id, timeout_s=timeout_s
+            self.channel_id, target, caller_id=caller_id, timeout_s=timeout_s,
+            record_name=record_name,
         )
         return result  # "answered" | "noanswer" | "busy" | "failed"
 

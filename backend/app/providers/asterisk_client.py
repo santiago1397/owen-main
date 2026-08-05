@@ -253,7 +253,10 @@ class AsteriskAriClient:
         finally:
             dtmf.unregister_playback(str(pb_id))
 
-    async def dial_number(self, channel_id: str, number: str, *, caller_id, timeout_s: float) -> str:
+    async def dial_number(
+        self, channel_id: str, number: str, *, caller_id, timeout_s: float,
+        record_name: str | None = None,
+    ) -> str:
         """Real Forward-to-Phone (Ticket 15.3): originate + bridge, observed over the WS.
 
         The outbound leg is originated on the BulkVS PJSIP trunk INTO OUR OWN Stasis app,
@@ -292,7 +295,19 @@ class AsteriskAriClient:
             bridge_id = await self.create_bridge()
             if not bridge_id:
                 return "failed"
-            await self.add_to_bridge(bridge_id, channel_id, out_id)
+            if not await self.add_to_bridge(bridge_id, channel_id, out_id):
+                # The legs are NOT connected. Reporting "answered" here is what turned a
+                # rejected bridge into 25s of dead air on a live call — take the `failed` port
+                # so the graph (and then default_fallback) can do something audible instead.
+                logger.error(
+                    "ARI dial_number: bridge %s rejected both legs for %s; reporting failed",
+                    bridge_id, channel_id,
+                )
+                return "failed"
+            # Record the BRIDGE (both legs), never the channel — a channel recording started
+            # before this point makes ARI reject the addChannel above.
+            if record_name:
+                await self.record_bridge(bridge_id, record_name)
             await self._await_bridge_end(queue, channel_id, out_id)
             return "answered"
         except Exception:  # noqa: BLE001 - a dial failure must fall through, never crash the call
@@ -358,7 +373,8 @@ class AsteriskAriClient:
                 return
 
     async def dial_operator(
-        self, channel_id: str, operators: list[str], *, caller_id, timeout_s: float
+        self, channel_id: str, operators: list[str], *, caller_id, timeout_s: float,
+        record_name: str | None = None,
     ) -> str:
         """Dial operator browser legs (the `dial` operator-target node) and BRIDGE the caller to
         the first that answers (Ticket 18 — replaces the old originate-only stub). Rings every
@@ -373,7 +389,8 @@ class AsteriskAriClient:
         if not endpoints:
             return "failed"
         return await self.ring_and_bridge(
-            channel_id, endpoints, caller_id=caller_id, timeout_s=timeout_s
+            channel_id, endpoints, caller_id=caller_id, timeout_s=timeout_s,
+            record_name=record_name,
         )
 
     async def available_operators(self) -> list[str]:
@@ -455,7 +472,10 @@ class AsteriskAriClient:
             if not bridge_id:
                 clog(logger, "ring.result", channel=channel_id, result="failed", reason="no_bridge")
                 return "failed"
-            await self.add_to_bridge(bridge_id, channel_id, answered_id)
+            if not await self.add_to_bridge(bridge_id, channel_id, answered_id):
+                clog(logger, "ring.result", channel=channel_id, result="failed",
+                     reason="bridge_rejected", level=logging.WARNING)
+                return "failed"
             if record_name:
                 await self.record_bridge(bridge_id, record_name)
             clog(logger, "ring.bridged", channel=channel_id, answered=answered_id, bridge=bridge_id)
@@ -825,7 +845,10 @@ class AsteriskAriClient:
                 clog(logger, "outbound.fail", linkedid=lid, reason="bridge_failed",
                      level=logging.WARNING)
                 return
-            await self.add_to_bridge(bridge_id, op_channel_id, callee_channel_id)
+            if not await self.add_to_bridge(bridge_id, op_channel_id, callee_channel_id):
+                clog(logger, "outbound.fail", linkedid=lid, reason="bridge_rejected",
+                     level=logging.WARNING)
+                return
 
             # 5. Record the bridged call (on by default); name it `{linkedid}-...` so the
             #    recording pipeline attaches it to this call's row.
@@ -880,12 +903,20 @@ class AsteriskAriClient:
         clog(logger, "bridge.create", ok=False)
         return None
 
-    async def add_to_bridge(self, bridge_id: str, *channel_ids: str) -> None:
+    async def add_to_bridge(self, bridge_id: str, *channel_ids: str) -> bool:
+        """Add channels to a bridge. Returns True iff ARI accepted — CHECK IT.
+
+        All channels go in ONE addChannel, so a rejection joins NONE of them. This used to
+        return None and log success unconditionally, which made a real failure invisible: a
+        409 ("Channel <id> currently recording") left both parties unbridged on dead air while
+        the flow carried on as though the call were connected."""
         chans = ",".join(c for c in channel_ids if c)
         if not chans:
-            return
-        await self._post(f"/ari/bridges/{bridge_id}/addChannel", params={"channel": chans})
-        clog(logger, "bridge.add", bridge=bridge_id, channels=chans)
+            return False
+        ok = await self._post(f"/ari/bridges/{bridge_id}/addChannel", params={"channel": chans})
+        clog(logger, "bridge.add", bridge=bridge_id, channels=chans, ok=ok,
+             level=logging.INFO if ok else logging.WARNING)
+        return ok
 
     async def destroy_bridge(self, bridge_id: str) -> None:
         await self._delete(f"/ari/bridges/{bridge_id}")

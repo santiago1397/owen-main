@@ -40,6 +40,7 @@ class FakeAri:
 
     def __init__(self, digit=None, dial_result="answered"):
         self.calls = []          # ordered (op, channel_id, arg)
+        self.record_names = []   # record_name passed to each dial (None = no recording)
         self._digit = digit
         self._dial_result = dial_result
 
@@ -56,13 +57,17 @@ class FakeAri:
         self.calls.append(("read_digit", channel_id, prompt))
         return self._digit
 
-    async def dial_number(self, channel_id, number, *, caller_id, timeout_s):
+    async def dial_number(self, channel_id, number, *, caller_id, timeout_s, record_name=None):
+        # `record_name` (not a pre-dial channel record) is how a dial node asks for recording:
+        # the client records the BRIDGE once both legs are joined.
         self.calls.append(("dial", channel_id, number))
+        self.record_names.append(record_name)
         return self._dial_result
 
-    async def dial_operator(self, channel_id, operators, *, caller_id, timeout_s):
+    async def dial_operator(self, channel_id, operators, *, caller_id, timeout_s, record_name=None):
         # Record the resolved operator list; reuse the scripted dial result (Ticket 13).
         self.calls.append(("dial_operator", channel_id, tuple(operators)))
+        self.record_names.append(record_name)
         return self._dial_result
 
     async def voicemail(self, channel_id, *, greeting, name, max_duration_s, max_silence_s):
@@ -144,7 +149,12 @@ def test_happy_path_pins_and_emits_one_per_transition():
     check("entry answered the channel", ari.ops()[0] == "answer")
     check("play node with record modifier recorded then played",
           ("record", CHAN, f"{LINKEDID}-play-1") in ari.calls and ("play", CHAN, "sound:welcome") in ari.calls)
-    check("dial node with record modifier recorded before dialling", ("record", CHAN, f"{LINKEDID}-dial-2") in ari.calls)
+    # A dial node's `record` asks the client to record the BRIDGE (via record_name) — it must
+    # NOT start a channel recording first, which makes ARI reject the bridge (409) and leaves
+    # the call on dead air. See tests/test_dial_record_bridge.py for the full contract.
+    check("dial node with record modifier passed a bridge record_name, not a channel record",
+          ari.record_names == [f"{LINKEDID}-dial-2"]
+          and ("record", CHAN, f"{LINKEDID}-dial-2") not in ari.calls)
     check("dial placed to the NUMBER target", ("dial", CHAN, "+13055550000") in ari.calls)
     check("hangup terminated the call", ari.ops()[-1] == "hangup")
 

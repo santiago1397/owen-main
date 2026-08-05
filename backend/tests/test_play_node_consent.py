@@ -70,11 +70,11 @@ class BlockingAri:
         self._mark("read_digit", prompt)
         return "1"
 
-    async def dial_number(self, channel_id, number, *, caller_id, timeout_s):
+    async def dial_number(self, channel_id, number, *, caller_id, timeout_s, record_name=None):
         self._mark("dial", number)
         return self._dial_result
 
-    async def dial_operator(self, channel_id, operators, *, caller_id, timeout_s):
+    async def dial_operator(self, channel_id, operators, *, caller_id, timeout_s, record_name=None):
         self._mark("dial_operator", tuple(operators))
         return self._dial_result
 
