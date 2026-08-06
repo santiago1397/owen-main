@@ -10,6 +10,32 @@ from datetime import datetime
 from typing import Protocol
 
 
+# Fewest digits a real tracking DID can have (a NANP number is 10-11; short codes are 5-6).
+_MIN_DID_DIGITS = 5
+
+
+def looks_like_tracking_number(value: str | None) -> bool:
+    """Could `value` plausibly be a real DID someone forgot to register?
+
+    Not every "to" value reaching ingestion is a phone number. Asterisk's dialplan routes
+    through PSEUDO-EXTENSIONS — `s` (start), `h` (hangup), `i` (invalid), `t` (timeout) — and
+    those arrive as the tracking number on secondary channel events for calls that are already
+    correctly attributed from their entry event. Warning about them produced 242 "no registered
+    Number" lines in 24h on a day with 25 calls, which is worse than useless: the real signal
+    (a genuine DID pointed at OWEN that nobody registered, so its calls lose campaign
+    attribution) was buried in noise nobody could read.
+
+    So the split is by SHAPE, not by a hardcoded list of Asterisk's extension names — a
+    provider-agnostic rule that stays true for the next provider: enough digits to be a number
+    at all -> a real attribution gap, warn; anything else -> a dialplan artifact, debug.
+
+    Lives here, in the stdlib-only provider base, rather than next to its caller in
+    services/ingestion.py, so it is unit-testable without sqlalchemy.
+    """
+    digits = "".join(ch for ch in str(value or "") if ch.isdigit())
+    return len(digits) >= _MIN_DID_DIGITS
+
+
 # Status rank guards out-of-order webhook arrival (see Call.status_rank).
 STATUS_RANK = {
     "initiated": 1,

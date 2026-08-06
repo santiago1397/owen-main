@@ -50,6 +50,16 @@ ENDPOINTS: list[dict] = [
      "purpose": "Telephony spend from BulkVS rated records."},
     {"method": "GET", "path": "/api/ai/health/pipeline", "scope": "read",
      "purpose": "Is anything broken right now: ingestion freshness, queue depth, dead jobs, relays."},
+    {"method": "GET", "path": "/api/ai/flows/outcomes", "scope": "read",
+     "purpose": "What the IVR did with callers: how calls ended, which menu ports were taken "
+                "(timeout vs invalid digit), dial results, and how many callers were DROPPED "
+                "by an unwired port. A dropped caller looks like a normal completed call "
+                "everywhere else, so this is the only place the loss is visible.",
+     "key_params": ["period", "date_from", "date_to", "flow"]},
+    {"method": "GET", "path": "/api/ai/flows/calls", "scope": "read",
+     "purpose": "Drill-down: individual calls with their node path and end reason. Use "
+                "ended=unrouted_hangup to list the specific callers who were dropped.",
+     "key_params": ["period", "ended", "limit"]},
     {"method": "GET", "path": "/api/ai/errors", "scope": "logs",
      "purpose": "Captured warnings/errors, failed jobs and failed relays in one list.",
      "key_params": ["since", "source", "level", "service", "linkedid", "limit"]},

@@ -9,6 +9,7 @@ properties:
 - `filters`  — what counts as a call (the phantom-row and junk predicates)
 - `metrics`  — curated aggregate endpoints                      [scope: read]
 - `health`   — pipeline health                                  [scope: read]
+- `flows`    — IVR outcomes: where callers went, and who got dropped   [scope: read]
 - `content`  — transcripts, summaries, customer details         [scope: content]
 - `errors`   — captured logs, dead jobs, failed relays          [scope: logs]
 - `schema`   — live DB reference for writing SQL                [scope: read]
@@ -18,7 +19,7 @@ properties:
 
 from fastapi import APIRouter
 
-from app.api.ai import content, errors, health, metrics, query, root, schema
+from app.api.ai import content, errors, flows, health, metrics, query, root, schema
 
 router = APIRouter()
 # `root` is included first so `/api/ai` and `/api/ai/docs` resolve before any
@@ -26,6 +27,7 @@ router = APIRouter()
 router.include_router(root.router)
 router.include_router(metrics.router)
 router.include_router(health.router)
+router.include_router(flows.router)
 router.include_router(content.router)
 router.include_router(errors.router)
 router.include_router(schema.router)

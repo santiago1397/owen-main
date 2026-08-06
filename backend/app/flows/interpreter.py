@@ -30,6 +30,7 @@ record — the WAV fetch/transcribe reuse is ticket 05's job.
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable, ClassVar, Optional, Protocol
@@ -53,6 +54,11 @@ _POST_EMIT_TYPES: frozenset[str] = frozenset(
 # Event-payload snapshot cap: variable VALUES in flow.node.* payloads are truncated to this.
 _SNAP_MAX = 200
 
+# Longest node path recorded in a flow.call.summary payload. `max_steps` allows 100 hops, and
+# a summary is a diagnostic, not an audit log — the head of the path is what explains an
+# outcome, so a runaway loop truncates rather than writing a 100-element array per call.
+_PATH_MAX = 50
+
 # Sentinel port meaning "the handler could not choose a valid port" (unknown node type or a
 # handler error). It never matches a wired edge, so it always falls through to the fallback.
 _ERROR: str = "\x00__error__"
@@ -69,6 +75,14 @@ _VM_MAX_SILENCE_S = 5.0
 def _snap(value: Any) -> str:
     """A value as it appears in a flow.node.* event payload: str()'d, capped at _SNAP_MAX."""
     return "" if value is None else str(value)[:_SNAP_MAX]
+
+
+def _port_label(port: Optional[str]) -> Optional[str]:
+    """The port as it appears in an event payload. The `_ERROR` sentinel is a control value
+    containing a NUL byte — Postgres rejects NUL in jsonb text, so it is never written raw."""
+    if port is None:
+        return None
+    return "error" if port == _ERROR else str(port)
 
 
 # --- Injected collaborators (all substitutable with fakes in tests) -----------------------
@@ -223,6 +237,9 @@ class FlowInterpreter:
     emit: EmitFn
     linkedid: str
     now: ClockFn = _default_now
+    # Monotonic source for node/flow DURATIONS only (never wall-clock decisions — `now` stays
+    # the clock `hours` evaluates against). Injectable so tests can assert exact `ms` values.
+    monotonic: Callable[[], float] = time.monotonic
     business_tz: str = "America/New_York"
     max_steps: int = 100
     on_start: Optional[StartFn] = None
@@ -234,10 +251,36 @@ class FlowInterpreter:
     # request.status / request.body / set_vars entries as the call progresses.
     variables: dict = field(default_factory=dict)
     _rec_counter: int = field(default=0, init=False)
-    # Outcome snapshot the deferred-emit node handlers stash for their transition event.
+    # Outcome snapshot the node handlers stash for their transition + exit events.
     _event_extra: Optional[dict] = field(default=None, init=False)
+    # Node ids in the order they were entered, for the end-of-call flow.call.summary payload.
+    # `_steps` is counted separately because `_path` is capped at _PATH_MAX: on a runaway loop
+    # the path truncates but the step COUNT must stay true, or the summary would report a
+    # 100-hop loop as a tidy 50-step call.
+    _path: list = field(default_factory=list, init=False)
+    _steps: int = field(default=0, init=False)
+    # Tracked separately from `_path[-1]` for the same reason: once the path truncates, its
+    # last element is the 50th node, not the one the call actually ended on.
+    _last_node: Optional[str] = field(default=None, init=False)
 
     async def run(self) -> None:
+        """Run the graph, then ALWAYS emit one `flow.call.summary`.
+
+        The summary is the per-call answer to "what happened and why did it end that way" —
+        without it, reconstructing an outcome means a window function over `flow.node.*`
+        events plus a read of the version's graph JSON to learn what each port meant. The
+        real work is in `_run_graph`, which returns the end reason; this wrapper exists so
+        every one of its exit paths is summarized without repeating the emit at each return.
+        """
+        started = self.monotonic()
+        reason = "error"
+        try:
+            reason = await self._run_graph()
+        finally:
+            await self._emit_summary(reason, int((self.monotonic() - started) * 1000))
+
+    async def _run_graph(self) -> str:
+        """Execute the graph; return the reason the flow ended (see `run`)."""
         # Pin the flow_version onto the call FIRST, at StasisStart, before any node runs
         # (mirrors campaign_id pinning at ingest). Best-effort: a pin failure must not
         # dead-air the caller, so we log and still run the flow.
@@ -249,31 +292,52 @@ class FlowInterpreter:
 
         nodes = self.graph.get("nodes")
         if not isinstance(nodes, dict) or not nodes:
+            logger.warning("interpreter %s: graph has no nodes; hanging up", self.linkedid)
             await self._safe_hangup()
-            return
+            return "empty_graph"
 
         fallback = self.graph.get("default_fallback")
         fallback = fallback if isinstance(fallback, str) and fallback in nodes else None
+        if fallback is None:
+            # Worth a line at INFO: with no fallback, EVERY unwired or errored port hangs up on
+            # the caller instead of routing to voicemail. That is a flow-authoring decision
+            # made (or forgotten) at design time, and it is invisible in a per-node event.
+            logger.info(
+                "interpreter %s: no default_fallback — unwired/errored ports will hang up",
+                self.linkedid,
+            )
 
         current: Optional[str] = self._entry_id(nodes)
+        if current is None:
+            logger.warning("interpreter %s: graph has no entry node; hanging up", self.linkedid)
+            await self._safe_hangup()
+            return "no_entry"
+
         step = 0
         while current is not None:
             if step >= self.max_steps:
                 logger.warning("interpreter %s exceeded max_steps; hanging up", self.linkedid)
                 await self._safe_hangup()
-                return
+                return "max_steps"
             step += 1
 
             node = nodes.get(current)
             if not isinstance(node, dict):
                 # Dangling target: fall to fallback once, else hang up.
+                logger.warning(
+                    "interpreter %s: edge points at missing node '%s'", self.linkedid, current
+                )
                 current, fallback = self._fall(fallback)
                 if current is None:
                     await self._safe_hangup()
-                    return
+                    return "dangling_edge"
                 continue
 
             ntype = node.get("type")
+            self._steps += 1
+            self._last_node = current
+            if len(self._path) < _PATH_MAX:
+                self._path.append(current)
             # Ticket 17 parity nodes emit AFTER the handler so the event snapshots the
             # outcome; everything else keeps the original emit-on-entry.
             post_emit = ntype in _POST_EMIT_TYPES
@@ -281,29 +345,40 @@ class FlowInterpreter:
                 await self._emit_transition(step, current, ntype)
 
             self._event_extra = None
+            node_started = self.monotonic()
+            errored = False
             try:
                 port = await self._run_node(node, ntype)
             except Exception:  # noqa: BLE001 - a node failure must fall through, not dead-air
                 logger.exception("interpreter %s: node '%s' (%s) failed", self.linkedid, current, ntype)
                 port = _ERROR
+                errored = True
+            node_ms = int((self.monotonic() - node_started) * 1000)
 
             if post_emit:
                 await self._emit_transition(step, current, ntype, extra=self._event_extra)
 
             if ntype in TERMINAL_TYPES:
-                return  # voicemail / hangup already terminated the channel
+                await self._emit_exit(step, current, ntype, port, "terminal", None, node_ms, errored)
+                return "terminal"  # voicemail / hangup already terminated the channel
 
             nxt = self._resolve(node, port)
             if nxt is not None:
+                await self._emit_exit(step, current, ntype, port, "edge", nxt, node_ms, errored)
                 current = nxt
             else:
                 # Unwired or errored port -> the flow-level fallback (once), else clean hangup.
+                routed = "fallback" if fallback is not None else "hangup"
+                await self._emit_exit(
+                    step, current, ntype, port, routed, fallback, node_ms, errored
+                )
                 current, fallback = self._fall(fallback)
                 if current is None:
                     await self._safe_hangup()
-                    return
+                    return "unrouted_hangup"
 
         await self._safe_hangup()
+        return "completed"
 
     # --- routing helpers ---
 
@@ -348,6 +423,11 @@ class FlowInterpreter:
         media = self._interp(self._media(node))
         if media:
             await self._play_to_completion(media)
+        # `played` distinguishes a prompt that ran from a node that resolved to no media at
+        # all (an empty label / unresolved {{var}}) — the difference between a consent notice
+        # the caller heard and one that silently never played. Paired with the exit event's
+        # `ms`, a near-zero duration on a played prompt means the audio was never rendered.
+        self._event_extra = {"played": bool(media), "media": _snap(media) if media else None}
         return "default"
 
     async def _play_to_completion(self, media: str) -> None:
@@ -374,7 +454,29 @@ class FlowInterpreter:
         await play_and_wait(self.channel_id, media)
 
     async def _h_hours(self, node: dict) -> Optional[str]:
-        return "open" if evaluate_hours(node, self.now(), self.business_tz) else "closed"
+        cfg = node.get("hours") or node.get("business_hours") or {}
+        tz_name = (cfg.get("tz") if isinstance(cfg, dict) else None) or node.get("tz") or self.business_tz
+        at = self.now()
+        is_open = evaluate_hours(node, at, self.business_tz)
+        # An hours node fails OPEN when it has no schedule, so "why did an after-hours caller
+        # reach the greeting?" has two very different answers — genuinely open, or no schedule
+        # configured at all. Record the timezone and the local time it judged against: an hours
+        # node evaluated in the wrong zone is otherwise invisible until someone complains.
+        try:
+            local = at.astimezone(ZoneInfo(str(tz_name)))
+            local_time = local.strftime("%Y-%m-%dT%H:%M")
+            dow = _DOW[local.weekday()]
+        except Exception:  # noqa: BLE001 - unknown tz: the evaluation already fell back
+            local_time, dow = None, None
+        schedule = (cfg.get("schedule") or cfg.get("weekly") or {}) if isinstance(cfg, dict) else {}
+        self._event_extra = {
+            "hours_open": is_open,
+            "hours_tz": str(tz_name),
+            "hours_local_time": local_time,
+            "hours_dow": dow,
+            "hours_configured": bool(isinstance(schedule, dict) and schedule),
+        }
+        return "open" if is_open else "closed"
 
     async def _h_menu(self, node: dict) -> Optional[str]:
         media = self._interp(self._media(node))
@@ -386,6 +488,18 @@ class FlowInterpreter:
         # Ticket 17: the collected digits become a flow variable ("" on timeout/no input).
         self.variables["gather.digits"] = digit or ""
         edges = node.get("next") if isinstance(node.get("next"), dict) else {}
+        # A menu's outcome is the single most diagnostic fact about an IVR call, and "which
+        # port did this take" is NOT recoverable afterwards from the digits alone: `timeout`
+        # (heard the prompt, pressed nothing) and `invalid` (pressed an unwired key) are very
+        # different problems with very different fixes, and both just end the call. `options`
+        # records what the caller COULD have pressed, so the event explains itself without
+        # anyone having to fetch and read the pinned version's graph JSON.
+        self._event_extra = {
+            "digits": digit or None,
+            "timeout_s": timeout_s,
+            "max_digits": max_digits,
+            "options": sorted(k for k in edges if len(str(k)) == 1 and str(k).isdigit()),
+        }
         if not digit:
             return "timeout"          # no input; routes via 'timeout' port or falls through
         if digit in edges:
@@ -411,21 +525,50 @@ class FlowInterpreter:
         if kind == "operator":
             operators = _operator_list(node)
             if not operators:
+                logger.warning(
+                    "interpreter %s: operator dial node has no operators configured", self.linkedid
+                )
+                self._event_extra = {"dial_kind": "operator", "dial_operators": 0}
                 return _ERROR  # operator target with no operators configured
-            return await self.ari.dial_operator(
+            result = await self.ari.dial_operator(
                 self.channel_id, operators, caller_id=caller_id, timeout_s=timeout_s,
                 record_name=record_name,
             )
+            self._event_extra = {
+                "dial_kind": "operator",
+                "dial_operators": len(operators),
+                "dial_result": _port_label(result),
+                "dial_timeout_s": timeout_s,
+                "recorded": bool(record_name),
+            }
+            return result
 
         # NUMBER target (default). `target`/`number` holds the E.164 to reach over the trunk;
         # {{var}} templates (e.g. a number captured into a variable) interpolate first.
         target = self._interp(node.get("target") or node.get("number")).strip()
         if not target:
+            # An empty target is almost always an unresolved {{var}}, not an empty config
+            # field — worth naming loudly, because the caller silently falls through.
+            logger.warning(
+                "interpreter %s: dial node resolved an EMPTY target from %r",
+                self.linkedid, node.get("target") or node.get("number"),
+            )
+            self._event_extra = {"dial_kind": "number", "dial_target": None}
             return _ERROR
         result = await self.ari.dial_number(
             self.channel_id, target, caller_id=caller_id, timeout_s=timeout_s,
             record_name=record_name,
         )
+        # `dial_result` is the outcome the caller actually experienced (rang out, busy, trunk
+        # failure) — paired with the exit event's `ms` it is also the ring duration, which is
+        # what tells "nobody picked up" apart from "the trunk rejected the call".
+        self._event_extra = {
+            "dial_kind": "number",
+            "dial_target": _snap(target),
+            "dial_result": _port_label(result),
+            "dial_timeout_s": timeout_s,
+            "recorded": bool(record_name),
+        }
         return result  # "answered" | "noanswer" | "busy" | "failed"
 
     async def _h_voicemail(self, node: dict) -> Optional[str]:
@@ -436,13 +579,24 @@ class FlowInterpreter:
         media = self._interp(self._media(node) or self._media_key(node, "greeting")) or None
         max_duration = float(node.get("max_duration", _VM_MAX_DURATION_S))
         max_silence = float(node.get("max_silence", _VM_MAX_SILENCE_S))
+        name = self._rec_name("vm")
         await self.ari.voicemail(
             self.channel_id,
             greeting=media,
-            name=self._rec_name("vm"),
+            name=name,
             max_duration_s=max_duration,
             max_silence_s=max_silence,
         )
+        # `recording_name` is the join key back to the `recordings` row, so a voicemail that
+        # left no audio is traceable to the call that produced it. The exit event's `ms` is
+        # the tell: a caller who hangs up as the greeting starts yields a few hundred ms and
+        # no message — indistinguishable, without this, from voicemail never running.
+        self._event_extra = {
+            "recording_name": name,
+            "greeting": bool(media),
+            "max_duration_s": max_duration,
+            "max_silence_s": max_silence,
+        }
         return None  # terminal
 
     async def _h_hangup(self, node: dict) -> Optional[str]:
@@ -632,6 +786,75 @@ class FlowInterpreter:
         if extra:
             flow.update(extra)
         await self.emit(f"flow.node.{ntype}", seq, {"flow": flow})
+
+    async def _emit_exit(
+        self, step: int, node_id: str, ntype: Optional[str], port: Optional[str],
+        routed: str, next_id: Optional[str], ms: int, errored: bool,
+    ) -> None:
+        """Emit ONE `flow.node.exit` per node, recording WHY the call left it.
+
+        The entry event (`flow.node.<type>`) is written BEFORE the handler runs, so it can
+        never carry an outcome — which is exactly the gap that made "did this caller time out
+        or press an unwired digit?" unanswerable from the event log alone. This is the other
+        half: the port the handler chose, where that port routed, how long the node took, and
+        the handler's own detail snapshot (`_event_extra`: menu digits, dial result, …).
+
+        `routed` is the ROUTING DECISION, which is not derivable from the port alone without
+        also reading the version's graph:
+          edge      -> the port was wired; `next` is its target
+          fallback  -> unwired/errored port; `next` is the flow's default_fallback
+          hangup    -> unwired/errored port and NO fallback: the caller was hung up on
+          terminal  -> a voicemail/hangup node ended the call
+
+        Best-effort by construction: instrumentation must never be able to dead-air a caller,
+        so a failed write is logged and swallowed rather than aborting the flow.
+        """
+        try:
+            flow: dict = {
+                "step": step,
+                "node_id": node_id,
+                "node_type": ntype,
+                "linkedid": self.linkedid,
+                "port": _port_label(port),
+                "routed": routed,
+                "next": next_id,
+                "ms": ms,
+            }
+            if errored:
+                flow["errored"] = True
+            if self._event_extra:
+                flow.update(self._event_extra)
+            await self.emit("flow.node.exit", f"{self.linkedid}:{step}:{node_id}:exit", {"flow": flow})
+        except Exception:  # noqa: BLE001 - observability must never break a live call
+            logger.exception("interpreter %s: exit event for '%s' failed", self.linkedid, node_id)
+
+    async def _emit_summary(self, reason: str, ms: int) -> None:
+        """Emit ONE `flow.call.summary` per call: the whole path and how it ended.
+
+        One row per call, so "why did calls end this way today" is a plain GROUP BY instead of
+        a window function over per-node events. `ended` is the reason from `_run_graph`:
+        terminal (a voicemail/hangup node), unrouted_hangup (an unwired port with no fallback
+        — the caller was dropped), max_steps, dangling_edge, empty_graph, no_entry, completed,
+        or error (the interpreter itself raised).
+
+        Best-effort for the same reason as `_emit_exit`, and it runs in `run`'s `finally`, so
+        a call that dies mid-node still leaves a summary describing how far it got.
+        """
+        try:
+            path = list(self._path)
+            flow: dict = {
+                "linkedid": self.linkedid,
+                "ended": reason,
+                "steps": self._steps,
+                "path": path,
+                "terminal_node": self._last_node,
+                "ms": ms,
+            }
+            if self._steps > len(path):
+                flow["path_truncated"] = True
+            await self.emit("flow.call.summary", f"{self.linkedid}:summary", {"flow": flow})
+        except Exception:  # noqa: BLE001 - observability must never break a live call
+            logger.exception("interpreter %s: summary event failed", self.linkedid)
 
     async def _safe_hangup(self) -> None:
         try:

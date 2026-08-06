@@ -234,8 +234,25 @@ def test_outbound_leg_never_starts_a_flow():
     check("inbound entry leg is not outbound", is_outbound_leg(inbound) is False)
 
 
+def test_pseudo_extensions_are_not_attribution_warnings():
+    print("dialplan pseudo-extensions are separated from genuinely unregistered DIDs:")
+    from app.providers.base import looks_like_tracking_number as f
+
+    # Asterisk routes through these; they reach ingestion as the "tracking number" on
+    # secondary channel events for calls that ARE already attributed. Warning on them buried
+    # the real signal 10:1 in production (242 lines in 24h on a 25-call day).
+    for pseudo in ("s", "h", "i", "t", "failed", "unknown", "", None):
+        check(f"pseudo-extension {pseudo!r} is not an attribution warning",
+              f(pseudo) is False)
+    # A real DID with no `numbers` row IS actionable — its calls lose campaign attribution.
+    for did in ("+19543542267", "19543542267", "+1 (954) 354-2267", "12345"):
+        check(f"real DID {did!r} still warns", f(did) is True)
+    check("a 4-digit internal extension is not treated as a DID", f("1234") is False)
+
+
 def main():
     test_vocabulary_is_shared()
+    test_pseudo_extensions_are_not_attribution_warnings()
     test_noop_signature()
     test_full_call_collapses_and_projects()
     test_dedup_suppresses_repeats()

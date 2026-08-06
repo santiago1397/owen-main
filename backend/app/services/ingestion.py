@@ -16,7 +16,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import Call, CallEvent, Caller, Number, Provider
-from app.providers.base import NormalizedCallEvent
+from app.providers.base import NormalizedCallEvent, looks_like_tracking_number
 
 logger = logging.getLogger("ingestion")
 
@@ -36,6 +36,23 @@ async def _get_or_create_provider(db: AsyncSession, name: str) -> Provider:
 
 
 async def _get_or_create_caller(db: AsyncSession, phone: str, seen_at: datetime) -> Caller:
+    # Read before the upsert so an OUT-OF-ORDER arrival is observable. `last_seen_at` below is
+    # written unconditionally, so a call ingested older than one already recorded drags the
+    # caller's "last seen" BACKWARDS — silently, until now. That is not hypothetical: the
+    # reconciler is the primary ingestion path for some providers and provider REST APIs return
+    # recent calls NEWEST-FIRST, so a batch of calls from one caller is replayed in reverse and
+    # the caller ends up with first_seen_at LATER than last_seen_at. 18% of the caller table is
+    # in that state. This line is the detector; it deliberately does not change the write.
+    prior = (
+        await db.execute(select(Caller).where(Caller.phone_number == phone))
+    ).scalar_one_or_none()
+    if prior is not None and prior.last_seen_at is not None and seen_at < prior.last_seen_at:
+        logger.warning(
+            "caller %s ingested OUT OF ORDER: event at %s predates last_seen_at %s by %.0fs — "
+            "last_seen_at will regress (first_seen_at/last_seen_at have no monotonic guard)",
+            phone, seen_at.isoformat(), prior.last_seen_at.isoformat(),
+            (prior.last_seen_at - seen_at).total_seconds(),
+        )
     stmt = (
         pg_insert(Caller)
         .values(phone_number=phone, first_seen_at=seen_at, last_seen_at=seen_at, total_calls=0)
@@ -83,7 +100,11 @@ async def ingest_status_event(
             )
         number = (await db.execute(stmt)).scalar_one_or_none()
         if number is None:
-            logger.warning(
+            # A real-looking DID with no `numbers` row is an actionable attribution gap; a
+            # dialplan pseudo-extension is not. See looks_like_tracking_number.
+            real_did = looks_like_tracking_number(tracking_number)
+            logger.log(
+                logging.WARNING if real_did else logging.DEBUG,
                 "ingest_status_event: no registered Number for tracking=%s dir=%s (provider=%s, "
                 "call_sid=%s) — call will have no campaign attribution",
                 tracking_number, evt.direction, provider_name, evt.provider_call_sid,

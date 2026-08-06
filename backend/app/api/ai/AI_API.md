@@ -218,6 +218,47 @@ It returns **two separate lists**, and you should report both:
 `degraded` means something needs an engineer. An empty `problems` list with a non-empty
 `needs_attention` means the system is fine and somebody is losing leads.
 
+### `GET /api/ai/flows/outcomes` — what the IVR did with callers *(scope: `read`)*
+
+| param | meaning |
+|---|---|
+| `period` / `date_from` / `date_to` | the window, as everywhere else |
+| `flow` | restrict to one flow by exact name |
+
+Inbound calls on BulkVS DIDs are answered by a **call flow** (an IVR graph: greeting → menu →
+dial / voicemail / hangup). This endpoint reports where callers actually went.
+
+The number to lead with is **`data.dropped`**. A "dropped" call is one whose flow ended in
+`unrouted_hangup` — the caller hit a port that was unwired (or errored) on a flow with no
+`default_fallback`, so the interpreter hung up on them instead of routing to voicemail or an
+operator. **A dropped caller is a `completed` call everywhere else in OWEN**: normal status,
+normal CDR, normal dashboard row. This endpoint is the only place the loss is visible.
+
+`menu_outcomes` separates the two ways a menu loses a caller, which look identical in every
+other view but need opposite fixes:
+
+- **`port: "timeout"`** — the caller heard the whole prompt and pressed nothing. Usually the
+  prompt is long relative to the node's `timeout_s`, or the options don't suit the caller.
+- **`port: "invalid"`** — the caller pressed a key the menu doesn't wire up.
+
+`routed` on each row says what happened next: `edge` (a wired target), `fallback` (the flow's
+default_fallback), `hangup` (nothing wired and no fallback — the caller was dropped),
+`terminal` (a voicemail/hangup node).
+
+Junk/short-call filtering is deliberately **not** applied: a caller the IVR hangs up on after
+six seconds is a short call by definition, so excluding them would hide the very thing being
+measured. Numbers here will therefore read higher than the dashboard.
+
+> **Not retroactive.** These events are written by the flow interpreter as of this
+> instrumentation. A window reaching before it deployed under-counts, and zero dropped calls
+> in an old period means *no data*, not *no problem*. The response says so in `notes`.
+
+### `GET /api/ai/flows/calls` — which specific callers *(scope: `read`)*
+
+The drill-down behind the aggregate: individual calls with their node `path`, `ended` reason
+and flow duration. `ended=unrouted_hangup` lists exactly the callers who were dropped — use it
+to verify a flow fix against real calls instead of trusting an aggregate to move.
+
 ### `GET /api/ai/errors` — what is going wrong *(scope: `logs`)*
 
 | param | meaning |

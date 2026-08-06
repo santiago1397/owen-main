@@ -34,7 +34,15 @@ TABLE_NOTES: dict[str, str] = {
         "`is_new_for_campaign` = this caller's first call to that campaign. "
         "`duration_seconds` is NULL while a call is in flight."
     ),
-    "call_events": "Append-only source of truth for call status changes. `calls` is derived from it.",
+    "call_events": (
+        "Append-only source of truth for call status changes; `calls` is derived from it. Also "
+        "carries IVR tracing under `payload->'flow'`: `flow.node.<type>` (a node was entered), "
+        "`flow.node.exit` (the port taken, where it routed, node duration, menu digits, dial "
+        "result), and one `flow.call.summary` per call (`ended` = why the flow stopped, `path` = "
+        "the nodes visited). `ended='unrouted_hangup'` means the caller was HUNG UP ON by an "
+        "unwired port — those calls still read as `completed` in `calls`. Flow events are not "
+        "retroactive; they start when that instrumentation deployed. Prefer /api/ai/flows/outcomes."
+    ),
     "call_analysis": (
         "LLM verdict per call: category, tags, summary, is_spam. Human overrides live in "
         "`category_override`/`is_spam_override` and WIN — always read "

@@ -83,10 +83,19 @@ class FakeAri:
 
 
 class Recorder:
-    """Captures emitted call_events (one per transition) and on_start (the version pin)."""
+    """Captures emitted call_events and on_start (the version pin).
+
+    The interpreter emits THREE kinds of event and the assertions below care about different
+    ones, so they are split here rather than at every call site:
+      - ENTRY  `flow.node.<type>` — one per node entered (the original transition stream);
+      - EXIT   `flow.node.exit`   — one per node left, carrying the port/routing outcome;
+      - SUMMARY `flow.call.summary` — exactly one per call, with the whole path.
+    `entries()` is what "one event per transition" has always meant, so the pre-existing
+    checks keep asserting on it unchanged.
+    """
 
     def __init__(self):
-        self.events = []      # (event_type, provider_sequence, payload)
+        self.events = []      # (event_type, provider_sequence, payload) — every kind
         self.started = 0
 
     async def emit(self, event_type, seq, payload):
@@ -97,11 +106,34 @@ class Recorder:
         self.started += 1
         self._events_before_pin = len(self.events)
 
+    def entries(self):
+        return [e for e in self.events
+                if e[0].startswith("flow.node.") and e[0] != "flow.node.exit"]
+
+    def exits(self):
+        return [e for e in self.events if e[0] == "flow.node.exit"]
+
+    def summaries(self):
+        return [e for e in self.events if e[0] == "flow.call.summary"]
+
+    def summary(self):
+        """The single summary payload's `flow` dict (asserts there is exactly one)."""
+        rows = self.summaries()
+        assert len(rows) == 1, f"expected exactly 1 summary, got {len(rows)}"
+        return rows[0][2]["flow"]
+
+    def exit_for(self, node_id):
+        """The exit payload's `flow` dict for `node_id` (None if the node never exited)."""
+        for e in self.exits():
+            if e[2]["flow"]["node_id"] == node_id:
+                return e[2]["flow"]
+        return None
+
     def types(self):
-        return [e[0] for e in self.events]
+        return [e[0] for e in self.entries()]
 
     def node_ids(self):
-        return [e[2]["flow"]["node_id"] for e in self.events]
+        return [e[2]["flow"]["node_id"] for e in self.entries()]
 
 
 def _run(interp):
@@ -141,11 +173,11 @@ def test_happy_path_pins_and_emits_one_per_transition():
     check("pin happened at StasisStart, before any transition emit", rec._events_before_pin == 0)
     # entry -> hrs(open) -> greet -> menu(1) -> sales(dial answered) -> bye(hangup)
     check("visited nodes in order", rec.node_ids() == ["start", "hrs", "greet", "menu", "sales", "bye"])
-    check("one event per transition (6)", len(rec.events) == 6)
+    check("one entry event per transition (6)", len(rec.entries()) == 6)
     check("event types are flow.node.<type>",
           rec.types() == ["flow.node.entry", "flow.node.hours", "flow.node.play",
                           "flow.node.menu", "flow.node.dial", "flow.node.hangup"])
-    check("dedup key is {linkedid}:{step}:{node_id}", rec.events[0][1] == f"{LINKEDID}:1:start")
+    check("dedup key is {linkedid}:{step}:{node_id}", rec.entries()[0][1] == f"{LINKEDID}:1:start")
     check("entry answered the channel", ari.ops()[0] == "answer")
     check("play node with record modifier recorded then played",
           ("record", CHAN, f"{LINKEDID}-play-1") in ari.calls and ("play", CHAN, "sound:welcome") in ari.calls)
@@ -347,7 +379,7 @@ def test_set_vars_interpolation_and_snapshot():
     check("visited set_vars then play then bye", rec.node_ids() == ["start", "setv", "greet", "bye"])
     check("play prompt interpolated (unknown var -> empty)",
           ("play", CHAN, "Hi +13055550123, you are caller 7. ") in ari.calls)
-    setv_evt = rec.events[1]
+    setv_evt = rec.entries()[1]
     check("set_vars event snapshots names+values",
           setv_evt[2]["flow"].get("vars_set") == {"who": "+13055550123", "n": "7"})
     check("non-string literal stored as-is", interp.variables["n"] == 7)
@@ -365,7 +397,7 @@ def test_unset_vars_removes_names():
     }
     _, rec, interp = _flow_of({"variables": {"a": "1", "b": "2"}}, g)
     check("'a' removed, 'b' kept", "a" not in interp.variables and interp.variables.get("b") == "2")
-    check("event lists removed names only", rec.events[1][2]["flow"].get("vars_unset") == ["a"])
+    check("event lists removed names only", rec.entries()[1][2]["flow"].get("vars_unset") == ["a"])
 
 
 def _conditions_graph(rows):
@@ -397,7 +429,7 @@ def test_conditions_routing_and_gather_digits():
     check("menu set gather.digits", interp.variables.get("gather.digits") == "1")
     check("second row matched -> port m2 -> two",
           rec.node_ids() == ["start", "menu", "cond", "two"])
-    cond_evt = rec.events[2][2]["flow"]
+    cond_evt = rec.entries()[2][2]["flow"]
     check("event snapshots matched row + port + actual",
           cond_evt.get("matched_row") == 1 and cond_evt.get("port") == "m2"
           and cond_evt.get("actual") == "1")
@@ -433,7 +465,7 @@ def test_send_sms_fire_and_forget():
     check("sender got interpolated to (default {{caller_number}}) + body",
           sent == [("+13055550123", "Thanks +13055550123!")])
     check("default port taken -> bye", rec.node_ids() == ["start", "sms", "bye"])
-    check("event snapshots to/body", rec.events[1][2]["flow"].get("sms_to") == "+13055550123")
+    check("event snapshots to/body", rec.entries()[1][2]["flow"].get("sms_to") == "+13055550123")
 
     async def boom(to, body):
         raise RuntimeError("carrier down")
@@ -476,7 +508,7 @@ def test_request_node_success_failure_and_dot_path():
     check("2xx -> success; dot-path condition matched",
           rec.node_ids() == ["start", "req", "cond", "ok"])
     check("request.status stored", interp.variables.get("request.status") == 200)
-    check("request event snapshots status", rec.events[1][2]["flow"].get("request_status") == 200)
+    check("request event snapshots status", rec.entries()[1][2]["flow"].get("request_status") == 200)
 
     async def http_500(method, url, headers, body):
         return 500, {"error": "boom"}
@@ -523,8 +555,178 @@ def test_evaluate_hours_pure():
     check("no schedule -> fail open", evaluate_hours({"type": "hours"}, closed_now, "UTC") is True)
 
 
+def test_exit_events_record_port_and_routing():
+    print("exit events record the port taken, where it routed, and how long the node took:")
+    ari = FakeAri(digit="1", dial_result="answered")
+    rec = Recorder()
+    # Deterministic monotonic: every call advances 0.25s, so `ms` is assertable.
+    ticks = iter([i * 0.25 for i in range(200)])
+    interp = FlowInterpreter(graph=_graph(), channel_id=CHAN, ari=ari, emit=rec.emit,
+                             linkedid=LINKEDID, now=ALWAYS_OPEN, on_start=rec.pin,
+                             monotonic=lambda: next(ticks))
+    _run(interp)
+
+    check("one exit event per node entered (6)", len(rec.exits()) == 6)
+    check("exit dedup key is {linkedid}:{step}:{node_id}:exit",
+          rec.exits()[0][1] == f"{LINKEDID}:1:start:exit")
+    menu = rec.exit_for("menu")
+    check("menu exit records the digit as its port", menu["port"] == "1")
+    check("menu exit records the wired target it routed to",
+          menu["routed"] == "edge" and menu["next"] == "sales")
+    check("menu exit snapshots the digits pressed", menu["digits"] == "1")
+    check("menu exit records the options the caller COULD press", menu["options"] == ["1", "2"])
+    dial = rec.exit_for("sales")
+    check("dial exit records target and result",
+          dial["dial_target"] == "+13055550000" and dial["dial_result"] == "answered")
+    check("dial exit records that the bridge was recorded", dial["recorded"] is True)
+    check("terminal node exit is marked terminal", rec.exit_for("bye")["routed"] == "terminal")
+    check("node duration is measured from the injected monotonic", menu["ms"] == 250)
+    hrs = rec.exit_for("hrs")
+    check("hours exit records open + tz", hrs["hours_open"] is True and hrs["hours_tz"])
+
+
+def test_menu_timeout_is_distinguishable_from_invalid_digit():
+    print("menu timeout vs unwired digit are distinguishable from the exit event alone:")
+    # This is the production case that motivated the exit event: a live flow whose menu
+    # timeout/invalid ports both pointed at a hangup node, so every dropped caller looked
+    # identical in the event log and the reason was only recoverable from the graph JSON.
+    g = {
+        "nodes": {
+            "start": {"type": "entry", "next": {"default": "menu"}},
+            "menu": {"type": "menu", "media": "sound:ivr",
+                     "next": {"1": "bye", "invalid": "drop", "timeout": "drop"}},
+            "drop": {"type": "hangup"},
+            "bye": {"type": "hangup"},
+        },
+    }
+    rec = Recorder()
+    interp = FlowInterpreter(graph=g, channel_id=CHAN, ari=FakeAri(digit=None), emit=rec.emit,
+                             linkedid=LINKEDID, now=ALWAYS_OPEN)
+    _run(interp)
+    menu = rec.exit_for("menu")
+    check("no input -> port 'timeout'", menu["port"] == "timeout")
+    check("no input -> digits null (not empty string)", menu["digits"] is None)
+    check("timeout routed to the wired drop node", menu["next"] == "drop")
+    check("the timeout the caller was given is recorded", menu["timeout_s"] == 5)
+
+    rec2 = Recorder()
+    interp2 = FlowInterpreter(graph=g, channel_id=CHAN, ari=FakeAri(digit="9"), emit=rec2.emit,
+                              linkedid=LINKEDID, now=ALWAYS_OPEN)
+    _run(interp2)
+    menu2 = rec2.exit_for("menu")
+    check("unwired digit -> port 'invalid'", menu2["port"] == "invalid")
+    check("unwired digit is preserved in the payload", menu2["digits"] == "9")
+    check("same terminal node, DIFFERENT recorded reason", menu["port"] != menu2["port"])
+
+
+def test_call_summary_records_path_and_end_reason():
+    print("flow.call.summary records the whole path and why the call ended:")
+    ari = FakeAri(digit="1", dial_result="answered")
+    rec = Recorder()
+    interp = FlowInterpreter(graph=_graph(), channel_id=CHAN, ari=ari, emit=rec.emit,
+                             linkedid=LINKEDID, now=ALWAYS_OPEN, on_start=rec.pin)
+    _run(interp)
+    s = rec.summary()
+    check("path is the nodes in order", s["path"] == ["start", "hrs", "greet", "menu", "sales", "bye"])
+    check("terminal node is the last one entered", s["terminal_node"] == "bye")
+    check("step count matches the path", s["steps"] == 6)
+    check("ended on a terminal node", s["ended"] == "terminal")
+    check("summary dedup key is one-per-call", rec.summaries()[0][1] == f"{LINKEDID}:summary")
+
+
+def test_summary_names_the_caller_dropped_case():
+    print("a caller dropped by an unwired port with no fallback is named in the summary:")
+    g = {
+        "nodes": {
+            "start": {"type": "entry", "next": {"default": "menu"}},
+            "menu": {"type": "menu", "next": {}},  # no options, no timeout port, no fallback
+        },
+    }
+    rec = Recorder()
+    interp = FlowInterpreter(graph=g, channel_id=CHAN, ari=FakeAri(digit=None), emit=rec.emit,
+                             linkedid=LINKEDID, now=ALWAYS_OPEN)
+    _run(interp)
+    check("ended reason distinguishes a DROP from a deliberate hangup node",
+          rec.summary()["ended"] == "unrouted_hangup")
+    check("the menu's exit says it hung up rather than routing",
+          rec.exit_for("menu")["routed"] == "hangup")
+    check("no fallback recorded as the next hop", rec.exit_for("menu")["next"] is None)
+
+
+def test_truncated_path_keeps_step_count_and_terminal_node_true():
+    print("a runaway loop truncates the path but not the step count or terminal node:")
+    # A self-referential graph: the interpreter's max_steps guard stops it. The path caps at
+    # _PATH_MAX, so steps/terminal_node must NOT be derived from the path — a 100-hop loop
+    # reported as a tidy 50-step call would hide exactly the pathology worth seeing.
+    g = {
+        "nodes": {
+            "start": {"type": "entry", "next": {"default": "loop"}},
+            "loop": {"type": "play", "media": "sound:x", "next": {"default": "loop"}},
+        },
+    }
+    rec = Recorder()
+    interp = FlowInterpreter(graph=g, channel_id=CHAN, ari=FakeAri(), emit=rec.emit,
+                             linkedid=LINKEDID, now=ALWAYS_OPEN, max_steps=60)
+    _run(interp)
+    s = rec.summary()
+    check("ended on the max_steps guard", s["ended"] == "max_steps")
+    check("path is capped", len(s["path"]) == 50)
+    check("path is flagged as truncated", s.get("path_truncated") is True)
+    check("step count is the TRUE number of hops, not the capped path length",
+          s["steps"] == 60 and s["steps"] > len(s["path"]))
+    check("terminal node is the node it actually ended on", s["terminal_node"] == "loop")
+
+
+def test_summary_is_emitted_even_when_a_node_explodes():
+    print("the summary still lands when the interpreter itself raises:")
+
+    class Exploding(FakeAri):
+        async def answer(self, channel_id):
+            raise RuntimeError("ARI is down")
+
+    rec = Recorder()
+    g = {"nodes": {"start": {"type": "entry", "next": {"default": "bye"}},
+                   "bye": {"type": "hangup"}}}
+    interp = FlowInterpreter(graph=g, channel_id=CHAN, ari=Exploding(), emit=rec.emit,
+                             linkedid=LINKEDID, now=ALWAYS_OPEN)
+    _run(interp)
+    # The node error is caught by the run loop (falls through), so the call still ends
+    # cleanly — but the summary must exist either way, which is the point of the `finally`.
+    check("a summary was emitted", len(rec.summaries()) == 1)
+    check("the failing node's exit is flagged errored", rec.exit_for("start")["errored"] is True)
+    check("the failing node's port renders as 'error', never the raw sentinel",
+          rec.exit_for("start")["port"] == "error")
+
+
+def test_observability_emit_failure_never_breaks_a_call():
+    print("an emit that FAILS on the new events cannot dead-air a call:")
+
+    class FlakyRecorder(Recorder):
+        async def emit(self, event_type, seq, payload):
+            # The new observability events fail; the original transition stream succeeds.
+            if event_type in ("flow.node.exit", "flow.call.summary"):
+                raise RuntimeError("postgres is down")
+            await super().emit(event_type, seq, payload)
+
+    ari = FakeAri(digit="1", dial_result="answered")
+    rec = FlakyRecorder()
+    interp = FlowInterpreter(graph=_graph(), channel_id=CHAN, ari=ari, emit=rec.emit,
+                             linkedid=LINKEDID, now=ALWAYS_OPEN)
+    _run(interp)  # must not raise
+    check("the call still ran end to end",
+          rec.node_ids() == ["start", "hrs", "greet", "menu", "sales", "bye"])
+    check("the caller was still connected", "dial" in ari.ops())
+
+
 def main():
     test_happy_path_pins_and_emits_one_per_transition()
+    test_exit_events_record_port_and_routing()
+    test_menu_timeout_is_distinguishable_from_invalid_digit()
+    test_call_summary_records_path_and_end_reason()
+    test_summary_names_the_caller_dropped_case()
+    test_truncated_path_keeps_step_count_and_terminal_node_true()
+    test_summary_is_emitted_even_when_a_node_explodes()
+    test_observability_emit_failure_never_breaks_a_call()
     test_menu_dtmf_routes_to_correct_port()
     test_unwired_digit_falls_to_default_fallback()
     test_errored_node_falls_to_default_fallback()
