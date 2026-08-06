@@ -12,7 +12,13 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Web } from "sip.js";
 import { api } from "../api";
 import { clearActiveCall, setActiveCall } from "./activeCall";
-import { applySink, micConstraints, startRingtone, stopRingtone } from "./audioDevices";
+import {
+  applySink,
+  micConstraints,
+  pruneStaleAudioPrefs,
+  startRingtone,
+  stopRingtone,
+} from "./audioDevices";
 import { consumeOutboundIntent } from "./outboundIntent";
 
 export type SoftphoneStatus =
@@ -99,6 +105,10 @@ export function useSoftphone() {
     if (userRef.current) return;
     patch({ status: "registering", error: null });
     try {
+      // The media constraints below are captured ONCE, here, for the life of the registration —
+      // so a saved mic that has since disappeared would poison every call. Forget stale device
+      // preferences first (see pruneStaleAudioPrefs).
+      await pruneStaleAudioPrefs();
       const creds: Credentials = await api.webrtcCredentials();
       const aor = `sip:${creds.sip.username}@${creds.sip.domain}`;
       const options: Web.SimpleUserOptions = {
@@ -151,8 +161,22 @@ export function useSoftphone() {
                   muted: false,
                 });
                 return;
-              } catch {
-                /* fall through to the normal incoming handling */
+              } catch (e: any) {
+                // The answer FAILED (typically the microphone: SIP.js turns any session-
+                // description error into a 480 and the leg is already dead). Do NOT fall
+                // through to the incoming-call popup — this is our own outgoing call, and
+                // showing "Incoming call" for the number we just dialed hid a real mic
+                // failure behind a phantom inbound call for an entire afternoon. Report it.
+                clearActiveCall();
+                patch({
+                  status: idleStatus(),
+                  incoming: null,
+                  peer: null,
+                  answeredAt: null,
+                  muted: false,
+                  error: `Could not connect your call — ${String(e?.message || e)}. Check the microphone permission and Audio settings.`,
+                });
+                return;
               }
             }
             // Stamp the "line" (the dialed DID) for the in-call panel header; the channel id for

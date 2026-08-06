@@ -1,4 +1,5 @@
 import { setActiveCall } from "./lib/activeCall";
+import { ensureMicReady } from "./lib/audioDevices";
 import { clearOutboundIntent, markOutboundIntent } from "./lib/outboundIntent";
 
 export const API_BASE = (import.meta as any).env?.VITE_API_BASE || "";
@@ -386,6 +387,11 @@ export const api = {
   // one place every caller goes through — so the softphone auto-answers that leg into the
   // in-call UI instead of popping "Incoming call" for the number we just dialed.
   outboundCall: async (callee_number: string, from_number: string) => {
+    // PRE-FLIGHT THE MICROPHONE FIRST. Because the backend rings us before it dials the callee,
+    // a mic we cannot open kills the call at our own leg (SIP.js answers the INVITE with a 480)
+    // and the callee never rings at all. Checking here — the one choke point every call site
+    // goes through — turns that into a plain error in the dialer before anything is placed.
+    await ensureMicReady();
     markOutboundIntent();
     try {
       const res = await request("/api/telephony/outbound/call", {

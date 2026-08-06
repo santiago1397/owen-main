@@ -33,9 +33,72 @@ export function setAudioPref(kind: AudioKind, deviceId: string) {
 }
 
 // getUserMedia audio constraints honoring the saved mic. Read by softphone.ts at connect.
+//
+// `ideal`, NEVER `exact`: device ids are not stable forever — they rotate when the browser's
+// site data is cleared and vanish when the mic is unplugged or a profile changes. With `exact`
+// a stale saved id makes getUserMedia throw OverconstrainedError, which failed SIP.js's
+// answer() and killed the call with a 480 (a real outage: every outbound call died ~100ms
+// after ringing). With `ideal` the browser silently falls back to the default mic instead.
 export function micConstraints(): MediaTrackConstraints | boolean {
   const id = getAudioPref("mic");
-  return id ? { deviceId: { exact: id } } : true;
+  return id ? { deviceId: { ideal: id } } : true;
+}
+
+/**
+ * Drop any saved device preference whose device no longer exists, so the picker doesn't keep
+ * showing (and re-applying) a phantom device. Best-effort and SAFE: enumerateDevices returns
+ * blank ids before mic permission is granted, so a kind with no readable ids is left alone
+ * rather than wrongly cleared.
+ */
+export async function pruneStaleAudioPrefs(): Promise<void> {
+  try {
+    const list = await navigator.mediaDevices.enumerateDevices();
+    const idsFor = (kind: MediaDeviceKind) =>
+      list.filter((d) => d.kind === kind).map((d) => d.deviceId).filter(Boolean);
+    const check: [AudioKind, MediaDeviceKind][] = [
+      ["mic", "audioinput"],
+      ["speaker", "audiooutput"],
+      ["ringtone", "audiooutput"],
+    ];
+    for (const [pref, kind] of check) {
+      const saved = getAudioPref(pref);
+      const ids = idsFor(kind);
+      if (saved && ids.length && !ids.includes(saved)) setAudioPref(pref, "");
+    }
+  } catch {
+    /* enumeration unavailable — leave preferences untouched */
+  }
+}
+
+/**
+ * Pre-flight the microphone BEFORE asking the backend to place an outbound call. The backend
+ * rings this browser first, so a mic we cannot open means the call dies at our own leg with a
+ * SIP 480 and never reaches the callee. Failing here instead turns a phantom "incoming call"
+ * popup into a plain, actionable error in the dialer. Throws with a human message on failure.
+ */
+export async function ensureMicReady(): Promise<void> {
+  await pruneStaleAudioPrefs();
+  let stream: MediaStream | null = null;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({
+      audio: micConstraints() as unknown as boolean,
+    });
+  } catch (e: any) {
+    const name = String(e?.name || "");
+    if (name === "NotAllowedError" || name === "SecurityError") {
+      throw new Error(
+        "Microphone access is blocked — allow it in your browser's site settings, then call again.",
+      );
+    }
+    if (name === "NotFoundError" || name === "OverconstrainedError") {
+      throw new Error(
+        "No usable microphone was found — plug one in or pick another under Audio settings.",
+      );
+    }
+    throw new Error(`Microphone unavailable (${name || e}) — the call was not placed.`);
+  } finally {
+    stream?.getTracks().forEach((t) => t.stop());
+  }
 }
 
 // Route an <audio> element to the saved output device. No-op if setSinkId is unsupported or
@@ -151,6 +214,9 @@ export function useAudioDevices() {
     } catch {
       setError("Microphone access is blocked — allow it to pick devices.");
     }
+    // Self-heal: a saved device that no longer exists is forgotten as soon as the picker is
+    // opened, so the selection can never drift out of sync with the hardware.
+    await pruneStaleAudioPrefs();
     try {
       const list = await navigator.mediaDevices.enumerateDevices();
       const inputs = list
