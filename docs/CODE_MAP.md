@@ -326,7 +326,7 @@ baked in) and serves it with nginx on `:3333`. `nginx.conf` does SPA fallback
 ## Deploy & ops
 
 - **Topology** (`docker-compose.prod.yml`): three containers — `app` (uvicorn, Traefik `api.${APP_DOMAIN}`), `worker` (single replica, no inbound routing), `frontend` (nginx, Traefik `${APP_DOMAIN}`). Postgres is **native on the host**, reached via `host.docker.internal` + `extra_hosts: host-gateway`. `expose:` only, never `ports:`. Recordings on a named volume.
-- **Deploy**: `make deploy` → `scripts/deploy.sh` → ssh to VPS (`callmon` alias, or `dispatch` per the deploy memo), `git merge --ff-only origin/main`, rebuild, `up -d`, poll `/health`. Migrations self-apply at startup behind the advisory lock.
+- **Deploy**: `make deploy` → `scripts/deploy.sh` → ssh to VPS via the `owen-main` alias (the project's home on `194.140.199.220` since the 2026-08-11 migration; older deploy memos reference the legacy `callmon`/`dispatch` aliases), `git merge --ff-only origin/main`, rebuild, `up -d`, poll `/health`. Migrations self-apply at startup behind the advisory lock.
 - **Server path**: `/opt/santiagoproperties/owen-main`. Secrets in `.env.prod` (chmod 600, git-ignored).
 - **Gotcha**: any bare `docker compose` command **must** include `--env-file .env.prod` or Traefik's `Host()` labels resolve empty and break API routing. The Makefile/`deploy.sh` always pass it.
 - **Admin CLI**: `make create-admin e=… p=…`; `make manage args='add-campaign …'` / `add-number …` / `list` / `reconcile-now`.

@@ -1,4 +1,4 @@
-SSH_ALIAS ?= callmon
+SSH_ALIAS ?= owen-main
 VPS_REPO_PATH ?= /opt/santiagoproperties/owen-main
 COMPOSE = docker compose -f docker-compose.prod.yml --env-file .env.prod
 

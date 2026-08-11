@@ -97,8 +97,8 @@ make deploy                       # ff-only pull, build, up, healthcheck
 3. **DNS:** point **both** `api.<APP_DOMAIN>` and `app.<APP_DOMAIN>` at the server before first
    deploy (ACME needs them). Frontend is served at `app.<APP_DOMAIN>`, API at `api.<APP_DOMAIN>`.
    Set `CORS_ORIGINS=https://app.<APP_DOMAIN>` in `.env.prod`.
-4. **SSH alias `callmon`** in your local `~/.ssh/config`.
-5. **On the server:** clone to `/opt/owen/callmon`, `cp .env.prod.example .env.prod`, fill secrets
+4. **SSH alias `owen-main`** in your local `~/.ssh/config`.
+5. **On the server:** clone to `/opt/santiagoproperties/owen-main`, `cp .env.prod.example .env.prod`, fill secrets
    (`SECRET_KEY`=`openssl rand -hex 32`, DB password, `TWILIO_ACCOUNT_SID`/`TWILIO_AUTH_TOKEN`,
    `APP_DOMAIN`), `chmod 600 .env.prod`.
 6. `make deploy` → migrations self-apply at startup; `/health` gates readiness.
