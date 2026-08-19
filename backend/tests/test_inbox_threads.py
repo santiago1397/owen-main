@@ -40,16 +40,17 @@ def check(name, cond):
 
 
 def msg(cid, minutes, direction="inbound", body="hi", number_id="n1", phone="+1555",
-        sms_enabled=True, campaign="C-1", caller_number="+1999"):
+        sms_enabled=True, campaign="C-1", caller_number="+1999", name="SMS line"):
     return NS(caller_id=cid, direction=direction, body=body, received_at=at(minutes),
-              number_id=number_id, number_phone=phone, sms_enabled=sms_enabled,
+              number_id=number_id, number_phone=phone, number_name=name,
+              sms_enabled=sms_enabled,
               sms_campaign_id=campaign, caller_number=caller_number)
 
 
 def call(cid, minutes, direction="inbound", status="completed", number_id="n2", phone="+1666",
-         caller_number="+1999"):
+         caller_number="+1999", name="Roofing FL"):
     return NS(caller_id=cid, direction=direction, status=status, started_at=at(minutes),
-              duration_seconds=30, number_id=number_id, number_phone=phone,
+              duration_seconds=30, number_id=number_id, number_phone=phone, number_name=name,
               sms_enabled=False, sms_campaign_id=None, caller_number=caller_number)
 
 
@@ -65,6 +66,16 @@ def test_merge():
     check("counts split by kind", a.message_count == 2 and a.call_count == 1)
     check("newest activity wins the preview (call at +20)", a.last_kind == "call")
     check("sticky DID = DID of newest interaction", a.sticky.number_id == "n2")
+    check("sticky DID carries the friendly name we gave that number",
+          a.sticky.friendly_name == "Roofing FL")
+    check("a DID with no friendly name leaves it None (UI shows the bare number)",
+          merge_threads([], [call("c", 1, name=None)])[0].sticky.friendly_name is None)
+    check("a row that predates the number_name column still merges",
+          merge_threads([], [NS(caller_id="d", direction="inbound", status="completed",
+                                started_at=at(1), duration_seconds=5, number_id="n9",
+                                number_phone="+1222", sms_enabled=False,
+                                sms_campaign_id=None, caller_number="+1999")]
+                        )[0].sticky.friendly_name is None)
     check("rows without caller_id are skipped",
           len(merge_threads([msg(None, 1)], [])) == 0)
 

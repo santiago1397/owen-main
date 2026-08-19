@@ -27,9 +27,9 @@ from app.services import sms
 # ---------------------------------------------------------------------------------------
 # Inputs (duck-typed). Rows only need the attributes below.
 #   message rows: caller_id, direction, body, received_at, number_id, number_phone,
-#                 sms_enabled, sms_campaign_id, caller_number
+#                 number_name, sms_enabled, sms_campaign_id, caller_number
 #   call rows:    caller_id, direction, status, started_at, duration_seconds, number_id,
-#                 number_phone, sms_enabled, sms_campaign_id, caller_number
+#                 number_phone, number_name, sms_enabled, sms_campaign_id, caller_number
 # ---------------------------------------------------------------------------------------
 
 
@@ -41,6 +41,8 @@ class DidRef:
     phone_number: str | None = None
     sms_enabled: bool = False
     sms_campaign_id: str | None = None
+    # Last field on purpose: callers (and the tests) construct DidRef positionally.
+    friendly_name: str | None = None
 
 
 @dataclass
@@ -109,6 +111,7 @@ def merge_threads(
                 phone_number=getattr(r, "number_phone", None),
                 sms_enabled=bool(getattr(r, "sms_enabled", False)),
                 sms_campaign_id=getattr(r, "sms_campaign_id", None),
+                friendly_name=getattr(r, "number_name", None),
             )
         return t
 

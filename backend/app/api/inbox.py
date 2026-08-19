@@ -72,6 +72,7 @@ def _msg_stmt():
             Message.received_at,
             Caller.phone_number.label("caller_number"),
             Number.phone_number.label("number_phone"),
+            Number.friendly_name.label("number_name"),
             Number.sms_enabled.label("sms_enabled"),
             Number.sms_campaign_id.label("sms_campaign_id"),
         )
@@ -94,6 +95,7 @@ def _call_stmt():
             Call.duration_seconds,
             Caller.phone_number.label("caller_number"),
             Number.phone_number.label("number_phone"),
+            Number.friendly_name.label("number_name"),
             Number.sms_enabled.label("sms_enabled"),
             Number.sms_campaign_id.label("sms_campaign_id"),
         )
@@ -125,12 +127,17 @@ async def _default_did(db: AsyncSession) -> DidRef | None:
         phone_number=number.phone_number,
         sms_enabled=number.sms_enabled,
         sms_campaign_id=number.sms_campaign_id,
+        friendly_name=number.friendly_name,
     )
 
 
 def _did_out(d: DidRef | None) -> dict | None:
     return (
-        {"number_id": d.number_id, "phone_number": d.phone_number}
+        {
+            "number_id": d.number_id,
+            "phone_number": d.phone_number,
+            "friendly_name": d.friendly_name,
+        }
         if d and d.number_id
         else None
     )
@@ -252,6 +259,7 @@ async def get_thread(
             "media_urls": r["media_urls"] or [],
             "at": r["received_at"],
             "our_number": r["number_phone"],
+            "our_name": r["number_name"],
         }
         for r in msg_rows
     ] + [
@@ -263,6 +271,7 @@ async def get_thread(
             "duration_seconds": r["duration_seconds"],
             "at": r["started_at"],
             "our_number": r["number_phone"],
+            "our_name": r["number_name"],
             "recording_id": recordings.get(r["id"]),
         }
         for r in call_rows
@@ -627,6 +636,7 @@ async def send(
                     phone_number=newest["number_phone"],
                     sms_enabled=bool(newest["sms_enabled"]),
                     sms_campaign_id=newest["sms_campaign_id"],
+                    friendly_name=newest["number_name"],
                 )
         chosen, via_fallback, reason = resolve_sms_from(sticky, await _default_did(db))
         if chosen is None:

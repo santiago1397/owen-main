@@ -36,7 +36,11 @@ import { useSoftphoneContext } from "../lib/softphoneContext";
 // /messages page (per-number threads, all providers) is untouched. Polls every 5s.
 const POLL_MS = 5000;
 
-type DidOut = { number_id: string; phone_number: string | null } | null;
+type DidOut = {
+  number_id: string;
+  phone_number: string | null;
+  friendly_name?: string | null; // the label we gave this DID in Numbers, shown after it
+} | null;
 
 type Thread = {
   caller_id: string;
@@ -73,6 +77,7 @@ type TimelineItem = {
   duration_seconds?: number | null;
   at: string | null;
   our_number: string | null;
+  our_name?: string | null;
   recording_id?: string | null;
 };
 
@@ -102,6 +107,15 @@ function fmtPhone(p: string | null | undefined): string {
     return `(${d.slice(1, 4)}) ${d.slice(4, 7)}-${d.slice(7)}`;
   if (d.length === 10) return `(${d.slice(0, 3)}) ${d.slice(3, 6)}-${d.slice(6)}`;
   return p;
+}
+// One of OUR DIDs as the operator reads it: the number, then the friendly name we gave it
+// in Numbers. Numbers with no name (or legacy/released DIDs the Numbers hub never labelled)
+// degrade to the bare number — never a dangling separator.
+function fmtDid(phone: string | null | undefined, name?: string | null): string {
+  const num = fmtPhone(phone);
+  if (!num) return "";
+  const label = (name || "").trim();
+  return label ? `${num} — ${label}` : num;
 }
 function fmtListTime(iso: string | null): string {
   if (!iso) return "";
@@ -286,6 +300,13 @@ function CallCard({ it }: { it: TimelineItem }) {
         <div className="quo-callmeta">
           <div className="quo-calltitle">{p.title}</div>
           <div className="quo-callsub">{p.subtitle}</div>
+          {/* Which of OUR numbers carried this call. "via" for one they dialed us on,
+              "from" for one we called out on — "via" reads wrong on an outbound leg. */}
+          {it.our_number && (
+            <div className="quo-callsub">
+              {(it.direction === "outbound" ? "from " : "via ") + fmtDid(it.our_number, it.our_name)}
+            </div>
+          )}
         </div>
       </div>
       {it.recording_id && <AudioPlayer recordingId={it.recording_id} />}
@@ -1001,7 +1022,10 @@ function Conversation({
               <div className="muted" style={{ fontSize: 11.5, color: "var(--q-muted)" }}>
                 {fmtPhone(thread.contact_number)}
                 {thread.sticky_number?.phone_number
-                  ? ` · via ${fmtPhone(thread.sticky_number.phone_number)}`
+                  ? ` · via ${fmtDid(
+                      thread.sticky_number.phone_number,
+                      thread.sticky_number.friendly_name
+                    )}`
                   : ""}
               </div>
             </div>
