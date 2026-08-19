@@ -40,7 +40,10 @@ TABLE_NOTES: dict[str, str] = {
         "`flow.node.exit` (the port taken, where it routed, node duration, menu digits, dial "
         "result), and one `flow.call.summary` per call (`ended` = why the flow stopped, `path` = "
         "the nodes visited). `ended='unrouted_hangup'` means the caller was HUNG UP ON by an "
-        "unwired port — those calls still read as `completed` in `calls`. Flow events are not "
+        "unwired port — those calls still read as `completed` in `calls`; `ended='dial_completed'` "
+        "is the healthy opposite (a dial answered, nothing wired after it). `flow.node.exit` on a "
+        "dial also carries who hung up (`dial_ended_by`), the Q.850 (`dial_end_cause`) and how "
+        "fast the far end answered (`dial_answer_ms`). Flow events are not "
         "retroactive; they start when that instrumentation deployed. Prefer /api/ai/flows/outcomes."
     ),
     "call_analysis": (

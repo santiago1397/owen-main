@@ -126,6 +126,10 @@ class AriControl(Protocol):
         max_duration_s: float, max_silence_s: float,
     ) -> None: ...
     async def hangup(self, channel_id: str) -> None: ...
+    # Post-mortem of the dial that just returned: which leg hung up first, its Q.850 cause,
+    # how fast the far end answered. OPTIONAL on this protocol — a client that omits it dials
+    # exactly the same, its dial events just carry no forensics (see `_dial_diagnostics`).
+    def pop_dial_diagnostics(self) -> dict: ...
 
 
 # emit(event_type, provider_sequence, payload) -> awaitable. One call per node transition.
@@ -375,6 +379,15 @@ class FlowInterpreter:
                 current, fallback = self._fall(fallback)
                 if current is None:
                     await self._safe_hangup()
+                    # A dial that ANSWERED already served the caller: the two legs were
+                    # bridged and talked, and the flow simply has nothing wired after it —
+                    # which is the normal shape of a plain redirect flow. That is NOT a
+                    # dropped caller, and counting it as one made every WORKING forward look
+                    # like a drop in /api/ai/flows (`dropped` = calls ended unrouted_hangup),
+                    # burying the real ones. `unrouted_hangup` keeps its meaning: the caller
+                    # hit a dead end WITHOUT being connected to anything.
+                    if ntype == "dial" and port == "answered":
+                        return "dial_completed"
                     return "unrouted_hangup"
 
         await self._safe_hangup()
@@ -540,6 +553,7 @@ class FlowInterpreter:
                 "dial_result": _port_label(result),
                 "dial_timeout_s": timeout_s,
                 "recorded": bool(record_name),
+                **self._dial_diagnostics(),
             }
             return result
 
@@ -568,8 +582,55 @@ class FlowInterpreter:
             "dial_result": _port_label(result),
             "dial_timeout_s": timeout_s,
             "recorded": bool(record_name),
+            **self._dial_diagnostics(),
         }
+        self._warn_if_ports_unreachable(node, target)
         return result  # "answered" | "noanswer" | "busy" | "failed"
+
+    def _warn_if_ports_unreachable(self, node: dict, target: str) -> None:
+        """Warn when this dial's call-coverage ports CANNOT fire for this destination.
+
+        A CPaaS-hosted number (Twilio/Bandwidth, and so Quo/OpenPhone, Google Voice, a hosted
+        PBX) returns 200 OK within a second to run its own app logic, then rings the human
+        behind in-band ringback. Asterisk sees an ANSWERED call immediately, so the node's ring
+        timeout never expires and its `noanswer`/`busy` ports are dead wire — while the
+        operator believes they are the path to voicemail or the next number in the list.
+
+        Nothing distinguishes that from a real pickup at the SIP layer, so this cannot be fixed
+        — only surfaced. WARNING level so it lands in /api/ai/errors, and only when a coverage
+        port is actually wired, so a plain redirect flow stays quiet."""
+        extra = self._event_extra or {}
+        if not extra.get("dial_answer_platform"):
+            return
+        edges = node.get("next") if isinstance(node.get("next"), dict) else {}
+        unreachable = [p for p in ("noanswer", "busy") if edges.get(p)]
+        if not unreachable:
+            return
+        logger.warning(
+            "interpreter %s: dial to %s was answered by the DESTINATION PLATFORM in %sms, not "
+            "by a person — its %s port(s) can never fire for this target, so that call "
+            "coverage will never run. Route coverage on the far end instead.",
+            self.linkedid, target, extra.get("dial_answer_ms"), "/".join(unreachable),
+        )
+        self._event_extra["dial_ports_unreachable"] = unreachable
+
+    def _dial_diagnostics(self) -> dict:
+        """The client's post-mortem of the dial that just finished — who hung up, with which
+        Q.850, how fast the far end answered — merged onto the dial node's exit event.
+
+        Resolved defensively (like `play_and_wait`) because `pop_dial_diagnostics` is NOT part
+        of the minimum `AriControl` surface: a client or test fake that does not implement it
+        still dials, it just exits without the forensics. Never raises — a diagnostic must not
+        be able to break a call it is only describing."""
+        pop = getattr(self.ari, "pop_dial_diagnostics", None)
+        if pop is None:
+            return {}
+        try:
+            data = pop()
+        except Exception:  # noqa: BLE001 - diagnostics are never worth failing a node over
+            logger.exception("interpreter %s: dial diagnostics unavailable", self.linkedid)
+            return {}
+        return data if isinstance(data, dict) else {}
 
     async def _h_voicemail(self, node: dict) -> Optional[str]:
         # Real voicemail capture (Ticket 18): greeting -> beep -> record until the caller hangs
@@ -833,9 +894,14 @@ class FlowInterpreter:
 
         One row per call, so "why did calls end this way today" is a plain GROUP BY instead of
         a window function over per-node events. `ended` is the reason from `_run_graph`:
-        terminal (a voicemail/hangup node), unrouted_hangup (an unwired port with no fallback
-        — the caller was dropped), max_steps, dangling_edge, empty_graph, no_entry, completed,
-        or error (the interpreter itself raised).
+        terminal (a voicemail/hangup node), dial_completed (a dial ANSWERED and the flow had
+        nothing wired after it — the normal end of a redirect flow, caller was served),
+        unrouted_hangup (an unwired port with no fallback and the caller was NOT connected to
+        anything — a dropped caller), max_steps, dangling_edge, empty_graph, no_entry,
+        completed, or error (the interpreter itself raised).
+
+        dial_completed and unrouted_hangup were one value until a live redirect flow made the
+        distinction obvious: every successful forward was being counted as a dropped call.
 
         Best-effort for the same reason as `_emit_exit`, and it runs in `run`'s `finally`, so
         a call that dies mid-node still leaves a summary describing how far it got.

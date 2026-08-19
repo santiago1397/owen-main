@@ -186,6 +186,25 @@ async def _pin_flow_version(db, provider_id: int, provider_call_sid: str, fv_id:
     )
 
 
+async def _pin_forwarded_to(db, provider_id: int, provider_call_sid: str, target: str) -> None:
+    """Pin-once: record WHERE a flow forwarded the caller on the call row itself.
+
+    `calls.forwarded_to` existed and was never written by the flow path, so a forwarded call
+    showed a blank destination everywhere it is read (call list, reports, GHL relay) while the
+    number it actually rang sat inside a `flow.node.exit` payload that nothing else joins to.
+    Pinned on the FIRST dial that reached a target, mirroring the flow-version pin: a flow that
+    dials twice (no-answer -> next number) is attributed to where it first sent the caller."""
+    await db.execute(
+        update(Call)
+        .where(
+            Call.provider_id == provider_id,
+            Call.provider_call_sid == provider_call_sid,
+            Call.forwarded_to.is_(None),
+        )
+        .values(forwarded_to=target[:64])
+    )
+
+
 async def _resolve_active_agent_version(db, agent_id) -> Optional[AgentVersion]:
     """The agent's ACTIVE version row, or None if the agent/version is missing (Ticket 11).
     The `ai_agent` node references an agent by id; the specific version is resolved (and
@@ -240,6 +259,22 @@ async def _emit_node_event(
         )
         .on_conflict_do_nothing(index_elements=["call_id", "event_type", "provider_sequence"])
     )
+
+
+def _dial_target_of(event_type: str, payload: dict) -> Optional[str]:
+    """The number a `flow.node.exit` says a dial rang, or None for any other event.
+
+    Operator dials are excluded on purpose: `forwarded_to` is a PSTN destination, and an
+    operator leg is a browser softphone, not somewhere the call left the platform for."""
+    if event_type != "flow.node.exit":
+        return None
+    flow = payload.get("flow") if isinstance(payload, dict) else None
+    if not isinstance(flow, dict) or flow.get("node_type") != "dial":
+        return None
+    if flow.get("dial_kind") != "number":
+        return None
+    target = flow.get("dial_target")
+    return str(target) if target else None
 
 
 async def run_flow_for_stasis(event: dict, ari: AriControl) -> None:
@@ -301,6 +336,11 @@ async def run_flow_for_stasis(event: dict, ari: AriControl) -> None:
     async def emit(event_type: str, provider_sequence: str, payload: dict) -> None:
         async with SessionLocal() as db2:
             await _emit_node_event(db2, provider_id, lid, event_type, provider_sequence, payload)
+            # A dial node's exit is the only place the forward target is known; project it onto
+            # the call row so `calls.forwarded_to` stops being permanently NULL for flow calls.
+            target = _dial_target_of(event_type, payload)
+            if target:
+                await _pin_forwarded_to(db2, provider_id, lid, target)
             await db2.commit()
 
     async def run_agent(node: dict) -> tuple[str, dict]:

@@ -12,6 +12,9 @@ The two event streams this reads are written by app/flows/interpreter.py:
 - `flow.call.summary` — exactly one per call: the node path, the terminal node, and `ended`
   (the reason the flow stopped). `unrouted_hangup` is the one that matters: an unwired or
   errored port with no `default_fallback`, i.e. the caller was DROPPED rather than routed.
+  Do NOT confuse it with `dial_completed`, which is a dial that ANSWERED with nothing wired
+  after it — a redirect flow doing exactly its job. Calls before 2026-08-19 recorded both
+  cases as `unrouted_hangup`, so `dropped` is overstated for windows reaching back further.
 - `flow.node.exit` — one per node left, carrying the port taken, where it routed, how long
   the node took, and node-specific detail (menu digits, dial result, hours open/closed).
 
@@ -50,7 +53,10 @@ NOTE_NOT_RETROACTIVE = (
 NOTE_DROPPED = (
     "'dropped' counts calls whose flow ended in unrouted_hangup — an unwired or errored port "
     "with no default_fallback, so the caller was hung up on rather than routed to voicemail "
-    "or an operator. These still appear as ordinary completed calls everywhere else in OWEN."
+    "or an operator. These still appear as ordinary completed calls everywhere else in OWEN. "
+    "A dial that ANSWERED and had nothing wired after it ends in dial_completed, not "
+    "unrouted_hangup: the caller was connected and talked. Calls placed before 2026-08-19 "
+    "recorded that case as unrouted_hangup too, so 'dropped' over-counts before that date."
 )
 
 # `payload -> 'flow' ->> '<key>'`: the interpreter nests every field under a "flow" object.

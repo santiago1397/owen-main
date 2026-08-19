@@ -88,6 +88,39 @@ _DIAL_CAUSE_PORTS = {17: "busy", 18: "noanswer", 19: "noanswer", 21: "noanswer"}
 # Hard ceiling on awaiting a menu prompt's PlaybackFinished. Only reached if the event is
 # missed (WS blip); the node then falls through to its digit timer rather than hanging.
 _PROMPT_MAX_S = 120.0
+# After the first leg-gone event, keep draining briefly for that same channel's
+# ChannelDestroyed, which is the ONLY event carrying the Q.850 hangup cause. The gone-event
+# order is ChannelHangupRequest -> StasisEnd -> ChannelDestroyed, milliseconds apart, so this
+# almost never waits; the ceiling exists so a missed event can't stall the teardown of a leg
+# the other party may still be holding.
+_HANGUP_CAUSE_GRACE_S = 1.0
+# An outbound leg that reports ANSWERED within this window was almost certainly answered by a
+# PLATFORM, not a person — a CPaaS (Twilio/Bandwidth, and so Quo/OpenPhone, Google Voice, any
+# hosted PBX) returns 200 OK immediately to run its own app logic and then rings the human
+# behind in-band ringback. Diagnosed live: a Quo destination answered the SIP leg in ~1s on
+# three consecutive calls while the human picked up 7-14s later. Consequences worth knowing
+# when reading a dial event:
+#   - `answered` does NOT mean a person; talk time is inflated by the hidden ring.
+#   - the node's ring timeout can never fire for such a target, so its `noanswer` port is
+#     unreachable — do not wire call-coverage logic (voicemail, next-in-list) behind it.
+# This is not fixable at the SIP layer (both cases are an indistinguishable 200 OK); it is
+# recorded so the next investigation starts where this one finished.
+_PLATFORM_ANSWER_MS = 2500
+
+
+def _cause_of(event: dict) -> int | None:
+    """The Q.850 hangup cause on a ChannelDestroyed, or None when absent/unparseable.
+    16 (Normal Clearing) means a party hung up; 34/38/44/etc mean the network did."""
+    try:
+        return int(event.get("cause"))
+    except (TypeError, ValueError):
+        return None
+
+
+def _cause_txt(event: dict) -> str | None:
+    """Asterisk's human label for that cause ("Normal Clearing"), when it sends one."""
+    txt = str(event.get("cause_txt") or "").strip()
+    return txt or None
 
 
 class AsteriskAriClient:
@@ -109,6 +142,35 @@ class AsteriskAriClient:
     def __init__(self) -> None:
         self._base = settings.ari_base_url
         self._auth = (settings.ARI_USERNAME, settings.ARI_PASSWORD)
+        # Diagnostics from the most recent dial, drained by the interpreter onto the dial
+        # node's exit event (see `pop_dial_diagnostics`). One client per call, so this is
+        # never shared across calls.
+        self._last_dial: dict = {}
+
+    def pop_dial_diagnostics(self) -> dict:
+        """Facts about the last dial that no other artifact on this box records, drained
+        (once) onto the dial node's `flow.node.exit` event.
+
+        Everything here answers a question that previously required an hour of forensics
+        across Asterisk CDRs, the ARI warning log, the carrier's rated CDR and the
+        destination platform's own API:
+          - `dial_ended_by`  — "dialed" | "caller": WHICH SIDE hung up first. Asterisk knows
+            this for a few milliseconds and then throws it away, because the outbound leg is
+            filtered out of ingestion (`is_flow_dial_leg`) and its CDR row is closed by the
+            bridge. It was previously only recoverable by INFERENCE from which teardown call
+            happened to log a 404 — see the ARI-client teardown in `dial_number`.
+          - `dial_end_cause`/`_txt` — the Q.850 the losing leg carried (16 Normal Clearing =
+            somebody hung up; 44/38/etc = the network did).
+          - `dial_answer_ms` — how long the far end took to return 200 OK, and with it
+            `dial_answer_platform` (see `_PLATFORM_ANSWER_MS`): the difference between a
+            person picking up and a CPaaS accepting the call to go ring one.
+          - `dial_talk_ms` — bridged duration, which is NOT the caller's talk time when the
+            answer was a platform answer.
+          - `dial_out_channel` — the PJSIP channel name (e.g. PJSIP/bulkvs-00000058), the
+            join key to Asterisk's CDR and to a SIP capture.
+        Empty dict when the last dial never got far enough to learn anything."""
+        out, self._last_dial = self._last_dial, {}
+        return out
 
     async def _client(self) -> httpx.AsyncClient:
         return httpx.AsyncClient(timeout=_CONTROL_TIMEOUT, auth=self._auth)
@@ -273,6 +335,8 @@ class AsteriskAriClient:
         timeout_s = max(1.0, float(timeout_s or 25))
         queue = dtmf.watch(out_id, channel_id)
         bridge_id: str | None = None
+        self._last_dial = {"dial_out_leg": out_id}
+        port = "failed"
         try:
             params = {
                 "endpoint": f"PJSIP/{number}@{settings.BULKVS_TRUNK_NAME}",
@@ -288,13 +352,17 @@ class AsteriskAriClient:
             if not isinstance(created, dict) or not created.get("id"):
                 return "failed"
 
-            port = await self._await_dial_answer(queue, channel_id, out_id, timeout_s)
+            port, answer_info = await self._await_dial_answer(
+                queue, channel_id, out_id, timeout_s
+            )
+            self._last_dial.update(answer_info)
             if port != "answered":
                 return port
 
             bridge_id = await self.create_bridge()
             if not bridge_id:
-                return "failed"
+                port = "failed"
+                return port
             if not await self.add_to_bridge(bridge_id, channel_id, out_id):
                 # The legs are NOT connected. Reporting "answered" here is what turned a
                 # rejected bridge into 25s of dead air on a live call — take the `failed` port
@@ -303,17 +371,26 @@ class AsteriskAriClient:
                     "ARI dial_number: bridge %s rejected both legs for %s; reporting failed",
                     bridge_id, channel_id,
                 )
-                return "failed"
+                port = "failed"
+                return port
             # Record the BRIDGE (both legs), never the channel — a channel recording started
             # before this point makes ARI reject the addChannel above.
             if record_name:
                 await self.record_bridge(bridge_id, record_name)
-            await self._await_bridge_end(queue, channel_id, out_id)
-            return "answered"
+            self._last_dial.update(
+                await self._await_bridge_end(queue, channel_id, out_id)
+            )
+            port = "answered"
+            return port
         except Exception:  # noqa: BLE001 - a dial failure must fall through, never crash the call
             logger.exception("ARI dial_number to %s failed", number)
-            return "failed"
+            port = "failed"
+            return port
         finally:
+            # One greppable line per dial carrying the whole outcome, so `grep linkedid=<x>`
+            # answers "who hung up, when, and why" without a database. The same facts ride the
+            # node's exit event; this is the copy that survives a DB that never got the write.
+            self._log_dial_outcome(channel_id, number, port)
             # Never leak: detach the watcher, tear down the bridge, and drop the outbound
             # leg (DELETE on an already-gone channel is a harmless best-effort 404).
             dtmf.unwatch(queue, out_id, channel_id)
@@ -321,56 +398,135 @@ class AsteriskAriClient:
                 await self.destroy_bridge(bridge_id)
             await self._delete(f"/ari/channels/{out_id}")
 
+    def _log_dial_outcome(self, channel_id: str, target: str, port: str) -> None:
+        """Emit the dial's forensic summary as one `call.dial.outcome` line."""
+        d = self._last_dial
+        clog(
+            logger, "dial.outcome", channel=channel_id, target=target, result=port,
+            ended_by=d.get("dial_ended_by"), cause=d.get("dial_end_cause"),
+            cause_txt=d.get("dial_end_cause_txt"), answer_ms=d.get("dial_answer_ms"),
+            talk_ms=d.get("dial_talk_ms"), out_channel=d.get("dial_out_channel"),
+            platform_answer=d.get("dial_answer_platform"),
+            level=logging.WARNING if port == "failed" else logging.INFO,
+        )
+
     async def _await_dial_answer(
         self, queue: asyncio.Queue, channel_id: str, out_id: str, timeout_s: float
-    ) -> str:
-        """Watch the dialed leg's events until it answers or dies. Returns a dial port.
+    ) -> tuple[str, dict]:
+        """Watch the dialed leg's events until it answers or dies. Returns (dial port, info).
         Answer = the leg's StasisStart (an originate-with-app channel enters Stasis on
-        answer) or a ChannelStateChange to Up, whichever the WS delivers first."""
+        answer) or a ChannelStateChange to Up, whichever the WS delivers first.
+
+        `info` carries how LONG that took (`dial_answer_ms`) and whether it was fast enough to
+        be a platform accepting the call rather than a person picking it up
+        (`dial_answer_platform`, see `_PLATFORM_ANSWER_MS`) — the distinction that makes an
+        `answered` port readable after the fact. On a leg that never answered it carries the
+        cause the far end rejected with, which is otherwise lost with the channel."""
         loop = asyncio.get_running_loop()
-        deadline = loop.time() + timeout_s + _DIAL_ANSWER_GRACE_S
+        started = loop.time()
+        deadline = started + timeout_s + _DIAL_ANSWER_GRACE_S
+
+        def elapsed_ms() -> int:
+            return int((loop.time() - started) * 1000)
+
         while True:
             remaining = deadline - loop.time()
             if remaining <= 0:
-                return "noanswer"
+                return "noanswer", {"dial_ring_ms": elapsed_ms()}
             try:
                 event = await asyncio.wait_for(queue.get(), timeout=remaining)
             except asyncio.TimeoutError:
-                return "noanswer"
+                return "noanswer", {"dial_ring_ms": elapsed_ms()}
             etype = event.get("type")
             ch = event.get("channel") if isinstance(event.get("channel"), dict) else {}
             cid = str(ch.get("id") or "")
             if cid == channel_id:
                 if etype in _LEG_GONE_EVENTS:
-                    return "failed"  # the caller hung up while we were ringing the target
+                    # The caller hung up while we were still ringing the target. Naming it is
+                    # what tells an abandoned call apart from a target that rejected us.
+                    return "failed", {
+                        "dial_ring_ms": elapsed_ms(),
+                        "dial_ended_by": "caller",
+                        "dial_end_stage": "ringing",
+                    }
                 continue
             if cid != out_id:
                 continue
             if etype == "ChannelDestroyed":
-                try:
-                    cause = int(event.get("cause"))
-                except (TypeError, ValueError):
-                    cause = None
-                return _DIAL_CAUSE_PORTS.get(cause, "failed")
-            if etype == "StasisStart":
-                return "answered"
-            if etype == "ChannelStateChange" and str(ch.get("state") or "").lower() == "up":
-                return "answered"
+                cause = _cause_of(event)
+                return _DIAL_CAUSE_PORTS.get(cause, "failed"), {
+                    "dial_ring_ms": elapsed_ms(),
+                    "dial_ended_by": "dialed",
+                    "dial_end_stage": "ringing",
+                    "dial_end_cause": cause,
+                    "dial_end_cause_txt": _cause_txt(event),
+                    "dial_out_channel": str(ch.get("name") or "") or None,
+                }
+            if etype == "StasisStart" or (
+                etype == "ChannelStateChange" and str(ch.get("state") or "").lower() == "up"
+            ):
+                ms = elapsed_ms()
+                return "answered", {
+                    "dial_answer_ms": ms,
+                    "dial_answer_platform": ms < _PLATFORM_ANSWER_MS,
+                    "dial_out_channel": str(ch.get("name") or "") or None,
+                }
 
     async def _await_bridge_end(
         self, queue: asyncio.Queue, channel_id: str, out_id: str
-    ) -> None:
-        """Block while the two legs talk; return as soon as EITHER leg leaves the call."""
+    ) -> dict:
+        """Block while the two legs talk; return as soon as EITHER leg leaves the call.
+
+        Returns which side left first and the Q.850 it left with. Asterisk knows this and then
+        discards it: the outbound leg is deliberately excluded from ingestion
+        (`is_flow_dial_leg`) and its CDR row is closed the moment it enters the bridge, so
+        before this the only trace of "who hung up" was which of the two teardown requests in
+        `dial_number`'s `finally` happened to log a 404 for an already-gone channel.
+
+        The first gone-event (ChannelHangupRequest / StasisEnd) identifies the leg but carries
+        no cause, so we keep draining for a moment for that same channel's ChannelDestroyed,
+        which does — capped by `_HANGUP_CAUSE_GRACE_S` because the other party may still be on
+        the line waiting to be released."""
+        loop = asyncio.get_running_loop()
+        bridged_at = loop.time()
+        info: dict = {}
+        cause_deadline: float | None = None
+        gone_id: str | None = None
         while True:
+            if cause_deadline is None:
+                wait_s: float = _DIAL_BRIDGE_MAX_S
+            else:
+                wait_s = cause_deadline - loop.time()
+                if wait_s <= 0:
+                    return info
             try:
-                event = await asyncio.wait_for(queue.get(), timeout=_DIAL_BRIDGE_MAX_S)
+                event = await asyncio.wait_for(queue.get(), timeout=wait_s)
             except asyncio.TimeoutError:
+                if cause_deadline is not None:
+                    return info  # leg is gone, its cause never arrived; report what we have
                 logger.warning("ARI dial bridge exceeded %.0fs; tearing down", _DIAL_BRIDGE_MAX_S)
-                return
+                return {"dial_ended_by": "max_duration",
+                        "dial_talk_ms": int((loop.time() - bridged_at) * 1000)}
             ch = event.get("channel") if isinstance(event.get("channel"), dict) else {}
             cid = str(ch.get("id") or "")
-            if cid in (channel_id, out_id) and event.get("type") in _LEG_GONE_EVENTS:
-                return
+            etype = event.get("type")
+            if cid not in (channel_id, out_id) or etype not in _LEG_GONE_EVENTS:
+                continue
+            if gone_id is None:
+                gone_id = cid
+                info = {
+                    "dial_ended_by": "dialed" if cid == out_id else "caller",
+                    "dial_end_stage": "bridged",
+                    "dial_end_event": etype,
+                    "dial_talk_ms": int((loop.time() - bridged_at) * 1000),
+                }
+                if cid == out_id and ch.get("name"):
+                    info["dial_out_channel"] = str(ch.get("name"))
+                cause_deadline = loop.time() + _HANGUP_CAUSE_GRACE_S
+            if cid == gone_id and etype == "ChannelDestroyed":
+                info["dial_end_cause"] = _cause_of(event)
+                info["dial_end_cause_txt"] = _cause_txt(event)
+                return info
 
     async def dial_operator(
         self, channel_id: str, operators: list[str], *, caller_id, timeout_s: float,
@@ -438,6 +594,7 @@ class AsteriskAriClient:
         legs = {f"{FLOW_DIAL_CHANNEL_PREFIX}{uuid.uuid4().hex}": ep for ep in endpoints}
         watch_ids = list(legs.keys()) + [channel_id]
         queue = dtmf.watch(*watch_ids)
+        self._last_dial = {}
         bridge_id: str | None = None
         clog(logger, "ring.start", channel=channel_id, endpoints=len(endpoints),
              timeout_s=int(timeout_s), record=bool(record_name))
@@ -479,8 +636,16 @@ class AsteriskAriClient:
             if record_name:
                 await self.record_bridge(bridge_id, record_name)
             clog(logger, "ring.bridged", channel=channel_id, answered=answered_id, bridge=bridge_id)
-            await self._await_bridge_end(queue, channel_id, answered_id)
-            clog(logger, "ring.ended", channel=channel_id, bridge=bridge_id)
+            # Same forensics as the number path: an operator call that ends early is the same
+            # question ("did the operator drop it or did the caller?") with the same answer
+            # buried in the same place.
+            self._last_dial.update(
+                await self._await_bridge_end(queue, channel_id, answered_id)
+            )
+            clog(logger, "ring.ended", channel=channel_id, bridge=bridge_id,
+                 ended_by=self._last_dial.get("dial_ended_by"),
+                 cause=self._last_dial.get("dial_end_cause"),
+                 talk_ms=self._last_dial.get("dial_talk_ms"))
             return "answered"
         except Exception:  # noqa: BLE001 - a ring/bridge failure falls through, never crashes the call
             logger.exception("ARI ring_and_bridge failed")
@@ -856,9 +1021,13 @@ class AsteriskAriClient:
                 await self.record_bridge(bridge_id, f"{op_channel_id}-outbound")
 
             clog(logger, "outbound.connected", linkedid=lid, bridge=bridge_id)
-            # 6. Hold the call until EITHER leg leaves.
-            await self._await_bridge_end(queue, op_channel_id, callee_channel_id)
-            clog(logger, "outbound.ended", linkedid=lid)
+            # 6. Hold the call until EITHER leg leaves. `ended_by` here is "caller" for the
+            #    OPERATOR's leg and "dialed" for the person they called — the same question
+            #    ("who hung up?") answered for softphone calls too.
+            ended = await self._await_bridge_end(queue, op_channel_id, callee_channel_id)
+            clog(logger, "outbound.ended", linkedid=lid,
+                 ended_by=ended.get("dial_ended_by"), cause=ended.get("dial_end_cause"),
+                 cause_txt=ended.get("dial_end_cause_txt"), talk_ms=ended.get("dial_talk_ms"))
         except Exception:  # noqa: BLE001 - never raise out of the detached task
             logger.exception("run_outbound_call failed (linkedid=%s)", lid)
         finally:
