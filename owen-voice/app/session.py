@@ -80,6 +80,8 @@ class MediaSession:
     vad_starts: int = 0
     max_quiet_run: int = 0
     vad_ends: int = 0
+    barge_suppressed: int = 0
+    noise_utterances: int = 0
     # Speaker-labelled, the shape the backend's `transcriptions.segments` already uses, so
     # persisting it in step 3 is a write rather than a translation.
     transcript: list = field(default_factory=list)
@@ -119,6 +121,8 @@ class MediaSession:
             "vad_starts": self.vad_starts,
             "max_quiet_run": self.max_quiet_run,
             "vad_ends": self.vad_ends,
+            "barge_suppressed": self.barge_suppressed,
+            "noise_utterances": self.noise_utterances,
             "last_turn_ms": self.last_turn_ms,
             "last_first_audio_ms": self.last_first_audio_ms,
             "transcript": self.transcript,

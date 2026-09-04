@@ -110,6 +110,8 @@ class Conversation:
         self._turn: Optional[asyncio.Task] = None
         self._started = time.monotonic()
         self._last_voice = time.monotonic()
+        # When the current burst of speech started playing, for the barge-in guard window.
+        self._speaking_since: Optional[float] = None
 
     # --- lifecycle ---
 
@@ -138,10 +140,33 @@ class Conversation:
         self.session.rms_sum += level
         self.session.rms_n += 1
 
+        # Raise the bar for what counts as speech while WE are talking, so the agent cannot
+        # interrupt itself. A real interruption is loud and sustained; an echo of our own
+        # output is not.
+        speaking = self.playout.speaking
+        if speaking and self._speaking_since is None:
+            self._speaking_since = time.monotonic()
+        elif not speaking:
+            self._speaking_since = None
+        self.vad.speech_rms = settings.VAD_SPEECH_RMS * (
+            settings.VAD_BARGE_SCALE if speaking else 1.0
+        )
+
         event = self.vad.push(pcm)
         self.session.max_quiet_run = self.vad.max_quiet_run
 
         if event is not None and event[0] == "start":
+            # Guard window: the opening moments of our own reply are precisely when it would
+            # come back through a speakerphone, so an "interruption" then is not believed.
+            if (
+                self._speaking_since is not None
+                and (time.monotonic() - self._speaking_since) * 1000 < settings.BARGE_GUARD_MS
+            ):
+                self.session.barge_suppressed += 1
+                logger.info("session %s: ignoring interruption inside the guard window",
+                            self.session.session_uuid)
+                self.vad.reset()
+                return self._guardrail()
             self._last_voice = time.monotonic()
             # BARGE-IN. The caller talking over the agent means the agent should stop, both
             # because it is rude not to and because everything queued was answering a
@@ -158,6 +183,14 @@ class Conversation:
             self._last_voice = time.monotonic()
             self.session.vad_ends += 1
             audio = event[1] or b""
+            # Energy floor before spending an STT call: a quiet utterance is line noise, and
+            # Whisper-family models hallucinate fluent text from it.
+            level = rms_of(audio)
+            if level < settings.VAD_MIN_UTTERANCE_RMS:
+                self.session.noise_utterances += 1
+                logger.info("session %s: utterance rms %.0f below floor, discarding as noise",
+                            self.session.session_uuid, level)
+                return self._guardrail()
             self._turn = asyncio.create_task(self._handle_turn(audio))
 
         return self._guardrail()

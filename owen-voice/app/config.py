@@ -95,6 +95,18 @@ class Settings:
     # is not counted in turn timings (the clock starts when the turn ends). Short enough to
     # feel responsive, long enough to survive a mid-sentence pause.
     VAD_END_FRAMES: int = _i("VOICE_VAD_END_FRAMES", 30)
+    # While the agent is SPEAKING, require this much more energy before believing the caller
+    # has interrupted. Without it the agent barges in on ITSELF -- its own voice returning via
+    # a speakerphone (or line artefacts) trips the detector, the reply is cancelled, the next
+    # one is cancelled the same way, and the caller hears nothing but fragments. Observed live.
+    VAD_BARGE_SCALE: float = float(_s("VOICE_VAD_BARGE_SCALE", "3.0") or 3.0)
+    # Never allow an interruption in the first moments of a reply: that is exactly when the
+    # agent's own opening syllables would come back through a speakerphone.
+    BARGE_GUARD_MS: int = _i("VOICE_BARGE_GUARD_MS", 900)
+    # An utterance quieter than this is noise, not speech. Whisper-family models hallucinate
+    # confidently on near-silence -- a live call produced "لا لا لا لا" and "Привет" from a
+    # quiet line -- and each hallucination costs an STT call and a wrong turn.
+    VAD_MIN_UTTERANCE_RMS: float = float(_s("VOICE_VAD_MIN_UTTERANCE_RMS", "300") or 300)
 
     # --- Agent (step 2 uses one hardcoded agent; step 3 reads these from agent_versions) -----
     AGENT_SYSTEM_PROMPT: str = _s(
