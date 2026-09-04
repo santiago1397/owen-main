@@ -70,6 +70,50 @@ services:
       resources:
         limits: { cpus: '0.5', memory: 256M }
 
+  # AI voice-agent media service — see docs/AI_AGENT_SPEC.md (D2).
+  # Deliberately its OWN container, not a thread in `worker`: the worker is capped at
+  # 0.5 CPU / 256M and also runs the ARI consumer every live call depends on, so audio
+  # work there would contend with — and could take down — call ingestion platform-wide.
+  #
+  # Currently the STEP 1 ECHO SPIKE: it proves audio round-trips and does nothing else.
+  # Safe to leave stopped; nothing in app/worker/frontend references it.
+  owen-voice:
+    build: { context: ./owen-voice, dockerfile: Dockerfile }
+    image: owen/voice:latest
+    container_name: owen_voice
+    env_file: [.env.prod]
+    environment:
+      - ENVIRONMENT=production
+    extra_hosts:
+      - "host.docker.internal:host-gateway"   # reach native Asterisk's ARI on the host
+    ports:
+      # Asterisk runs NATIVELY on the host and must dial IN to our AudioSocket listener
+      # (ARI externalMedia connection_type=client), so this port cannot be `expose:`-only.
+      # Bound to LOOPBACK, never 0.0.0.0 — the host reaches it, the internet cannot, and
+      # no docker bridge IP is hardcoded anywhere (the 172.19.0.1 lesson from the Aug-2026
+      # migration). VOICE_AUDIOSOCKET_ADVERTISE must match the left-hand side.
+      - "127.0.0.1:9092:9092"
+      # Control API, loopback too: curl it over the ssh session, never from the internet.
+      - "127.0.0.1:8099:8099"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8099/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    networks: [callmon-net]           # NOT traefik-public — nothing here is publicly routed
+    security_opt: ["no-new-privileges:true"]
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+    deploy:
+      resources:
+        # Sized for step 2 (STT/TTS clients + resampling), not the echo. The box has ~5.7
+        # idle cores, so this is headroom, not a squeeze.
+        limits: { cpus: '2', memory: 1G }
+        reservations: { cpus: '0.25', memory: 128M }
+
   frontend:
     build:
       context: ./frontend
