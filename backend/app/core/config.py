@@ -151,9 +151,14 @@ class Settings(BaseSettings):
     # --- owen-voice media service (AI_AGENT_SPEC D2/D13) ---------------------------------
     # Where the ai_agent node sends a live call for a real conversation. Empty => the engine
     # refuses and the node takes its `failed` port, which routes to the flow's fallback.
-    # Loopback because the service is published on 127.0.0.1 by compose; it is separable, so
-    # this is a URL rather than an assumption.
-    VOICE_SERVICE_URL: str = "http://host.docker.internal:8099"
+    #
+    # DOCKER DNS, not host.docker.internal: owen-voice publishes its control port on the
+    # host's LOOPBACK only (right for Asterisk, which is native on the host), so a container
+    # reaching the host gateway cannot see it — it just times out, and every agent call would
+    # silently fall through to voicemail. app and owen-voice share callmon-net, so the service
+    # name resolves directly and no port needs publishing for this at all.
+    # Still a URL, not an assumption: point it anywhere if the service moves off this host.
+    VOICE_SERVICE_URL: str = "http://owen-voice:8099"
     VOICE_SERVICE_KEY: str = ""
     # Backstop only: the request is held open for the whole call, and the AGENT's guardrails
     # are what actually bound a conversation.
