@@ -95,6 +95,12 @@ class OpenAICompatibleLLM:
 
     name = "openai_compatible"
 
+    def __init__(self, base_url: str = "", model: str = "") -> None:
+        # Per-agent overrides (step 3): an agent version may pin its own endpoint and model,
+        # which is how one deployment runs OpenAI, MiniMax and DeepSeek agents side by side.
+        self.base_url = (base_url or settings.LLM_BASE_URL).rstrip("/")
+        self.model = model or settings.LLM_MODEL
+
     async def reply(self, system: str, history: list[dict]) -> str:
         if not settings.LLM_API_KEY:
             logger.warning("llm: no API key configured")
@@ -102,7 +108,7 @@ class OpenAICompatibleLLM:
         messages = [{"role": "system", "content": system}] if system else []
         messages += history
         payload = {
-            "model": settings.LLM_MODEL,
+            "model": self.model,
             "messages": messages,
             "temperature": settings.LLM_TEMPERATURE,
             # Capped hard: this is speech. A model that decides to produce five paragraphs
@@ -112,7 +118,7 @@ class OpenAICompatibleLLM:
         try:
             async with httpx.AsyncClient(timeout=_LLM_TIMEOUT) as c:
                 r = await c.post(
-                    f"{settings.LLM_BASE_URL}/chat/completions",
+                    f"{self.base_url}/chat/completions",
                     headers={"Authorization": f"Bearer {settings.LLM_API_KEY}"},
                     json=payload,
                 )
@@ -141,7 +147,7 @@ class OpenAICompatibleLLM:
         messages = [{"role": "system", "content": system}] if system else []
         messages += history
         payload = {
-            "model": settings.LLM_MODEL,
+            "model": self.model,
             "messages": messages,
             "temperature": settings.LLM_TEMPERATURE,
             "max_tokens": settings.LLM_MAX_TOKENS,
@@ -150,7 +156,7 @@ class OpenAICompatibleLLM:
         try:
             async with httpx.AsyncClient(timeout=_LLM_TIMEOUT) as c:
                 async with c.stream(
-                    "POST", f"{settings.LLM_BASE_URL}/chat/completions",
+                    "POST", f"{self.base_url}/chat/completions",
                     headers={"Authorization": f"Bearer {settings.LLM_API_KEY}"},
                     json=payload,
                 ) as r:
@@ -287,8 +293,9 @@ def get_stt() -> SpeechToText:
     return _STT.get(settings.STT_PROVIDER, OpenAISTT)()
 
 
-def get_llm() -> LanguageModel:
-    return _LLM.get(settings.LLM_PROVIDER, OpenAICompatibleLLM)()
+def get_llm(base_url: str = "", model: str = "") -> LanguageModel:
+    cls = _LLM.get(settings.LLM_PROVIDER, OpenAICompatibleLLM)
+    return cls(base_url=base_url, model=model)
 
 
 def get_tts() -> TextToSpeech:

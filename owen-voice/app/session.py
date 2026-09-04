@@ -86,12 +86,23 @@ class MediaSession:
     underruns: int = 0
     # None = use the global default; set per call to A/B it.
     half_duplex: bool | None = None
+
+    # --- flow-driven agent session (step 3) ---
+    linkedid: str = ""
+    caller_number: str = ""
+    # The pinned agent-version config, as sent by OWEN. Empty for a standalone spike.
+    agent: dict = field(default_factory=dict)
+    # The port handed back to the flow interpreter, and any tool output.
+    result_port: str | None = None
+    result_data: dict = field(default_factory=dict)
     noise_utterances: int = 0
     # Speaker-labelled, the shape the backend's `transcriptions.segments` already uses, so
     # persisting it in step 3 is a write rather than a translation.
     transcript: list = field(default_factory=list)
 
     _writer: Optional[asyncio.StreamWriter] = field(default=None, repr=False)
+    # Set when the conversation has ended, so POST /sessions can block on it.
+    done: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
 
     @property
     def connected(self) -> bool:

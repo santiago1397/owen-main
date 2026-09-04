@@ -148,6 +148,17 @@ class Settings(BaseSettings):
     # Empty (default) = honour each agent's own `engine`. `dummy` is the offline default so
     # the node + interpreter + version-pinning are testable without real audio; the real
     # `openai_realtime` runtime is a later ticket (12) and is a registered-but-stubbed engine.
+    # --- owen-voice media service (AI_AGENT_SPEC D2/D13) ---------------------------------
+    # Where the ai_agent node sends a live call for a real conversation. Empty => the engine
+    # refuses and the node takes its `failed` port, which routes to the flow's fallback.
+    # Loopback because the service is published on 127.0.0.1 by compose; it is separable, so
+    # this is a URL rather than an assumption.
+    VOICE_SERVICE_URL: str = "http://host.docker.internal:8099"
+    VOICE_SERVICE_KEY: str = ""
+    # Backstop only: the request is held open for the whole call, and the AGENT's guardrails
+    # are what actually bound a conversation.
+    VOICE_SERVICE_TIMEOUT_SECONDS: int = 900
+
     VOICE_AGENT_ENGINE: str = ""  # "" = per-agent | dummy | openai_realtime | vapi | diy
 
     # OpenAI Realtime voice-agent runtime (Ticket 12). Only active when an agent's engine (or

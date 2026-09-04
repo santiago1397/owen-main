@@ -144,8 +144,16 @@ class Conversation:
             end_frames=session.vad_end_frames or settings.VAD_END_FRAMES,
         )
         self.stt = get_stt()
-        self.llm = get_llm()
+        self.llm = get_llm(
+            base_url=str((session.agent or {}).get("llm_base_url") or ""),
+            model=str((session.agent or {}).get("model") or ""),
+        )
         self.tts = get_tts()
+        # The PINNED agent-version config sent by OWEN (step 3). Empty for a standalone
+        # spike, in which case the env defaults stand in. Reading it per session is what
+        # makes an "army" possible: persona, voice and model differ per agent, and the
+        # version that ran is already recorded against the call by OWEN.
+        self.agent: dict = session.agent or {}
         self.history: list[dict] = []
         self._turn: Optional[asyncio.Task] = None
         self._started = time.monotonic()
@@ -155,9 +163,19 @@ class Conversation:
 
     # --- lifecycle ---
 
+    @property
+    def system_prompt(self) -> str:
+        parts = [str(self.agent.get("persona") or settings.AGENT_SYSTEM_PROMPT).strip()]
+        knowledge = str(self.agent.get("knowledge") or "").strip()
+        if knowledge:
+            parts.append("Reference knowledge:" + chr(10) + knowledge)
+        return (chr(10)*2).join(p for p in parts if p)
+
     async def start(self, *, greet: bool = True) -> None:
         self.playout.start()
-        greeting = settings.AGENT_GREETING.strip() if greet else ""
+        greeting = (
+            str(self.agent.get("greeting") or settings.AGENT_GREETING).strip() if greet else ""
+        )
         if greeting:
             # Spoken before anything is heard, so the caller is never met with silence — and
             # it is where an AI disclosure belongs (spec D8; required in the EU since Aug 2026
@@ -295,7 +313,7 @@ class Conversation:
                 buf = ""
                 try:
                     async for piece in self.llm.reply_stream(
-                        settings.AGENT_SYSTEM_PROMPT, self._trimmed_history()
+                        self.system_prompt, self._trimmed_history()
                     ):
                         buf += piece
                         ready, buf = split_speakable(buf)
@@ -325,9 +343,7 @@ class Conversation:
                 # the blocking call rather than leaving the caller unanswered.
                 logger.info("session %s: stream produced nothing, falling back",
                             self.session.session_uuid)
-                reply = await self.llm.reply(
-                    settings.AGENT_SYSTEM_PROMPT, self._trimmed_history()
-                )
+                reply = await self.llm.reply(self.system_prompt, self._trimmed_history())
                 if not reply:
                     logger.warning("session %s: empty LLM reply", self.session.session_uuid)
                     return

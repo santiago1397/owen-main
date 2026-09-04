@@ -107,6 +107,44 @@ async def _on_media_leg_start(channel_id: str, session: MediaSession) -> None:
         await ari.record_bridge(bridge_id, session.recording_name or "owen-voice-tone")
 
 
+async def attach_media_to_call(session: MediaSession) -> bool:
+    """Attach an external-media leg to a LIVE call that OWEN already owns (step 3).
+
+    Unlike the spike, we do NOT originate anything: the caller is already up, in OWEN's
+    Stasis app, parked inside its `ai_agent` node. We only add ears and a mouth.
+    """
+    media_id = await ari.create_external_media(session_uuid=session.session_uuid)
+    if not media_id:
+        return False
+    session.media_channel_id = media_id
+    _media_legs[media_id] = session
+
+    # Wait for Asterisk to dial back into our AudioSocket listener and for the bridge to be
+    # built on its StasisStart. Bounded: a caller must never wait on infrastructure.
+    for _ in range(60):
+        if session.connected_at is not None and session.bridge_id:
+            return True
+        await asyncio.sleep(0.1)
+    logger.warning("attach: media never connected for linkedid=%s", session.linkedid)
+    return False
+
+
+async def teardown_session(session: MediaSession) -> None:
+    """End an agent session WITHOUT touching the caller.
+
+    The critical difference from the spike's teardown: OWEN owns the caller's channel and its
+    flow continues after the `ai_agent` node -- it may transfer, take a voicemail, or run more
+    nodes. Hanging it up here would end the call the moment the agent finished speaking, and
+    it would look exactly like the agent had dropped the caller.
+    """
+    if session.media_channel_id:
+        await ari.hangup(session.media_channel_id)
+        _media_legs.pop(session.media_channel_id, None)
+    if session.bridge_id:
+        await ari.destroy_bridge(session.bridge_id)
+    session.done.set()
+
+
 async def _teardown(session: MediaSession) -> None:
     """Best-effort cleanup. Always safe to call twice."""
     if session.media_channel_id:
@@ -197,7 +235,11 @@ async def lifespan(app: FastAPI):
         await server.wait_closed()
 
 
-app = FastAPI(title="owen-voice (echo spike)", lifespan=lifespan)
+app = FastAPI(title="owen-voice", lifespan=lifespan)
+
+from app.agent_api import router as agent_router  # noqa: E402 - after `app` exists
+
+app.include_router(agent_router)
 
 
 @app.get("/health")

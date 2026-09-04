@@ -108,6 +108,10 @@ async def handle_connection(
                         if ended:
                             logger.info("audiosocket: session %s guardrail %s — ending",
                                         session.session_uuid, ended)
+                            # A guardrail is a DELIBERATE, graceful end: the flow takes its
+                            # `end_call` port rather than the `failed` one, so the caller is
+                            # routed on rather than treated as an error.
+                            session.result_port = session.result_port or "end_call"
                             session.error = None
                             return
                         continue
@@ -152,6 +156,11 @@ async def handle_connection(
         if session is not None:
             session.closed_at = asyncio.get_running_loop().time()
             session._writer = None
+            # The caller hanging up is a normal ending, not a failure: `default` means the
+            # agent finished with no explicit exit tool.
+            if session.result_port is None:
+                session.result_port = "default"
+            session.done.set()
             logger.info(
                 "audiosocket: session %s closed — rx=%d frames/%dB tx=%d frames peak=%d — %s",
                 session.session_uuid, session.rx_frames, session.rx_bytes,

@@ -133,6 +133,15 @@ class Settings:
     AGENT_MAX_CALL_SECONDS: int = _i("VOICE_AGENT_MAX_CALL_SECONDS", 300)
     AGENT_MAX_SILENCE_SECONDS: int = _i("VOICE_AGENT_MAX_SILENCE_SECONDS", 30)
 
+    # --- Flow-driven sessions (step 3) -------------------------------------------------------
+    # Concurrent agent sessions. AI_AGENT_SPEC D10: deliberately conservative and NOT a
+    # hardware limit -- the box has ~5.7 idle cores. The trunk allows 10 concurrent inbound
+    # (BulkVS /trunkGroups MaxIn), so 4 leaves 6 channels always free for ordinary flow calls,
+    # and agents can never consume the trunk.
+    MAX_SESSIONS: int = _i("VOICE_MAX_SESSIONS", 4)
+    # Shared secret OWEN presents on POST /sessions.
+    SERVICE_KEY: str = _s("VOICE_SERVICE_KEY")
+
     # --- Spike controls ---------------------------------------------------------------------
     # Trunk to place the self-test call over, and the DID to present. Both only used by
     # POST /spike/call, which exists to prove the transport against your own phone.

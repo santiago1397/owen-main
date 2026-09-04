@@ -362,7 +362,12 @@ async def run_flow_for_stasis(event: dict, ari: AriControl) -> None:
                 await dba.commit()
                 spec = build_spec(str(version.agent_id), str(version.id), version.config)
             session = get_session_for_agent(spec)
-            ctx = AgentCallContext(channel_id=channel_id, linkedid=lid, ari=ari)
+            ctx = AgentCallContext(
+                channel_id=channel_id, linkedid=lid, ari=ari,
+                # The agent needs to know WHO is calling: it is the caller's identity for a
+                # capture, and the default recipient for an in-call SMS.
+                caller_number=caller_number or None,
+            )
             result = await session.run(spec, ctx)
             return (result.port, result.data)
         except Exception:  # noqa: BLE001 - never dead-air; the node takes `failed`/fallback

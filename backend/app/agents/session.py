@@ -126,6 +126,17 @@ def _make_stub(engine_name: str):
     return factory
 
 
+def _make_owen_voice():
+    """Factory for the owen-voice engine (step 3). Lazy so the seam stays import-light."""
+
+    def factory() -> VoiceAgentSession:
+        from app.agents.remote import RemoteVoiceAgentSession
+
+        return RemoteVoiceAgentSession()
+
+    return factory
+
+
 def _make_openai_realtime():
     """Factory for the real openai_realtime engine (Ticket 12). Imported LAZILY so this seam
     stays import-light (stdlib only) — app.agents.openai_realtime pulls in nothing heavy at
@@ -142,6 +153,8 @@ def _make_openai_realtime():
 # name -> zero-arg factory. `dummy` + `openai_realtime` (Ticket 12) are live; vapi/diy stubbed.
 _ENGINES: dict[str, object] = {
     "dummy": DummyVoiceAgentSession,
+    # The real conversational engine: audio runs in the owen-voice container, not here.
+    "owen_voice": _make_owen_voice(),
     "openai_realtime": _make_openai_realtime(),
     "vapi": _make_stub("vapi"),
     "diy": _make_stub("diy"),
