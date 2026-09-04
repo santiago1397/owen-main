@@ -59,6 +59,18 @@ class TranscriptSegment(BaseModel):
     text: str
 
 
+class CaptureOut(BaseModel):
+    """Structured data an AI agent collected during the call (AI_AGENT_SPEC D7).
+
+    Surfaced on the call so the answer to "what did the agent actually learn?" is visible
+    where someone is already looking, rather than only reachable by SQL."""
+
+    capture_type: str
+    fields: dict = {}
+    captured_at: datetime | None = None
+    agent_version_id: str | None = None
+
+
 class CallDetail(CallListItem):
     answered_at: datetime | None = None
     ended_at: datetime | None = None
@@ -68,6 +80,7 @@ class CallDetail(CallListItem):
     transcript: str | None = None  # flat text; fallback for mono/old/Twilio transcripts
     transcript_segments: list[TranscriptSegment] | None = None  # speaker-separated (stereo)
     analysis: AnalysisOut | None = None
+    captures: list[CaptureOut] = []
 
 
 class CallerUpdate(BaseModel):

@@ -261,6 +261,23 @@ export const api = {
     }),
   activateAgentVersion: (agentId: string, versionId: string) =>
     request(`/api/agents/${agentId}/versions/${versionId}/activate`, { method: "POST" }),
+
+  // --- Live AI-agent calls: listen in, or seize one (AI_AGENT_SPEC D4). ------------------
+  // Take-over marks the call HUMAN-OWNED, after which no automated path may touch it — the
+  // flow interpreter stands down instead of routing an ended agent node into voicemail.
+  monitorActive: () => request("/api/telephony/monitor/active"),
+  monitorListen: (linkedid: string) =>
+    request("/api/telephony/monitor/listen", {
+      method: "POST",
+      body: JSON.stringify({ linkedid }),
+    }),
+  monitorTakeover: (linkedid: string, operator_channel_id?: string) =>
+    request("/api/telephony/monitor/takeover", {
+      method: "POST",
+      body: JSON.stringify({ linkedid, operator_channel_id }),
+    }),
+  monitorStop: (body: any) =>
+    request("/api/telephony/monitor/stop", { method: "POST", body: JSON.stringify(body) }),
   campaigns: () => request("/api/campaigns"),
   callers: (filters: Record<string, any>) => request(`/api/callers${qs(filters)}`),
   updateCaller: (id: string, body: any) =>

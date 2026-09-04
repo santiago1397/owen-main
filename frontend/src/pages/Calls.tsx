@@ -144,6 +144,34 @@ function CallDrawer({ id, onClose }: { id: string; onClose: () => void }) {
           </div>
         )}
 
+        {c.captures?.length > 0 && (
+          <div style={{ marginTop: 16 }}>
+            <div className="navsection">What the agent collected</div>
+            <p className="muted" style={{ marginTop: 0 }}>
+              Structured, queryable data the agent captured mid-call — not mined from the
+              transcript afterwards. Multiple rows mean it learned things at different points.
+            </p>
+            {c.captures.map((cap: any, i: number) => (
+              <div className="card" key={i} style={{ marginBottom: 8 }}>
+                <div className="muted" style={{ marginBottom: 6 }}>
+                  {cap.capture_type}
+                  {cap.captured_at ? ` · ${new Date(cap.captured_at).toLocaleTimeString()}` : ""}
+                </div>
+                <table>
+                  <tbody>
+                    {Object.entries(cap.fields || {}).map(([k, v]: any) => (
+                      <tr key={k}>
+                        <td style={{ width: 140, textTransform: "capitalize" }}>{k}</td>
+                        <td>{typeof v === "object" ? JSON.stringify(v) : String(v)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            ))}
+          </div>
+        )}
+
         {(c.transcript_segments?.length > 0 || c.transcript) && (
           <div className="card" style={{ marginBottom: 12 }}>
             <div className="l" style={{ marginBottom: 8 }}>Transcript</div>

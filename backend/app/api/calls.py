@@ -11,6 +11,7 @@ from app.db import get_db
 from app.models import (
     Call,
     CallAnalysis,
+    CallCapture,
     CallEvent,
     Caller,
     Campaign,
@@ -25,6 +26,7 @@ from app.schemas.api import (
     AnalysisOverride,
     CallDetail,
     CallEventOut,
+    CaptureOut,
     CallListItem,
     Page,
     RecordingOut,
@@ -202,6 +204,15 @@ async def get_call(
         data["is_spam"] = (analysis_row.is_spam_override
                            if analysis_row.is_spam_override is not None else analysis_row.is_spam)
 
+    # Agent captures, oldest first: an agent that learned a name early and an address later
+    # produced two rows, and the order is the story of the call.
+    capture_rows = (
+        await db.execute(
+            select(CallCapture).where(CallCapture.call_id == call.id)
+            .order_by(CallCapture.captured_at)
+        )
+    ).scalars().all()
+
     return CallDetail(
         **data,
         events=[CallEventOut(**dict(e)) for e in events],
@@ -220,6 +231,15 @@ async def get_call(
             category_override=analysis_row.category_override,
             is_spam_override=analysis_row.is_spam_override,
         ) if analysis_row else None,
+        captures=[
+            CaptureOut(
+                capture_type=c.capture_type,
+                fields=c.fields or {},
+                captured_at=c.captured_at,
+                agent_version_id=str(c.agent_version_id) if c.agent_version_id else None,
+            )
+            for c in capture_rows
+        ],
     )
 
 

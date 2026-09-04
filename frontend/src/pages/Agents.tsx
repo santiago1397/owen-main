@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 import { api } from "../api";
+import AgentMonitor from "../components/AgentMonitor";
 
 // AI Agents library (Ticket 11). Lists reusable voice agents, creates new ones, and edits an
 // agent's config as a NEW immutable version (append-only, like flow versions). An agent is
@@ -15,18 +16,38 @@ type Agent = {
 type AgentVersion = { id: string; agent_id: string; version: number; config: any; created_at?: string | null };
 type AgentDetail = Agent & { versions: AgentVersion[] };
 
-const ENGINES = ["dummy", "openai_realtime", "vapi", "diy"];
+// `owen_voice` is the ONE engine that holds a real conversation — it runs the cascaded
+// STT -> LLM -> TTS pipeline in the owen-voice container. `dummy` is offline and answers
+// nobody; `openai_realtime` was superseded (its audio bridge was never implemented) and
+// vapi/diy are registered stubs that raise. Labelled rather than hidden, because silently
+// dropping an engine an existing agent already uses would make its config unopenable.
+const ENGINES: { value: string; label: string }[] = [
+  { value: "owen_voice", label: "owen_voice — real conversation (use this)" },
+  { value: "dummy", label: "dummy — offline, never speaks" },
+  { value: "openai_realtime", label: "openai_realtime — superseded, does not run" },
+  { value: "vapi", label: "vapi — not implemented" },
+  { value: "diy", label: "diy — not implemented" },
+];
 const TOOLS = ["transfer", "end_call", "capture_lead", "send_sms"];
+
+// OpenAI TTS voices. Free-text was a trap: a typo produced a silent agent with no error.
+const VOICES = ["alloy", "ash", "ballad", "coral", "echo", "fable", "nova", "onyx", "sage", "shimmer", "verse"];
+
+const TRANSFER_KINDS = ["number", "operator", "flow", "agent"];
 
 const EMPTY_CONFIG = {
   persona: "",
-  voice: "",
+  voice: "alloy",
   greeting: "",
-  model: "",
-  engine: "dummy",
+  model: "gpt-4o-mini",
+  engine: "owen_voice",
   knowledge: "",
+  llm_base_url: "",
+  tts_instructions: "",
   tools: {} as Record<string, boolean>,
-  guardrails: { max_call_seconds: 300, max_silence_seconds: 10, model_tier: "standard" } as any,
+  guardrails: { max_call_seconds: 300, max_silence_seconds: 30, model_tier: "standard" } as any,
+  transfer_targets: {} as Record<string, { kind: string; target: string }>,
+  custom_tools: [] as any[],
 };
 
 export default function Agents() {
@@ -98,6 +119,10 @@ export default function Agents() {
         </table>
       </div>
 
+      {/* Live calls sit ABOVE the editor: when an agent is misbehaving you need to seize
+          the call, not scroll past it to find the config. */}
+      <AgentMonitor />
+
       {selected && <AgentEditor agentId={selected} onClose={() => setSelected(null)} />}
     </div>
   );
@@ -117,7 +142,16 @@ function AgentEditor({ agentId, onClose }: { agentId: string; onClose: () => voi
     if (!detail) return;
     const versions = detail.versions || [];
     const latest = versions.length ? versions[versions.length - 1] : null;
-    setConfig(latest ? { ...EMPTY_CONFIG, ...latest.config, tools: { ...latest.config?.tools }, guardrails: { ...EMPTY_CONFIG.guardrails, ...latest.config?.guardrails } } : EMPTY_CONFIG);
+    setConfig(latest
+      ? {
+          ...EMPTY_CONFIG,
+          ...latest.config,
+          tools: { ...latest.config?.tools },
+          guardrails: { ...EMPTY_CONFIG.guardrails, ...latest.config?.guardrails },
+          transfer_targets: { ...latest.config?.transfer_targets },
+          custom_tools: latest.config?.custom_tools || [],
+        }
+      : EMPTY_CONFIG);
   }, [detail]);
 
   const save = useMutation({
@@ -141,6 +175,34 @@ function AgentEditor({ agentId, onClose }: { agentId: string; onClose: () => voi
   const set = (k: string, v: any) => setConfig((c: any) => ({ ...c, [k]: v }));
   const setGuard = (k: string, v: any) => setConfig((c: any) => ({ ...c, guardrails: { ...c.guardrails, [k]: v } }));
   const toggleTool = (t: string) => setConfig((c: any) => ({ ...c, tools: { ...c.tools, [t]: !c.tools?.[t] } }));
+
+  // --- transfer allowlist. The agent picks a NAME from this list and can never name a
+  // number itself, which is what stops a caller talking it into dialling somewhere.
+  const setTarget = (name: string, patch: any) =>
+    setConfig((c: any) => ({
+      ...c,
+      transfer_targets: { ...c.transfer_targets, [name]: { ...c.transfer_targets?.[name], ...patch } },
+    }));
+  const renameTarget = (from: string, to: string) =>
+    setConfig((c: any) => {
+      const next = { ...c.transfer_targets };
+      const v = next[from];
+      delete next[from];
+      next[to || from] = v;
+      return { ...c, transfer_targets: next };
+    });
+  const dropTarget = (name: string) =>
+    setConfig((c: any) => {
+      const next = { ...c.transfer_targets };
+      delete next[name];
+      return { ...c, transfer_targets: next };
+    });
+  const addTarget = () => {
+    let n = "destination";
+    let i = 1;
+    while (config.transfer_targets?.[n]) n = `destination_${++i}`;
+    setTarget(n, { kind: "number", target: "" });
+  };
 
   if (!detail) return null;
 
@@ -168,19 +230,40 @@ function AgentEditor({ agentId, onClose }: { agentId: string; onClose: () => voi
             placeholder="First thing the agent says" style={{ width: "100%" }} />
         </label>
         <label>Voice
-          <input value={config.voice} onChange={(e) => set("voice", e.target.value)}
-            placeholder="e.g. alloy" style={{ width: "100%" }} />
+          <select value={config.voice} onChange={(e) => set("voice", e.target.value)} style={{ width: "100%" }}>
+            {VOICES.map((v) => <option key={v} value={v}>{v}</option>)}
+          </select>
         </label>
         <label>Model
           <input value={config.model} onChange={(e) => set("model", e.target.value)}
-            placeholder="e.g. gpt-4o-realtime" style={{ width: "100%" }} />
+            placeholder="e.g. gpt-4o-mini, deepseek-chat, MiniMax-Text-01" style={{ width: "100%" }} />
         </label>
         <label>Engine
           <select value={config.engine} onChange={(e) => set("engine", e.target.value)} style={{ width: "100%" }}>
-            {ENGINES.map((en) => <option key={en} value={en}>{en}</option>)}
+            {ENGINES.map((en) => <option key={en.value} value={en.value}>{en.label}</option>)}
           </select>
         </label>
+        <label>LLM endpoint (optional)
+          <input value={config.llm_base_url} onChange={(e) => set("llm_base_url", e.target.value)}
+            placeholder="blank = OpenAI · https://api.minimax.io/v1 · a DeepSeek/Kimi host"
+            style={{ width: "100%" }} />
+        </label>
       </div>
+      <p className="muted" style={{ marginTop: 4 }}>
+        Any OpenAI-compatible endpoint works as the brain — OpenAI, MiniMax, DeepSeek, Kimi or
+        an aggregator. Prefer a US/EU host: a China-hosted endpoint costs roughly 200–250&nbsp;ms
+        per turn from this server.
+      </p>
+      <label style={{ display: "block", marginTop: 12 }}>Delivery direction (optional)
+        <input value={config.tts_instructions} onChange={(e) => set("tts_instructions", e.target.value)}
+          placeholder="e.g. warm and unhurried — leave blank unless you have tested it on a real call"
+          style={{ width: "100%" }} />
+      </label>
+      <p className="muted" style={{ marginTop: 4 }}>
+        Steers pace and tone, but only on the <code>gpt-4o-mini-tts</code> family. Strong style
+        prompts make the model <em>perform</em>, and breathiness and wide dynamics are exactly
+        what an 8&nbsp;kHz phone codec destroys — judge it down a real phone, never on speakers.
+      </p>
 
       <div className="navsection" style={{ marginTop: 16 }}>Tools</div>
       <div style={{ display: "flex", flexWrap: "wrap", gap: 12 }}>
@@ -191,6 +274,62 @@ function AgentEditor({ agentId, onClose }: { agentId: string; onClose: () => voi
           </label>
         ))}
       </div>
+
+      <div className="navsection" style={{ marginTop: 16 }}>Transfer destinations</div>
+      <p className="muted" style={{ marginTop: 0 }}>
+        The agent picks a <strong>name</strong> from this list — it can never choose a number
+        itself. That is deliberate: an agent able to dial anything could be talked into calling
+        a premium-rate number. Leave empty and the agent can only exit through the flow's own
+        <code> transfer</code> edge.
+      </p>
+      <table>
+        <thead><tr><th>Name the agent says</th><th>Kind</th><th>Goes to</th><th /></tr></thead>
+        <tbody>
+          {Object.entries(config.transfer_targets || {}).map(([name, t]: any) => (
+            <tr key={name}>
+              <td>
+                <input value={name} onChange={(e) => renameTarget(name, e.target.value)}
+                  style={{ width: "100%" }} />
+              </td>
+              <td>
+                <select value={t?.kind || "number"} onChange={(e) => setTarget(name, { kind: e.target.value })}>
+                  {TRANSFER_KINDS.map((k) => <option key={k} value={k}>{k}</option>)}
+                </select>
+              </td>
+              <td>
+                <input value={t?.target || ""} onChange={(e) => setTarget(name, { target: e.target.value })}
+                  placeholder={t?.kind === "operator" ? "operator email"
+                    : t?.kind === "flow" ? "a DID whose flow should take over"
+                    : t?.kind === "agent" ? "agent id" : "+1XXXXXXXXXX"}
+                  style={{ width: "100%" }} />
+              </td>
+              <td><button onClick={() => dropTarget(name)}>Remove</button></td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      <button onClick={addTarget} style={{ marginTop: 8 }}>Add destination</button>
+
+      <div className="navsection" style={{ marginTop: 16 }}>Custom tools (advanced)</div>
+      <p className="muted" style={{ marginTop: 0 }}>
+        HTTP calls this agent may make, as JSON. Reads can be <code>sync</code> (~800&nbsp;ms, the
+        caller waits in silence); writes must be <code>async</code> — a lead being saved must never
+        make someone wait. Validated when you save.
+      </p>
+      <textarea
+        rows={5}
+        style={{ width: "100%", fontFamily: "monospace" }}
+        value={JSON.stringify(config.custom_tools || [], null, 2)}
+        onChange={(e) => {
+          try {
+            set("custom_tools", JSON.parse(e.target.value || "[]"));
+            setStatus("");
+          } catch {
+            setStatus("Custom tools: not valid JSON yet — fix before saving.");
+          }
+        }}
+        placeholder={'[{"name":"lookup_job","url":"https://…","method":"GET","mode":"sync","description":"Look up a job by number","parameters":{"type":"object","properties":{"job_id":{"type":"string"}}}}]'}
+      />
 
       <div className="navsection" style={{ marginTop: 16 }}>Guardrails</div>
       <div className="formgrid" style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12 }}>
