@@ -26,7 +26,8 @@ from typing import Optional
 
 from app.audiosocket import AUDIO_FRAME_BYTES, encode_audio
 from app.config import settings
-from app.dsp import TurnDetector, chunk_frames, rms_of, split_speakable
+from app.dsp import (TurnDetector, chunk_frames, looks_like_english, rms_of,
+                     split_speakable)
 from app.providers import get_llm, get_stt, get_tts
 from app.session import MediaSession
 
@@ -216,6 +217,11 @@ class Conversation:
             if not text:
                 logger.info("session %s: empty transcript, ignoring turn",
                             self.session.session_uuid)
+                return
+            if not looks_like_english(text):
+                self.session.noise_utterances += 1
+                logger.info("session %s: discarding non-English transcript %r as a "
+                            "hallucination", self.session.session_uuid, text[:40])
                 return
             t_stt = time.monotonic()
             self.session.turns += 1

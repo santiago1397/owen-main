@@ -66,18 +66,28 @@ class Decimator:
 
     def __init__(self) -> None:
         self._phase = 0
+        # A streamed chunk is an arbitrary BYTE count, so it can split a 16-bit sample down
+        # the middle. Interpreting an odd-length buffer as int16 raises outright, which is
+        # how TTS streaming silently fell back to one flush frame per reply.
+        self._byte_rem = b""
         if HAVE_NUMPY:
             self._tail = _np.zeros(TAPS - 1, dtype=_np.float32)
         else:
             self._rem = b""
 
     def feed(self, pcm24: bytes) -> bytes:
-        if not pcm24:
+        data = self._byte_rem + pcm24
+        if len(data) % 2:
+            self._byte_rem = data[-1:]   # carry the half sample into the next chunk
+            data = data[:-1]
+        else:
+            self._byte_rem = b""
+        if not data:
             return b""
         if not HAVE_NUMPY:
-            return self._feed_box(pcm24)
+            return self._feed_box(data)
 
-        x = _np.frombuffer(pcm24, dtype="<i2").astype(_np.float32)
+        x = _np.frombuffer(data, dtype="<i2").astype(_np.float32)
         buf = _np.concatenate([self._tail, x])
         if buf.size < TAPS:
             self._tail = buf

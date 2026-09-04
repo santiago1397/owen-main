@@ -254,3 +254,19 @@ def wav_unwrap(data: bytes) -> bytes:
             return data[pos + 8:pos + 8 + size]
         pos += 8 + size + (size & 1)
     return b""
+
+
+def looks_like_english(text: str, *, min_ratio: float = 0.6) -> bool:
+    """Reject a transcript that is mostly non-Latin.
+
+    Whisper-family models do not return "I heard nothing" — on noise they emit fluent text,
+    often in another language entirely. A live call produced Chinese and Arabic replies
+    because the model hallucinated a token, the LLM answered in kind, and the caller was
+    left listening to a language they do not speak. Cheaper to drop it here than to explain
+    it downstream.
+    """
+    letters = [c for c in text if c.isalpha()]
+    if not letters:
+        return False
+    latin = sum(1 for c in letters if c.isascii())
+    return (latin / len(letters)) >= min_ratio
