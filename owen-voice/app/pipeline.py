@@ -26,7 +26,7 @@ from typing import Optional
 
 from app.audiosocket import AUDIO_FRAME_BYTES, encode_audio
 from app.config import settings
-from app.dsp import TurnDetector, chunk_frames
+from app.dsp import TurnDetector, chunk_frames, rms_of
 from app.providers import get_llm, get_stt, get_tts
 from app.session import MediaSession
 
@@ -113,9 +113,9 @@ class Conversation:
 
     # --- lifecycle ---
 
-    async def start(self) -> None:
+    async def start(self, *, greet: bool = True) -> None:
         self.playout.start()
-        greeting = settings.AGENT_GREETING.strip()
+        greeting = settings.AGENT_GREETING.strip() if greet else ""
         if greeting:
             # Spoken before anything is heard, so the caller is never met with silence — and
             # it is where an AI disclosure belongs (spec D8; required in the EU since Aug 2026
@@ -132,6 +132,12 @@ class Conversation:
 
     async def on_frame(self, pcm: bytes) -> Optional[str]:
         """Feed one 20 ms frame. Returns a reason string if a guardrail ended the call."""
+        level = rms_of(pcm)
+        self.session.rms_min = min(self.session.rms_min, level)
+        self.session.rms_max = max(self.session.rms_max, level)
+        self.session.rms_sum += level
+        self.session.rms_n += 1
+
         event = self.vad.push(pcm)
 
         if event is not None and event[0] == "start":
@@ -139,6 +145,7 @@ class Conversation:
             # BARGE-IN. The caller talking over the agent means the agent should stop, both
             # because it is rude not to and because everything queued was answering a
             # question they have moved on from.
+            self.session.vad_starts += 1
             dropped = self.playout.clear()
             if dropped:
                 logger.info("session %s: barge-in, dropped %d queued frames",
@@ -148,6 +155,7 @@ class Conversation:
 
         elif event is not None and event[0] == "end":
             self._last_voice = time.monotonic()
+            self.session.vad_ends += 1
             audio = event[1] or b""
             self._turn = asyncio.create_task(self._handle_turn(audio))
 

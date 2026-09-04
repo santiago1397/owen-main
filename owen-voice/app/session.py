@@ -58,6 +58,14 @@ class MediaSession:
     # --- conversation (step 2) ---
     turns: int = 0
     last_turn_ms: int = 0
+    # What the VAD actually sees. Without this, "the agent never answered" is a guess
+    # between a wrong threshold, a silent stream and a stream that is never silent.
+    rms_min: float = 1e9
+    rms_max: float = 0.0
+    rms_sum: float = 0.0
+    rms_n: int = 0
+    vad_starts: int = 0
+    vad_ends: int = 0
     # Speaker-labelled, the shape the backend's `transcriptions.segments` already uses, so
     # persisting it in step 3 is a write rather than a translation.
     transcript: list = field(default_factory=list)
@@ -91,6 +99,11 @@ class MediaSession:
             "peak_amplitude": self.peak_amplitude,
             "dtmf": self.dtmf,
             "turns": self.turns,
+            "rms_min": round(self.rms_min, 1) if self.rms_n else None,
+            "rms_max": round(self.rms_max, 1) if self.rms_n else None,
+            "rms_avg": round(self.rms_sum / self.rms_n, 1) if self.rms_n else None,
+            "vad_starts": self.vad_starts,
+            "vad_ends": self.vad_ends,
             "last_turn_ms": self.last_turn_ms,
             "transcript": self.transcript,
             "error": self.error,

@@ -79,7 +79,9 @@ async def handle_connection(
                         # Step 2: the cascaded pipeline replaces the echo. Greeting first,
                         # so the caller is never met with silence.
                         convo = Conversation(session, writer)
-                        await convo.start()
+                        # A loopback self-test has no caller: greeting it would only make the
+                        # agent talk over the very sound it is supposed to be listening to.
+                        await convo.start(greet=session.call_channel_id is not None)
                     continue
 
                 if session is None:
