@@ -41,6 +41,10 @@ class MediaSession:
     mode: str = "echo"
     # Bridge recording name, for the tone self-test (the send-path evidence).
     recording_name: str | None = None
+    # Per-session end-of-turn override. Exists for the self-test: its audio source is a
+    # continuous recorded prompt whose gaps never reach the 700ms a human's pause does, so
+    # the production threshold can never fire against it. Never set on a real call.
+    vad_end_frames: int | None = None
 
     created_at: float = field(default_factory=time.monotonic)
     connected_at: Optional[float] = None

@@ -225,6 +225,8 @@ class LoopbackIn(BaseModel):
     # against Asterisk's own speech — a full end-to-end test with no phone.
     mode: str = "echo"
     seconds: float = 4.0     # how long to run before reporting
+    # End-of-turn override in 20ms frames; see MediaSession.vad_end_frames.
+    vad_end_frames: int | None = None
 
 
 @app.post("/spike/loopback")
@@ -249,6 +251,7 @@ async def spike_loopback(body: LoopbackIn) -> dict:
     session = registry.create(label=f"loopback:{body.mode}")
     session.mode = body.mode
     session.recording_name = f"owen-voice-loopback-{session.session_uuid[:8]}"
+    session.vad_end_frames = body.vad_end_frames
 
     bridge_id = await ari.create_bridge()
     if not bridge_id:

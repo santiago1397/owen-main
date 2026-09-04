@@ -101,7 +101,7 @@ class Conversation:
         self.playout = Playout(session, writer)
         self.vad = TurnDetector(
             speech_rms=settings.VAD_SPEECH_RMS,
-            end_frames=settings.VAD_END_FRAMES,
+            end_frames=session.vad_end_frames or settings.VAD_END_FRAMES,
         )
         self.stt = get_stt()
         self.llm = get_llm()
