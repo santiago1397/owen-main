@@ -21,6 +21,7 @@ from app.audiosocket import (
 )
 from app.config import settings
 from app.session import MediaSession, peak_of, registry
+from app.tone import sine_frame
 
 logger = logging.getLogger("voice.audiosocket")
 
@@ -39,6 +40,7 @@ async def handle_connection(
     peer = writer.get_extra_info("peername")
     parser = FrameParser()
     session: MediaSession | None = None
+    pump: asyncio.Task | None = None
     logger.info("audiosocket: connection from %s", peer)
 
     try:
@@ -67,7 +69,10 @@ async def handle_connection(
                         return
                     session._writer = writer
                     session.connected_at = asyncio.get_running_loop().time()
-                    logger.info("audiosocket: session %s connected (%s)", sid, session.label)
+                    logger.info("audiosocket: session %s connected (%s, mode=%s)",
+                                sid, session.label, session.mode)
+                    if session.mode == "tone":
+                        pump = asyncio.create_task(_tone_pump(session, writer))
                     continue
 
                 if session is None:
@@ -80,9 +85,15 @@ async def handle_connection(
                     session.rx_bytes += len(frame.payload)
                     session.peak_amplitude = peak_of(frame.payload, session.peak_amplitude)
 
-                    # THE ECHO. Replaced by: STT -> LLM -> TTS in step 2.
-                    out = encode_audio(frame.payload)
-                    writer.write(out)
+                    # Asterisk paces the stream at one frame per 20 ms, so responding per
+                    # received frame keeps us naturally in step with real time — no timer,
+                    # no drift. Step 2 replaces this block with STT -> LLM -> TTS; the
+                    # frame-in/frame-out cadence stays exactly as it is.
+                    if session.mode == "tone":
+                        # The tone pump owns the send side on its own clock — see
+                        # _tone_pump. Nothing to write here.
+                        continue
+                    writer.write(encode_audio(frame.payload))  # THE ECHO
                     session.tx_frames += 1
                     session.tx_bytes += len(frame.payload)
                     # Backpressure: without draining, a slow socket grows an unbounded buffer
@@ -116,6 +127,8 @@ async def handle_connection(
         if session is not None:
             session.error = "handler exception"
     finally:
+        if pump is not None:
+            pump.cancel()
         if session is not None:
             session.closed_at = asyncio.get_running_loop().time()
             session._writer = None
@@ -133,6 +146,30 @@ async def handle_connection(
             await writer.wait_closed()
         except Exception:  # noqa: BLE001 - close is best-effort
             pass
+
+
+async def _tone_pump(session: MediaSession, writer: asyncio.StreamWriter) -> None:
+    """Emit a continuous sine on OUR OWN 20 ms clock, for the phone-free send-path proof.
+
+    Deliberately not driven by received frames. A bridge whose only member is the
+    external-media channel has no audio source, so it may deliver us nothing at all — and an
+    rx-driven sender would then sit silent and look like a broken send path when in fact it
+    was never asked to speak. Emitting on a timer is also what the real pipeline does: TTS
+    speaks when it has something to say, not when the caller happens to send a packet.
+    """
+    phase = 0.0
+    try:
+        while session.closed_at is None:
+            pcm, phase = sine_frame(phase)
+            writer.write(encode_audio(pcm))
+            session.tx_frames += 1
+            session.tx_bytes += len(pcm)
+            await writer.drain()
+            await asyncio.sleep(0.02)
+    except asyncio.CancelledError:
+        raise
+    except Exception:  # noqa: BLE001 - the pump must never take the connection down
+        logger.exception("audiosocket: tone pump failed (session %s)", session.session_uuid)
 
 
 async def start_server() -> asyncio.AbstractServer:

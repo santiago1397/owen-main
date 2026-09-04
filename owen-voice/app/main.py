@@ -40,6 +40,10 @@ _media_legs: dict[str, MediaSession] = {}
 
 _BACKOFF_MIN, _BACKOFF_MAX = 1.0, 30.0
 
+# Stock Asterisk sound, present in every install — the audio source for the receive-path
+# self-test. Using a built-in avoids depending on the TTS cache or the recordings volume.
+SELF_TEST_MEDIA = "sound:demo-congrats"
+
 
 # --- ARI event handling --------------------------------------------------------------------
 
@@ -67,24 +71,38 @@ async def _on_media_leg_start(channel_id: str, session: MediaSession) -> None:
     outbound calls: ARI returns from originate before the channel arrives, addChannel then
     fails with 422/409, and the legs never join. `handle_outbound_call` documents it. Same
     rule applies here, so we wait for the event rather than assuming.
+
+    Serves BOTH entry points: a real call (a caller leg to join) and the phone-free self-test
+    (no caller leg — Asterisk itself is the audio source and sink).
     """
-    if not session.call_channel_id:
-        return
-    bridge_id = await ari.create_bridge()
+    bridge_id = session.bridge_id or await ari.create_bridge()
     if not bridge_id:
         session.error = "bridge creation failed"
-        logger.error("spike %s: bridge failed; hanging up", session.session_uuid)
-        await ari.hangup(session.call_channel_id)
-        return
-    session.bridge_id = bridge_id
-    ok = await ari.add_to_bridge(bridge_id, session.call_channel_id, channel_id)
-    if not ok:
-        session.error = "addChannel failed"
-        logger.error("spike %s: addChannel failed; tearing down", session.session_uuid)
+        logger.error("session %s: bridge failed", session.session_uuid)
         await _teardown(session)
         return
-    logger.info("spike %s: bridged call=%s media=%s in %s — speak now",
-                session.session_uuid, session.call_channel_id, channel_id, bridge_id)
+    session.bridge_id = bridge_id
+
+    members = [channel_id]
+    if session.call_channel_id:
+        members.append(session.call_channel_id)
+    if not await ari.add_to_bridge(bridge_id, *members):
+        session.error = "addChannel failed"
+        logger.error("session %s: addChannel failed; tearing down", session.session_uuid)
+        await _teardown(session)
+        return
+    logger.info("session %s: bridged %s in %s (mode=%s)",
+                session.session_uuid, "+".join(members), bridge_id, session.mode)
+
+    if session.call_channel_id:
+        return  # a real call: the human supplies the audio
+
+    # Self-test. `echo` needs Asterisk to make a sound we can receive; `tone` must stay
+    # SILENT so that anything in the recording provably came from us.
+    if session.mode == "echo":
+        await ari.play_into_bridge(bridge_id, SELF_TEST_MEDIA)
+    else:
+        await ari.record_bridge(bridge_id, session.recording_name or "owen-voice-tone")
 
 
 async def _teardown(session: MediaSession) -> None:
@@ -198,6 +216,64 @@ async def sessions() -> dict:
     """Every session this process has seen, newest last. This is the evidence: `verdict`
     answers "did the transport work" without anyone needing to interpret raw counters."""
     return {"sessions": [s.snapshot() for s in registry.all()]}
+
+
+class LoopbackIn(BaseModel):
+    mode: str = "echo"       # "echo" proves RECEIVE, "tone" proves SEND
+    seconds: float = 4.0     # how long to run before reporting
+
+
+@app.post("/spike/loopback")
+async def spike_loopback(body: LoopbackIn) -> dict:
+    """Prove the media transport with NO phone, NO trunk and NO caller.
+
+    Asterisk is both the audio source and the sink, so each direction is provable on its own:
+
+      mode="echo"  RECEIVE proof. A stock Asterisk sound is played into the bridge; if we
+                   count frames with a non-zero peak, audio genuinely reached us.
+      mode="tone"  SEND proof. The bridge is otherwise SILENT and we emit a sine on our own
+                   clock while Asterisk records the bridge. Any sound in that recording can
+                   only have come from bytes we wrote back down the socket.
+
+    This is weaker than a real call in one specific way — it exercises no trunk, no codec
+    negotiation with BulkVS and no RTP over the network — so it proves the AudioSocket
+    transport, not the whole call path. A real call is still worth making.
+    """
+    if body.mode not in ("echo", "tone"):
+        raise HTTPException(422, "mode must be 'echo' or 'tone'")
+
+    session = registry.create(label=f"loopback:{body.mode}")
+    session.mode = body.mode
+    session.recording_name = f"owen-voice-loopback-{session.session_uuid[:8]}"
+
+    bridge_id = await ari.create_bridge()
+    if not bridge_id:
+        session.error = "bridge creation failed"
+        raise HTTPException(502, "could not create bridge — check ARI logs")
+    session.bridge_id = bridge_id
+
+    media_id = await ari.create_external_media(session_uuid=session.session_uuid)
+    if not media_id:
+        session.error = "externalMedia creation failed"
+        await ari.destroy_bridge(bridge_id)
+        raise HTTPException(
+            502,
+            "externalMedia failed — encapsulation=audiosocket may be unsupported on this "
+            "build; see AI_AGENT_SPEC D3 for the dialplan fallback",
+        )
+    session.media_channel_id = media_id
+    _media_legs[media_id] = session
+
+    # Bridging + the play/record happen on the media leg's StasisStart (see
+    # _on_media_leg_start); wait for the audio to actually move before reporting.
+    await asyncio.sleep(max(0.5, min(body.seconds, 20.0)))
+
+    if session.mode == "tone":
+        await ari.stop_recording(session.recording_name or "")
+    snap = session.snapshot()
+    await _teardown(session)
+    snap["recording_name"] = session.recording_name if session.mode == "tone" else None
+    return snap
 
 
 class SpikeCallIn(BaseModel):

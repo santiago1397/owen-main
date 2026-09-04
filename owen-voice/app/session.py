@@ -34,6 +34,13 @@ class MediaSession:
     media_channel_id: Optional[str] = None
     bridge_id: Optional[str] = None
     label: str = ""
+    # How this session drives the SEND direction:
+    #   "echo" — write every received frame back (the real spike; a caller hears themselves)
+    #   "tone" — emit a sine and ignore input, so a bridge recording proves the send path
+    #            even with no human and nothing else making sound
+    mode: str = "echo"
+    # Bridge recording name, for the tone self-test (the send-path evidence).
+    recording_name: str | None = None
 
     created_at: float = field(default_factory=time.monotonic)
     connected_at: Optional[float] = None
@@ -64,6 +71,7 @@ class MediaSession:
         return {
             "session_uuid": self.session_uuid,
             "label": self.label,
+            "mode": self.mode,
             "call_channel_id": self.call_channel_id,
             "media_channel_id": self.media_channel_id,
             "bridge_id": self.bridge_id,
@@ -85,6 +93,15 @@ class MediaSession:
             return f"error: {self.error}"
         if self.connected_at is None:
             return "asterisk never connected — check externalMedia + advertise host/port"
+        if self.mode == "tone":
+            # A tone session deliberately ignores input, so rx says nothing about success —
+            # the proof is that we sent, and that Asterisk's bridge recording is non-silent.
+            if self.tx_frames == 0:
+                return "no tone frames sent — send path failed inside owen-voice"
+            return (
+                f"SENT {self.tx_frames} tone frames "
+                "— confirm the bridge recording is non-silent to prove the return path"
+            )
         if self.rx_frames == 0:
             return "connected but no audio received — channel likely not bridged"
         if self.peak_amplitude == 0:

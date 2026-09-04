@@ -127,6 +127,42 @@ class AriClient:
     async def destroy_bridge(self, bridge_id: str) -> None:
         await self._request("DELETE", f"/bridges/{bridge_id}")
 
+    async def play_into_bridge(self, bridge_id: str, media: str) -> Optional[str]:
+        """Play a sound INTO a bridge — the audio source for the phone-free self-test.
+
+        Asterisk generating its own audio is what lets the RECEIVE direction be proven with
+        no caller, no trunk and no handset: if a known sound goes into the bridge and
+        owen-voice counts non-silent frames, the path works."""
+        data = await self._request(
+            "POST", f"/bridges/{bridge_id}/play", params={"media": media}
+        )
+        if data is None:
+            return None
+        return data.get("id") if isinstance(data, dict) else None
+
+    async def record_bridge(
+        self, bridge_id: str, name: str, *, fmt: str = "wav", max_seconds: int = 30
+    ) -> bool:
+        """Record everything mixed in a bridge.
+
+        This is the SEND-direction proof. Paired with `mode="tone"` — where owen-voice is the
+        only thing making sound — a non-silent recording can only have come from audio we
+        wrote back down the socket. `ifExists=overwrite` so a re-run does not 409."""
+        ok = await self._request(
+            "POST", f"/bridges/{bridge_id}/record",
+            params={
+                "name": name,
+                "format": fmt,
+                "maxDurationSeconds": max_seconds,
+                "ifExists": "overwrite",
+                "beep": "false",
+            },
+        )
+        return ok is not None
+
+    async def stop_recording(self, name: str) -> None:
+        await self._request("POST", f"/recordings/live/{name}/stop")
+
     # --- diagnostics -------------------------------------------------------------------------
 
     async def ping(self) -> bool:
