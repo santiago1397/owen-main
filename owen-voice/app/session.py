@@ -65,6 +65,7 @@ class MediaSession:
     rms_sum: float = 0.0
     rms_n: int = 0
     vad_starts: int = 0
+    max_quiet_run: int = 0
     vad_ends: int = 0
     # Speaker-labelled, the shape the backend's `transcriptions.segments` already uses, so
     # persisting it in step 3 is a write rather than a translation.
@@ -103,6 +104,7 @@ class MediaSession:
             "rms_max": round(self.rms_max, 1) if self.rms_n else None,
             "rms_avg": round(self.rms_sum / self.rms_n, 1) if self.rms_n else None,
             "vad_starts": self.vad_starts,
+            "max_quiet_run": self.max_quiet_run,
             "vad_ends": self.vad_ends,
             "last_turn_ms": self.last_turn_ms,
             "transcript": self.transcript,

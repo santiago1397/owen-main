@@ -139,6 +139,7 @@ class Conversation:
         self.session.rms_n += 1
 
         event = self.vad.push(pcm)
+        self.session.max_quiet_run = self.vad.max_quiet_run
 
         if event is not None and event[0] == "start":
             self._last_voice = time.monotonic()

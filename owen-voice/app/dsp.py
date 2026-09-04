@@ -72,6 +72,10 @@ class TurnDetector:
     _buf: list = field(default_factory=list, init=False)
     _preroll: list = field(default_factory=list, init=False)
     _speech_frames: int = field(default=0, init=False)
+    # Longest run of consecutive sub-threshold frames seen while in speech. If a turn never
+    # ends, this is the number that says whether the stream is never quiet or the threshold
+    # is simply wrong — the two indistinguishable causes of "the agent never answered".
+    max_quiet_run: int = field(default=0, init=False)
 
     def push(self, pcm: bytes) -> Optional[tuple[str, Optional[bytes]]]:
         loud = rms_of(pcm) >= self.speech_rms
@@ -97,6 +101,7 @@ class TurnDetector:
             return None
 
         self._quiet_run += 1
+        self.max_quiet_run = max(self.max_quiet_run, self._quiet_run)
         if self._quiet_run < self.end_frames:
             return None
 
