@@ -113,10 +113,13 @@ class Playout:
                     if len(self._q) >= PRIME_FRAMES or (self._complete and self._q):
                         self._playing = True
                 elif not self._q:
-                    # Underrun mid-utterance: stop and re-prime rather than emitting a gap
-                    # every 20ms until the next chunk lands.
+                    # Queue empty. Only an UNDERRUN if more audio was still expected — if the
+                    # utterance is complete this is simply the end of the sentence.
+                    # (The counter previously fired on both, so it reported one "underrun"
+                    # per completed sentence and made a healthy call look broken.)
+                    if not self._complete:
+                        self._session.underruns += 1
                     self._playing = False
-                    self._session.underruns += 1
                 if self._playing and self._q:
                     frame = self._q.popleft()
                     self._writer.write(encode_audio(frame))
