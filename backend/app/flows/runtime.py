@@ -34,6 +34,7 @@ from app.core.calllog import clog
 from app.core.config import settings
 from app.db import SessionLocal
 from app.flows.interpreter import AriControl, FlowInterpreter
+from app.agents.capture import normalise_capture
 from app.flows.transfer import resolve_transfer_target
 from app.models import (Agent, AgentSlot, AgentVersion, Call, CallCapture, CallEvent,
                         Flow, FlowVersion, Number, Transcription)
@@ -252,29 +253,6 @@ async def _pin_agent_version(db, provider_id: int, provider_call_sid: str, av_id
         )
         .values(agent_version_id=av_id)
     )
-
-
-# The SHARED CORE capture vocabulary (AI_AGENT_SPEC D7). Anything an agent reports outside
-# this set is preserved verbatim under `extra`, so a specialist agent can record what it needs
-# without ten agents inventing ten spellings of "customer name" and making cross-agent
-# reporting impossible.
-CAPTURE_CORE_FIELDS = ("name", "phone", "email", "address", "intent", "urgency", "notes")
-
-
-def normalise_capture(raw: dict) -> dict:
-    """Split an agent's captured payload into the shared core plus `extra`. Pure."""
-    core, extra = {}, {}
-    for key, value in (raw or {}).items():
-        if value in (None, ""):
-            continue
-        k = str(key).strip().lower()
-        if k in CAPTURE_CORE_FIELDS:
-            core[k] = value
-        else:
-            extra[str(key)] = value
-    if extra:
-        core["extra"] = extra
-    return core
 
 
 async def _persist_agent_output(

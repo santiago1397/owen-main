@@ -28,12 +28,18 @@ SCOPE_READ = "read"
 SCOPE_CONTENT = "content"
 SCOPE_SQL = "sql"
 SCOPE_LOGS = "logs"
+# The ONLY write scope. Deliberately separate from every /api/ai/* scope, which are
+# read-only by published contract (AI_AGENT_SPEC D13): /api/ai states in four places
+# that nothing there can mutate platform data, and machine consumers read that to
+# teach themselves the API. Writes get their own surface rather than falsifying it.
+SCOPE_AGENT_WRITE = "agent_write"
 
 SCOPES: dict[str, str] = {
     SCOPE_READ: "Curated metrics: call/lead/message counts, durations, series, pipeline health.",
     SCOPE_CONTENT: "Call transcripts, AI summaries, SMS bodies, and customer PII from parsed emails.",
     SCOPE_SQL: "Run read-only SQL via /api/ai/query.",
     SCOPE_LOGS: "Read captured warnings/errors, failed jobs and failed relays via /api/ai/errors.",
+    SCOPE_AGENT_WRITE: "WRITE captures and notes via /api/agent-runtime/*. The only scope that can change platform data.",
 }
 
 # Every key issued through the UI/CLI without an explicit scope list gets this.

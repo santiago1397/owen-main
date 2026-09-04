@@ -35,6 +35,15 @@ def validate_agent_config(config: dict | None) -> tuple[list[str], list[str]]:
         if name not in TOOLS:
             errors.append(f"unknown tool '{name}' (not in the fixed tool registry)")
 
+    # Custom HTTP tools (AI_AGENT_SPEC D6). Validated at activation so an operator is
+    # told their tool is broken here, rather than it failing in front of a caller.
+    try:
+        from app.flows.custom_tools import validate_custom_tools
+
+        errors.extend(validate_custom_tools(cfg.get("custom_tools")))
+    except Exception:  # noqa: BLE001 - validation must never block on an import
+        pass
+
     # Transfer allowlist (AI_AGENT_SPEC D9). Validated at ACTIVATION, because a malformed
     # entry means the agent silently cannot reach a destination the operator believes it can.
     targets = cfg.get("transfer_targets")

@@ -308,3 +308,35 @@ def get_llm(base_url: str = "", model: str = "") -> LanguageModel:
 
 def get_tts() -> TextToSpeech:
     return _TTS.get(settings.TTS_PROVIDER, OpenAITTS)()
+
+
+# --- custom tool execution (AI_AGENT_SPEC D6) -----------------------------------------------
+
+async def call_custom_tool(tool: dict, args: dict) -> tuple[int, object]:
+    """Invoke one declared HTTP tool. Returns (status, parsed_body); (0, None) on failure.
+
+    The timeout is the tool's MODE, not a global: a sync tool has ~800ms because the caller is
+    listening to silence, while an async one is fire-and-forget and its duration is nobody's
+    problem. Never raises — a caller must not lose a call because a backend was slow.
+    """
+    import httpx
+
+    from app.custom_tools import SYNC_BUDGET_S
+
+    timeout = SYNC_BUDGET_S if tool.get("mode") == "sync" else 20.0
+    method = tool.get("method", "GET")
+    kwargs: dict = {}
+    if method == "GET":
+        kwargs["params"] = args or None
+    else:
+        kwargs["json"] = args or {}
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as c:
+            r = await c.request(method, tool["url"], headers=tool.get("headers") or None, **kwargs)
+        try:
+            return r.status_code, r.json()
+        except ValueError:
+            return r.status_code, r.text[:2000]
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("custom tool %s failed: %r", tool.get("name"), exc)
+        return 0, None

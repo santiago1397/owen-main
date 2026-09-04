@@ -29,6 +29,9 @@ from app.config import settings
 from app.dsp import (TurnDetector, chunk_frames, looks_like_english, rms_of,
                      split_speakable)
 from app.providers import get_llm, get_stt, get_tts
+from app.custom_tools import find as find_custom
+from app.custom_tools import normalise as normalise_custom
+from app.custom_tools import openai_schema as custom_schema
 from app.tools import TOOLS, enabled_tools, openai_schema
 from app.session import MediaSession
 
@@ -158,10 +161,11 @@ class Conversation:
         # Only the tools this agent VERSION toggled on. The registry is closed, so a stale
         # toggle cannot smuggle in a capability that does not exist.
         self.tools = enabled_tools(self.agent.get("tools"))
-        self._tool_schema = (
-            openai_schema(self.tools, self.agent.get("transfer_targets"))
-            if self.tools else None
-        )
+        # Platform tools (closed registry) + this agent's own declared HTTP tools (D6).
+        self.custom = normalise_custom(self.agent.get("custom_tools"))
+        schema = openai_schema(self.tools, self.agent.get("transfer_targets")) if self.tools else []
+        schema += custom_schema(self.custom)
+        self._tool_schema = schema or None
         self.history: list[dict] = []
         self._turn: Optional[asyncio.Task] = None
         self._started = time.monotonic()
@@ -170,6 +174,8 @@ class Conversation:
         self._speaking_since: Optional[float] = None
         # Streamed tool-call fragments for the turn in flight, keyed by index.
         self._tool_calls: dict = {}
+        # Custom tools chosen this turn, run after dispatch so an exit port is decided first.
+        self._pending_custom: list = []
 
     # --- lifecycle ---
 
@@ -364,6 +370,7 @@ class Conversation:
                 t_first = time.monotonic()
 
             exit_port = self._dispatch_tools()
+            await self._run_custom_tools()
             t_done = time.monotonic()
             self.history.append({"role": "assistant", "content": reply})
             self.session.transcript.append({"speaker": "agent", "text": reply})
@@ -423,6 +430,8 @@ class Conversation:
         for slot in self._tool_calls.values():
             name = slot.get("name") or ""
             if name not in self.tools:
+                if find_custom(self.custom, name):
+                    self._pending_custom.append((name, args))
                 continue    # not toggled on, or not in the registry at all
             try:
                 args = json.loads(slot.get("args") or "{}")
@@ -450,6 +459,47 @@ class Conversation:
                                 self.session.session_uuid, sorted(clean))
         self._tool_calls = {}
         return exit_port
+
+    async def _run_custom_tools(self) -> None:
+        """Run the declared HTTP tools the model asked for this turn.
+
+        A SYNC tool blocks the reply for at most ~800ms and speaks a filler first, so the
+        silence is explained rather than dead. An ASYNC one is dispatched and forgotten: the
+        caller gets an immediate acknowledgement and the work lands on its own, which is why
+        writes default to that mode.
+
+        The RESULT is appended to the conversation as context rather than spoken verbatim —
+        the model decides what of it the caller actually needs to hear."""
+        from app.providers import call_custom_tool
+
+        pending, self._pending_custom = self._pending_custom, []
+        for name, args in pending:
+            tool = find_custom(self.custom, name)
+            if tool is None:
+                continue
+            if tool["mode"] == "async":
+                # Fire and forget. Deliberately not awaited: a write must never make a caller
+                # wait, and its failure must never reroute a call.
+                asyncio.create_task(call_custom_tool(tool, args))
+                self.history.append({
+                    "role": "system",
+                    "content": f"[{name} was submitted and is being processed.]",
+                })
+                logger.info("session %s: async tool %s dispatched",
+                            self.session.session_uuid, name)
+                continue
+
+            if tool.get("filler"):
+                await self._speak(tool["filler"])
+            status, body = await call_custom_tool(tool, args)
+            self.session.tool_calls += 1
+            snippet = str(body)[:800] if body is not None else "no response"
+            self.history.append({
+                "role": "system",
+                "content": f"[{name} returned status {status}: {snippet}]",
+            })
+            logger.info("session %s: sync tool %s -> %s",
+                        self.session.session_uuid, name, status)
 
     def _trimmed_history(self) -> list[dict]:
         """Keep the last N turns only.

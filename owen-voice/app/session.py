@@ -67,6 +67,7 @@ class MediaSession:
 
     # --- conversation (step 2) ---
     turns: int = 0
+    tool_calls: int = 0
     last_turn_ms: int = 0
     # What the CALLER experienced: silence between them stopping and hearing the first
     # syllable. `last_turn_ms` only records when synthesis finished, which nobody hears.
@@ -131,6 +132,7 @@ class MediaSession:
             "peak_amplitude": self.peak_amplitude,
             "dtmf": self.dtmf,
             "turns": self.turns,
+            "tool_calls": self.tool_calls,
             "rms_min": round(self.rms_min, 1) if self.rms_n else None,
             "rms_max": round(self.rms_max, 1) if self.rms_n else None,
             "rms_avg": round(self.rms_sum / self.rms_n, 1) if self.rms_n else None,

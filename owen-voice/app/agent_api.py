@@ -57,6 +57,9 @@ class AgentConfig(BaseModel):
     # Named destinations this agent may transfer to (D9). Names only reach the
     # model; OWEN resolves each to a real target and performs the move.
     transfer_targets: dict = Field(default_factory=dict)
+    # This agent's own declared HTTP tools (D6). Immutable, activation-validated
+    # and version-pinned by OWEN: the model chooses WHICH, never where.
+    custom_tools: list = Field(default_factory=list)
 
 
 class SessionIn(BaseModel):

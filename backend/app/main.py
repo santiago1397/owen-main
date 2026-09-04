@@ -5,6 +5,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import text
 
+from app.api import agent_runtime as agent_runtime_api
 from app.api import agents as agents_api
 from app.api import ai as ai_api
 from app.api import api_keys as api_keys_api
@@ -76,6 +77,9 @@ app.include_router(billing_api.router)
 app.include_router(emails_api.router)
 app.include_router(flows_api.router)
 app.include_router(agents_api.router)
+# The ONLY write surface for machine credentials. Kept separate from /api/ai/*,
+# which publishes a read-only guarantee that machine consumers rely on (D13).
+app.include_router(agent_runtime_api.router)
 app.include_router(recordings_api.router)
 app.include_router(settings_api.router)
 app.include_router(messages_api.router)

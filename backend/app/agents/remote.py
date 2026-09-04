@@ -64,6 +64,9 @@ class RemoteVoiceAgentSession:
                 "tts_instructions": str(spec.config.get("tts_instructions") or ""),
                 # Only the NAMES travel; the targets stay here and are resolved
                 # against the pinned version when the agent picks one (D9).
+                # Declared verbatim: the model sees names and schemas, and the URL
+                # set is fixed in the pinned version an operator wrote (D6).
+                "custom_tools": spec.config.get("custom_tools") or [],
                 "transfer_targets": {
                     k: {"kind": (v or {}).get("kind", "number")}
                     for k, v in (spec.config.get("transfer_targets") or {}).items()
