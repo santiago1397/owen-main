@@ -515,13 +515,27 @@ one that admits ignorance."*
 The only thing here that can invalidate the design is whether audio round-trips. Everything
 else is code this codebase has demonstrably written before.
 
-> **STATUS 2026-09-04.** Steps 0–5 built, deployed and green. Steps 6–8 built and committed
-> LOCALLY, **not yet deployed** — see the deploy checklist below. Nothing has yet carried a
-> real customer call: a test DID still needs pointing at an agent-bearing flow.
+> **STATUS 2026-09-04.** All 8 steps built, deployed and green on the VPS at revision
+> `c3e6a9d1f725`. Nothing has yet carried a real customer call — a test DID still needs
+> pointing at an agent-bearing flow, which is the one remaining step and is data, not code.
 
-## Deploy checklist — steps 6-8 (not yet run)
+## Deploy record — steps 6-8 (DONE 2026-09-04)
 
-Three commits are local-only: `26fbc35` (step 6), `59d87ac` (step 7), `233f68f` (step 8).
+Deployed from `0e2c25f`. Both migrations applied cleanly on first run; `app` was brought up
+alone to migrate while `worker` kept serving on the old image, then `worker` and `owen-voice`
+followed. Verified afterwards:
+
+| Check | Result |
+|---|---|
+| Alembic | `c3e6a9d1f725` (head) |
+| New schema | `agent_slots`, `call_charges.provenance/agent_version_id/usage`, `call_captures` all live |
+| Existing data | 31,661 calls · 8,212 events · 116 active numbers untouched |
+| Existing billing | all 460 rows stamped `rated`, sum unchanged at $0.812290, 0 derived |
+| Container tests | 12/12 pass, including the pre-existing telephony and billing suites |
+| Public surface | api 200 · frontend 200 · `/api/ai` 401 · `/api/agent-runtime` 401 |
+| ARI consumer | reconnected on `app=owen` |
+
+Rollback point was `2194ddb` / `a1c4e7f2b830`; not needed.
 
 **Migrations to apply** (self-apply at startup behind the advisory lock):
 
