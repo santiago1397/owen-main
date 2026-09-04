@@ -290,6 +290,9 @@ class SpikeCallIn(BaseModel):
     # "agent" talks to you (step 2); "echo" plays you back to yourself (step 1, for
     # debugging the transport in isolation when a conversation misbehaves).
     mode: str = "agent"
+    voice: str | None = None          # alloy|nova|coral|sage|shimmer|onyx|echo|fable|ash|ballad|verse
+    tts_instructions: str | None = None
+    tts_model: str | None = None
 
 
 @app.post("/spike/call")
@@ -313,6 +316,9 @@ async def spike_call(body: SpikeCallIn) -> dict:
         raise HTTPException(422, "mode must be 'agent' or 'echo'")
     session = registry.create(label=f"spike->{to}")
     session.mode = body.mode
+    session.tts_voice = body.voice
+    session.tts_instructions = body.tts_instructions
+    session.tts_model = body.tts_model
     endpoint = f"PJSIP/{to}@{settings.TRUNK_NAME}"
 
     # Pre-assign the channel id so the StasisStart that follows is correlatable the moment it

@@ -76,6 +76,13 @@ class Settings:
     TTS_MODEL: str = _s("VOICE_TTS_MODEL", "gpt-4o-mini-tts")
     TTS_VOICE: str = _s("VOICE_TTS_VOICE", "alloy")
     TTS_MAX_CHARS: int = _i("VOICE_TTS_MAX_CHARS", 1200)
+    # gpt-4o-mini-tts accepts plain-English direction for DELIVERY (pace, warmth, tone) —
+    # a large, free improvement most deployments never use. Ignored by older tts-1 models.
+    TTS_INSTRUCTIONS: str = _s(
+        "VOICE_TTS_INSTRUCTIONS",
+        "Speak warmly and conversationally, like a friendly receptionist who is genuinely "
+        "glad to help. Natural pace, not rushed. Do not sound like a recording.",
+    )
 
     # --- Turn detection ---------------------------------------------------------------------
     # Ours to do because we are not on Deepgram Flux, which has end-of-turn built in.

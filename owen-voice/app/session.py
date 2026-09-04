@@ -45,6 +45,12 @@ class MediaSession:
     # continuous recorded prompt whose gaps never reach the 700ms a human's pause does, so
     # the production threshold can never fire against it. Never set on a real call.
     vad_end_frames: int | None = None
+    # Per-call TTS overrides, so voices can be compared on a REAL phone call rather than on
+    # laptop speakers — the document's §3 warning is that 8kHz destroys much of what premium
+    # TTS charges for, and the only honest test is down the actual phone.
+    tts_voice: str | None = None
+    tts_instructions: str | None = None
+    tts_model: str | None = None
 
     created_at: float = field(default_factory=time.monotonic)
     connected_at: Optional[float] = None

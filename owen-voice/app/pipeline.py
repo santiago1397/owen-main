@@ -224,7 +224,12 @@ class Conversation:
         return self.history[-limit:] if limit > 0 else self.history
 
     async def _speak(self, text: str) -> int:
-        pcm = await self.tts.synthesize(text, settings.TTS_VOICE)
+        pcm = await self.tts.synthesize(
+            text,
+            self.session.tts_voice or settings.TTS_VOICE,
+            instructions=self.session.tts_instructions or "",
+            model=self.session.tts_model or "",
+        )
         if not pcm:
             return 0
         return self.playout.enqueue(pcm)

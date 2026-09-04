@@ -133,7 +133,8 @@ class OpenAICompatibleLLM:
 class TextToSpeech(Protocol):
     name: str
 
-    async def synthesize(self, text: str, voice: str) -> bytes: ...
+    async def synthesize(self, text: str, voice: str,
+                         instructions: str = "", model: str = "") -> bytes: ...
 
 
 class OpenAITTS:
@@ -147,16 +148,22 @@ class OpenAITTS:
 
     name = "openai"
 
-    async def synthesize(self, text: str, voice: str) -> bytes:
+    async def synthesize(self, text: str, voice: str,
+                         instructions: str = "", model: str = "") -> bytes:
         text = (text or "").strip()
         if not text or not settings.OPENAI_API_KEY:
             return b""
         payload = {
-            "model": settings.TTS_MODEL,
+            "model": model or settings.TTS_MODEL,
             "voice": voice or settings.TTS_VOICE,
             "input": text[: settings.TTS_MAX_CHARS],
             "response_format": "wav",
         }
+        directive = instructions if instructions else settings.TTS_INSTRUCTIONS
+        if directive:
+            # Only the gpt-4o-mini-tts family honours this; older models ignore the field
+            # rather than erroring, so it is safe to always send.
+            payload["instructions"] = directive
         try:
             async with httpx.AsyncClient(timeout=_TTS_TIMEOUT) as c:
                 r = await c.post(
