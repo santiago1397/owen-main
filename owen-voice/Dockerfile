@@ -18,8 +18,11 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app ./app
 
-RUN useradd --create-home --uid 10001 voice && chown -R voice:voice /srv
-USER voice
+# Run as non-root (SERVER_SETUP.md security checklist). Same pattern and same name as
+# backend/Dockerfile deliberately: `voice` cannot be used here because Debian's base image
+# already ships a system GROUP called `voice`, so `useradd voice` fails trying to create it.
+RUN useradd --create-home appuser && chown -R appuser /srv
+USER appuser
 
 # 8099 = control API, 9092 = AudioSocket listener.
 EXPOSE 8099 9092
