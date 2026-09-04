@@ -41,6 +41,17 @@ class RemoteVoiceAgentSession:
 
         from app.core.config import settings
 
+        # Spend cap (D14). A COST switch, distinct from the VOICE_AGENT_ENGINE behaviour
+        # kill-switch: over the ceiling, new sessions take the `failed` port and route to the
+        # flow's fallback (voicemail) — the same safe path as capacity exhaustion. A runaway
+        # loop at 3am is exactly what a retry queue and a 4-slot pool will not catch.
+        if await _over_spend_cap():
+            logger.warning(
+                "owen_voice: daily AI spend cap reached; routing linkedid=%s to fallback",
+                ctx.linkedid,
+            )
+            return AgentResult(port="failed")
+
         base = (settings.VOICE_SERVICE_URL or "").rstrip("/")
         if not base:
             logger.warning("owen_voice: VOICE_SERVICE_URL not set; taking the failed port")
@@ -120,8 +131,47 @@ class RemoteVoiceAgentSession:
             result = dict(result)
             result["transcript"] = transcript
             result["turns"] = data.get("turns") or 0
+        if data.get("usage"):
+            result = dict(result)
+            result["usage"] = data["usage"]
         logger.info(
             "owen_voice: linkedid=%s finished on port '%s' after %s turn(s)",
             ctx.linkedid, port, data.get("turns") or 0,
         )
         return AgentResult(port=port, data=result)
+
+
+async def _over_spend_cap() -> bool:
+    """True when today's DERIVED AI spend has hit the configured ceiling.
+
+    Best-effort and fail-OPEN: if the check itself errors we let the call proceed. A cost
+    guard that can block every call when the database hiccups is worse than the overspend it
+    prevents — and the cap is a backstop against runaway loops, not a billing system.
+    """
+    from app.core.config import settings
+
+    cap = float(getattr(settings, "AI_DAILY_SPEND_CAP_USD", 0) or 0)
+    if cap <= 0:
+        return False
+    try:
+        from datetime import datetime, timedelta, timezone
+
+        from sqlalchemy import func as sa_func
+        from sqlalchemy import select
+
+        from app.db import SessionLocal
+        from app.models import CallCharge
+        from app.services.ai_cost import AI_KINDS
+
+        since = datetime.now(timezone.utc) - timedelta(days=1)
+        async with SessionLocal() as db:
+            spent = (await db.execute(
+                select(sa_func.coalesce(sa_func.sum(CallCharge.amount), 0)).where(
+                    CallCharge.kind.in_(AI_KINDS),
+                    CallCharge.created_at >= since,
+                )
+            )).scalar_one()
+        return float(spent or 0) >= cap
+    except Exception:  # noqa: BLE001 - fail open; see the docstring
+        logger.debug("spend cap check unavailable", exc_info=True)
+        return False

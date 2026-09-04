@@ -75,6 +75,8 @@ class SessionOut(BaseModel):
     data: dict = Field(default_factory=dict)
     turns: int = 0
     transcript: list = Field(default_factory=list)
+    # Vendor-reported usage, for OWEN's DERIVED cost rows (D14).
+    usage: dict = Field(default_factory=dict)
     session_uuid: str = ""
 
 
@@ -140,6 +142,7 @@ async def run_session(
             data=session.result_data,
             turns=session.turns,
             transcript=session.transcript,
+            usage=session.usage,
             session_uuid=session.session_uuid,
         )
     except Exception:  # noqa: BLE001 - never raise into the flow; `failed` routes to fallback

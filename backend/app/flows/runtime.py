@@ -35,9 +35,10 @@ from app.core.config import settings
 from app.db import SessionLocal
 from app.flows.interpreter import AriControl, FlowInterpreter
 from app.agents.capture import normalise_capture
+from app.services.ai_cost import PROVENANCE_DERIVED, charges_for_session, session_total
 from app.flows.transfer import resolve_transfer_target
-from app.models import (Agent, AgentSlot, AgentVersion, Call, CallCapture, CallEvent,
-                        Flow, FlowVersion, Number, Transcription)
+from app.models import (Agent, AgentSlot, AgentVersion, Call, CallCapture, CallCharge,
+                        CallEvent, Flow, FlowVersion, Number, Transcription)
 from app.providers.asterisk import linkedid as _linkedid
 from app.services import queue, sms
 from app.services.ingestion import _get_or_create_provider
@@ -311,6 +312,34 @@ async def _persist_agent_output(
         ))
         logger.info("agent transcript stored for %s (%d turns)",
                     provider_call_sid, len(segments))
+
+    # DERIVED cost (D14). Written alongside the carrier's RATED rows so "what did this call
+    # cost me, all in?" stays one query — but stamped `derived`, because no vendor issued
+    # these figures and presenting a computed number as an invoice is exactly the mistake
+    # services/billing.py was rewritten to stop making.
+    usage = data.get("usage")
+    if isinstance(usage, dict) and usage:
+        charges = charges_for_session(usage)
+        for ch in charges:
+            db.add(CallCharge(
+                uniqueid=f"{provider_call_sid}:{ch.kind}",
+                linkedid=provider_call_sid,
+                kind=ch.kind,
+                call_id=call.id,
+                number_id=call.number_id,
+                direction=call.direction or "inbound",
+                started_at=call.started_at,
+                rate_code=ch.rate_code,
+                amount=ch.amount,
+                unrated=ch.unrated,
+                unrated_reason=ch.unrated_reason,
+                provenance=PROVENANCE_DERIVED,
+                agent_version_id=av_id,
+                usage=ch.usage,
+            ))
+        total, any_unrated = session_total(charges)
+        logger.info("agent cost for %s: $%s%s", provider_call_sid, total,
+                    " (INCOMPLETE — some usage unpriced)" if any_unrated else "")
 
 
 async def _emit_node_event(

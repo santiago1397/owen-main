@@ -652,6 +652,17 @@ class CallCharge(Base):
     # Recorded at 0 but FLAGGED — an unpriceable leg is surfaced, never silently free.
     unrated: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false())
     unrated_reason: Mapped[str | None] = mapped_column(String)
+    # 'rated' = the CARRIER issued this figure. 'derived' = computed from vendor-reported
+    # usage (AI_AGENT_SPEC D14). Distinguishable by column rather than by convention, because
+    # this module was rewritten once already to stop presenting estimates as invoices.
+    provenance: Mapped[str] = mapped_column(String, default="rated", server_default="rated")
+    # Which agent config incurred it — makes "v7 doubled our token spend" a query.
+    agent_version_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("agent_versions.id")
+    )
+    # Vendor-reported usage kept verbatim, so a rate correction can be re-applied later
+    # without re-running any calls.
+    usage: Mapped[dict | None] = mapped_column(JSONB)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 

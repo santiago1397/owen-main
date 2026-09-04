@@ -159,6 +159,14 @@ class Settings(BaseSettings):
     # are what actually bound a conversation.
     VOICE_SERVICE_TIMEOUT_SECONDS: int = 900
 
+    # Daily AI spend ceiling in USD (AI_AGENT_SPEC D14). DISTINCT from
+    # VOICE_AGENT_ENGINE, which is a BEHAVIOUR switch forcing every agent to the
+    # dummy: this is a COST switch. Over the cap, new agent sessions are refused and
+    # take the `failed` port -> the flow's fallback (voicemail) -- the same safe path
+    # as capacity exhaustion. A runaway loop at 3am is exactly what a retry queue and
+    # a 4-slot pool will not catch on their own. 0 = no cap.
+    AI_DAILY_SPEND_CAP_USD: float = 0.0
+
     VOICE_AGENT_ENGINE: str = ""  # "" = per-agent | dummy | openai_realtime | vapi | diy
 
     # OpenAI Realtime voice-agent runtime (Ticket 12). Only active when an agent's engine (or

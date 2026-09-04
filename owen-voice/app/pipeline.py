@@ -295,6 +295,12 @@ class Conversation:
         mid-turn should abandon the answer, not queue it up behind the caller's new question."""
         t0 = time.monotonic()
         try:
+            # 8kHz, 16-bit mono: two bytes per sample.
+            u = self.session.usage
+            u["stt_model"] = settings.STT_MODEL
+            u["stt_audio_seconds"] = round(
+                u.get("stt_audio_seconds", 0) + len(audio) / (8000 * 2), 2
+            )
             text = await self.stt.transcribe(audio)
             if not text:
                 logger.info("session %s: empty transcript, ignoring turn",
@@ -529,6 +535,9 @@ class Conversation:
         instructions = self.session.tts_instructions or ""
         model = self.session.tts_model or ""
         self.playout.begin_utterance()
+        u = self.session.usage
+        u["tts_model"] = model or settings.TTS_MODEL
+        u["tts_characters"] = u.get("tts_characters", 0) + len(text)
         frames = 0
         # Collect the WHOLE sentence before queueing any of it. Enqueueing chunks as they
         # arrive is what produced gaps inside words: the pump drains at a strict 20ms and a
