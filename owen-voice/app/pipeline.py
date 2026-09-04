@@ -196,25 +196,42 @@ class Conversation:
             # llm(570ms) + tts(1300ms) of dead air before the caller heard a syllable; here
             # the first sentence starts speaking while the rest is still being generated.
             reply, frames, t_first = "", 0, None
-            buffer = ""
-            async for piece in self.llm.reply_stream(
-                settings.AGENT_SYSTEM_PROMPT, self._trimmed_history()
-            ):
-                buffer += piece
-                ready, buffer = split_speakable(buffer)
-                for sentence in ready:
+            sentences: asyncio.Queue = asyncio.Queue()
+
+            async def produce() -> None:
+                """Drain the LLM stream into speakable sentences.
+
+                A separate task on purpose. Calling _speak() inline inside the LLM loop stops
+                us consuming further deltas until that sentence has finished synthesizing, so
+                sentence 2 is not even being generated while sentence 1 speaks — which
+                serialises exactly what this change exists to overlap."""
+                buf = ""
+                try:
+                    async for piece in self.llm.reply_stream(
+                        settings.AGENT_SYSTEM_PROMPT, self._trimmed_history()
+                    ):
+                        buf += piece
+                        ready, buf = split_speakable(buf)
+                        for s in ready:
+                            await sentences.put(s)
+                    if buf.strip():
+                        await sentences.put(buf.strip())
+                finally:
+                    await sentences.put(None)   # end sentinel, even on failure
+
+            producer = asyncio.create_task(produce())
+            try:
+                while True:
+                    sentence = await sentences.get()
+                    if sentence is None:
+                        break
                     reply = f"{reply} {sentence}".strip()
                     n = await self._speak(sentence)
                     frames += n
                     if t_first is None and n:
                         t_first = time.monotonic()
-            tail = buffer.strip()
-            if tail:
-                reply = f"{reply} {tail}".strip()
-                n = await self._speak(tail)
-                frames += n
-                if t_first is None and n:
-                    t_first = time.monotonic()
+            finally:
+                producer.cancel()
 
             if not reply:
                 # Streaming produced nothing (provider without SSE, or an error). Fall back to

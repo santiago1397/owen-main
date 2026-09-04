@@ -56,7 +56,10 @@ class Settings:
     OPENAI_BASE_URL: str = _s("OPENAI_BASE_URL", "https://api.openai.com/v1")
 
     STT_PROVIDER: str = _s("VOICE_STT_PROVIDER", "openai")
-    STT_MODEL: str = _s("VOICE_STT_MODEL", "whisper-1")
+    # gpt-4o-mini-transcribe measured at 452ms against whisper-1's 1415ms on this host for a
+    # 3s utterance — the same API, the same key, 3x faster. STT was the largest single term in
+    # the turn budget, so this is the cheapest latency win available.
+    STT_MODEL: str = _s("VOICE_STT_MODEL", "gpt-4o-mini-transcribe")
     STT_LANGUAGE: str = _s("VOICE_STT_LANGUAGE", "en")
 
     # Any OpenAI-compatible endpoint: OpenAI, MiniMax, DeepSeek, Kimi, or an aggregator.
@@ -87,7 +90,10 @@ class Settings:
     # --- Turn detection ---------------------------------------------------------------------
     # Ours to do because we are not on Deepgram Flux, which has end-of-turn built in.
     VAD_SPEECH_RMS: float = float(_s("VOICE_VAD_SPEECH_RMS", "700") or 700)
-    VAD_END_FRAMES: int = _i("VOICE_VAD_END_FRAMES", 35)   # x20ms = 700ms of silence
+    # x20ms. 600ms rather than 700: this silence is pure perceived latency on EVERY turn and
+    # is not counted in turn timings (the clock starts when the turn ends). Short enough to
+    # feel responsive, long enough to survive a mid-sentence pause.
+    VAD_END_FRAMES: int = _i("VOICE_VAD_END_FRAMES", 30)
 
     # --- Agent (step 2 uses one hardcoded agent; step 3 reads these from agent_versions) -----
     AGENT_SYSTEM_PROMPT: str = _s(
