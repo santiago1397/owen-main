@@ -57,6 +57,17 @@ class RemoteVoiceAgentSession:
             logger.warning("owen_voice: VOICE_SERVICE_URL not set; taking the failed port")
             return AgentResult(port="failed")
 
+        # Caller context (CRM_CONTEXT_SPEC). OWEN assembles the LOCAL half for free -- it has
+        # the database -- and resolves the provider to a plain URL so owen-voice only ever
+        # speaks one protocol (C6/C16). The external fetch happens THERE, concurrently with
+        # media attach, because that is where the latency budget lives.
+        local_ctx: dict = {}
+        provider: dict = {}
+        try:
+            local_ctx, provider = await _build_context(spec, ctx)
+        except Exception:  # noqa: BLE001 - context is an enhancement; never fail a call for it
+            logger.exception("owen_voice: building caller context failed (linkedid=%s)", ctx.linkedid)
+
         guard = spec.guardrails if isinstance(spec.guardrails, dict) else {}
         payload = {
             "channel_id": ctx.channel_id,
@@ -78,6 +89,11 @@ class RemoteVoiceAgentSession:
                 # Declared verbatim: the model sees names and schemas, and the URL
                 # set is fixed in the pinned version an operator wrote (D6).
                 "custom_tools": spec.config.get("custom_tools") or [],
+                # Already resolved: names, history and prior captures OWEN knows locally.
+                "context": local_ctx,
+                # {url, headers, allowlist} or {} -- owen-voice POSTs to the url and filters
+                # the response to the allowlist. It never learns which CRM answered.
+                "context_provider": provider,
                 "transfer_targets": {
                     k: {"kind": (v or {}).get("kind", "number")}
                     for k, v in (spec.config.get("transfer_targets") or {}).items()
@@ -175,3 +191,47 @@ async def _over_spend_cap() -> bool:
     except Exception:  # noqa: BLE001 - fail open; see the docstring
         logger.debug("spend cap check unavailable", exc_info=True)
         return False
+
+
+async def _build_context(spec: AgentSpec, ctx: AgentCallContext) -> tuple[dict, dict]:
+    """(local_context, provider_descriptor) for this call.
+
+    The provider is flattened to `{url, headers, allowlist}` HERE rather than passed as a
+    kind. `kind: ghl` resolves to OWEN's own adapter endpoint, so owen-voice has exactly one
+    code path and a future in-house CRM is indistinguishable from the built-in one (C16).
+    """
+    from app.agents.context import validate_provider
+    from app.core.config import settings
+    from app.db import SessionLocal
+    from app.services.caller_context import local_context
+
+    local: dict = {}
+    if ctx.caller_number:
+        async with SessionLocal() as db:
+            local = await local_context(db, ctx.caller_number)
+
+    cfg = spec.config.get("context_provider") if isinstance(spec.config, dict) else None
+    if not isinstance(cfg, dict) or validate_provider(cfg):
+        return local, {}          # absent or misconfigured -> local half only
+    kind = str(cfg.get("kind") or "none").lower()
+    allowlist = [str(a) for a in (cfg.get("allowlist") or [])]
+
+    if kind == "ghl":
+        if not settings.AGENT_RUNTIME_KEY:
+            logger.warning(
+                "owen_voice: context_provider kind 'ghl' needs AGENT_RUNTIME_KEY set; "
+                "falling back to local context only"
+            )
+            return local, {}
+        return local, {
+            "url": f"{settings.OWEN_INTERNAL_URL.rstrip('/')}/api/agent-runtime/crm/lookup",
+            "headers": {"X-OWEN-Key": settings.AGENT_RUNTIME_KEY},
+            "allowlist": allowlist,
+        }
+    if kind == "http":
+        return local, {
+            "url": str(cfg.get("url") or ""),
+            "headers": cfg.get("headers") if isinstance(cfg.get("headers"), dict) else {},
+            "allowlist": allowlist,
+        }
+    return local, {}

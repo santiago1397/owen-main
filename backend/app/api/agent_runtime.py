@@ -154,3 +154,120 @@ async def call_context(
             for c in captures
         ],
     }
+
+
+# --- CRM context (CRM_CONTEXT_SPEC C15/C16) ------------------------------------------------
+# The built-in `ghl` adapter is exposed HERE, behind the same generic contract an external
+# provider implements. That is what keeps owen-voice simple: it only ever speaks one protocol
+# and POSTs to a URL, and whether a real CRM or one of OWEN's own adapters answers is a
+# resolution detail it never sees. A future in-house CRM implements these two shapes and OWEN
+# learns nothing about it.
+
+
+class LookupIn(BaseModel):
+    caller_number: str
+    dialed_number: str = ""
+    linkedid: str = ""
+
+
+@router.post("/crm/lookup")
+async def crm_lookup(
+    body: LookupIn,
+    _key=Depends(require_scope(SCOPE_AGENT_WRITE)),
+) -> dict:
+    """The built-in GHL adapter, in provider shape: `{display_name, summary, facts}`.
+
+    Never raises and never 500s on a CRM problem — an unknown caller is a normal outcome, and
+    this runs while someone is waiting to be greeted. A miss returns empty fields, and the
+    agent simply opens with its generic greeting."""
+    from app.providers import ghl_api
+
+    contact = await ghl_api.find_contact_by_phone(body.caller_number)
+    if not contact:
+        return {"display_name": None, "summary": "", "facts": {}}
+
+    name = " ".join(
+        p for p in [contact.get("firstName"), contact.get("lastName")] if p
+    ).strip() or contact.get("contactName") or contact.get("name")
+
+    facts: dict = {}
+    for src, dst in (("email", "email"), ("address1", "address"), ("city", "city"),
+                     ("companyName", "company"), ("source", "lead_source")):
+        if contact.get(src):
+            facts[dst] = contact[src]
+    for tag in ("tags",):
+        if isinstance(contact.get(tag), list) and contact[tag]:
+            facts["tags"] = ", ".join(str(t) for t in contact[tag][:5])
+
+    # State, not just identity — the thing a CRM knows and OWEN does not (C9).
+    opps = await ghl_api.contact_opportunities(contact.get("id") or "")
+    open_opps = [o for o in opps if str(o.get("status") or "").lower() == "open"]
+    summary_bits = []
+    if open_opps:
+        first = open_opps[0]
+        summary_bits.append(
+            f"{len(open_opps)} open opportunity"
+            + ("s" if len(open_opps) > 1 else "")
+            + (f", most recent '{first.get('name')}'" if first.get("name") else "")
+        )
+        if first.get("monetaryValue"):
+            facts["open_value"] = str(first["monetaryValue"])
+        if first.get("pipelineStageId"):
+            facts["stage"] = str(first.get("stageName") or first["pipelineStageId"])
+    return {
+        "display_name": name or None,
+        "summary": ". ".join(summary_bits),
+        "facts": facts,
+    }
+
+
+class ReportIn(BaseModel):
+    linkedid: str
+    caller_number: str = ""
+    outcome: str = ""
+    duration_s: int | None = None
+    captures: list = []
+    transfer: str | None = None
+    owen_url: str | None = None
+
+
+@router.post("/crm/report")
+async def crm_report(
+    body: ReportIn,
+    _key=Depends(require_scope(SCOPE_AGENT_WRITE)),
+) -> dict:
+    """The built-in GHL adapter for the write direction (C11/C12).
+
+    Writes a TIMELINE ENTRY — outcome, what was captured, and a link back to OWEN — not the
+    transcript. A 40-turn transcript in a CRM note is a worse copy of something OWEN already
+    stores with the audio beside it, and GHL has no transcript search worth using.
+
+    Uses the direct v2 API, never the webhook trigger: the dormant `GHL_CALL_WEBHOOK_URL`
+    path costs a premium execution per completed call, and the token already in `.env.prod`
+    does this free."""
+    from app.providers import ghl_api
+
+    contact = await ghl_api.find_contact_by_phone(body.caller_number)
+    if not contact or not contact.get("id"):
+        # Nothing to attach to. Deliberately not an error: an unknown caller is normal, and
+        # creating a contact from a single call is a decision for the capture relay, not this.
+        return {"ok": False, "reason": "no matching contact"}
+
+    lines = [f"AI agent call{f' — {body.outcome}' if body.outcome else ''}."]
+    if body.duration_s:
+        lines.append(f"Duration: {body.duration_s}s.")
+    merged: dict = {}
+    for cap in body.captures or []:
+        for k, v in (cap.get("fields") or {}).items():
+            if k != "extra" and v not in (None, ""):
+                merged[k] = v
+    if merged:
+        lines.append("Captured: " + ", ".join(f"{k}: {v}" for k, v in merged.items()) + ".")
+    if body.transfer:
+        lines.append(f"Transferred to {body.transfer}.")
+    if body.owen_url:
+        lines.append(body.owen_url)
+
+    await ghl_api.add_contact_note(contact["id"], " ".join(lines))
+    logger.info("agent-runtime: reported call %s to GHL contact %s", body.linkedid, contact["id"])
+    return {"ok": True, "contact_id": contact["id"]}

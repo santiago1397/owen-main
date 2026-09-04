@@ -141,6 +141,11 @@ class Settings:
     MAX_SESSIONS: int = _i("VOICE_MAX_SESSIONS", 4)
     # Shared secret OWEN presents on POST /sessions.
     SERVICE_KEY: str = _s("VOICE_SERVICE_KEY")
+    # Ceiling on the caller-context lookup (CRM_CONTEXT_SPEC C5). The greeting cannot be
+    # spoken until the media leg connects anyway -- 1-2s in practice -- so a lookup faster
+    # than this is FREE. Past it we greet generically and let context land for turn two,
+    # because a slow CRM must never dead-air a caller.
+    CONTEXT_TIMEOUT_S: float = float(_s("VOICE_CONTEXT_TIMEOUT_S", "1.2") or 1.2)
 
     # --- Spike controls ---------------------------------------------------------------------
     # Trunk to place the self-test call over, and the DID to present. Both only used by

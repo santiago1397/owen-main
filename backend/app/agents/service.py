@@ -44,6 +44,14 @@ def validate_agent_config(config: dict | None) -> tuple[list[str], list[str]]:
     except Exception:  # noqa: BLE001 - validation must never block on an import
         pass
 
+    # Caller-context provider (CRM_CONTEXT_SPEC C14).
+    try:
+        from app.agents.context import validate_provider
+
+        errors.extend(validate_provider(cfg.get("context_provider")))
+    except Exception:  # noqa: BLE001
+        pass
+
     # Transfer allowlist (AI_AGENT_SPEC D9). Validated at ACTIVATION, because a malformed
     # entry means the agent silently cannot reach a destination the operator believes it can.
     targets = cfg.get("transfer_targets")

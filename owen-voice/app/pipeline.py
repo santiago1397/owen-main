@@ -29,6 +29,7 @@ from app.config import settings
 from app.dsp import (TurnDetector, chunk_frames, looks_like_english, rms_of,
                      split_speakable)
 from app.providers import get_llm, get_stt, get_tts
+from app.context import render_blob
 from app.custom_tools import find as find_custom
 from app.custom_tools import normalise as normalise_custom
 from app.custom_tools import openai_schema as custom_schema
@@ -181,7 +182,12 @@ class Conversation:
 
     @property
     def system_prompt(self) -> str:
-        parts = [str(self.agent.get("persona") or settings.AGENT_SYSTEM_PROMPT).strip()]
+        # Context first: what the model needs to know about WHO it is talking to comes before
+        # how it should behave, and it is re-sent every turn, which is why render_blob caps it.
+        parts = []
+        if self.session.context_blob:
+            parts.append(self.session.context_blob)
+        parts.append(str(self.agent.get("persona") or settings.AGENT_SYSTEM_PROMPT).strip())
         knowledge = str(self.agent.get("knowledge") or "").strip()
         if knowledge:
             parts.append("Reference knowledge:" + chr(10) + knowledge)
@@ -189,6 +195,7 @@ class Conversation:
 
     async def start(self, *, greet: bool = True) -> None:
         self.playout.start()
+        await self._resolve_context()
         greeting = (
             str(self.agent.get("greeting") or settings.AGENT_GREETING).strip() if greet else ""
         )
@@ -198,6 +205,45 @@ class Conversation:
             # and simply good manners everywhere else).
             self.history.append({"role": "assistant", "content": greeting})
             await self._speak(greeting)
+
+    async def _resolve_context(self) -> None:
+        """Merge OWEN's local half with the provider's, under a hard ceiling (C5).
+
+        The lookup was started at media attach, so by now it is usually already done and this
+        costs nothing. Past the ceiling we abandon it and greet generically -- a CRM must
+        never dead-air a caller -- but we say so in the log, because the trap is an agent that
+        quietly stops recognising anyone while every call still 'works' (C13)."""
+        remote: dict = {}
+        task = getattr(self.session, "_context_task", None)
+        if task is not None:
+            try:
+                remote = await asyncio.wait_for(task, timeout=settings.CONTEXT_TIMEOUT_S)
+            except asyncio.TimeoutError:
+                self.session.context_degraded = True
+                logger.warning(
+                    "session %s: caller-context lookup exceeded %.1fs; greeting without it",
+                    self.session.session_uuid, settings.CONTEXT_TIMEOUT_S,
+                )
+                task.cancel()
+            except Exception:  # noqa: BLE001
+                self.session.context_degraded = True
+                logger.warning("session %s: caller-context lookup failed",
+                               self.session.session_uuid, exc_info=True)
+        if not isinstance(remote, dict):
+            remote = {}
+        if self.session.context_provider.get("url") and not remote:
+            self.session.context_degraded = True
+
+        blob, fields = render_blob(
+            self.session.context, remote, self.session.context_provider.get("allowlist"),
+        )
+        self.session.context_blob = blob
+        self.session.context_fields = fields
+        if fields:
+            # FIELD NAMES only -- never the values (C4). "Why did the agent know that?" stays
+            # answerable without copying PII into app_logs as well as into the transcript.
+            logger.info("session %s: caller context injected (%s)",
+                        self.session.session_uuid, ", ".join(fields))
 
     async def close(self) -> None:
         if self._turn is not None:

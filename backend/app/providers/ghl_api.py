@@ -146,3 +146,59 @@ async def resolve_stage_id() -> tuple[str, str]:
     if not stages:
         raise RuntimeError(f"GHL: pipeline {pl.get('name')} has no stages")
     return pl["id"], (stage_id or stages[0]["id"])
+
+
+async def find_contact_by_phone(phone: str) -> dict | None:
+    """Look a contact up by phone number (CRM_CONTEXT_SPEC, build step 4).
+
+    The gap that made "know who is calling" impossible: this module could create and update
+    contacts but never find one. Uses the v2 contacts search, which matches on the location's
+    own duplicate rules rather than an exact string, so formatting differences do not miss.
+
+    Returns the raw contact dict, or None when nothing matches or the call fails. NEVER
+    raises: this runs while a caller is waiting to be greeted, and an unknown caller is a
+    normal outcome, not an error.
+    """
+    if not settings.GHL_API_TOKEN or not settings.GHL_LOCATION_ID or not phone:
+        return None
+    payload = {
+        "locationId": settings.GHL_LOCATION_ID,
+        "pageLimit": 1,
+        "filters": [{"field": "phone", "operator": "eq", "value": phone}],
+    }
+    try:
+        async with httpx.AsyncClient(timeout=8) as client:
+            resp = await client.post(
+                f"{settings.GHL_API_BASE}/contacts/search",
+                json=payload, headers=_headers(),
+            )
+        if resp.status_code >= 400:
+            logger.warning("ghl find_contact_by_phone: %s %s", resp.status_code, resp.text[:200])
+            return None
+        contacts = (resp.json() or {}).get("contacts") or []
+        return contacts[0] if contacts else None
+    except Exception as exc:  # noqa: BLE001 - a caller is waiting; unknown is a fine answer
+        logger.warning("ghl find_contact_by_phone failed: %r", exc)
+        return None
+
+
+async def contact_opportunities(contact_id: str) -> list:
+    """Open opportunities for a contact — the "current state" half of the context.
+
+    Best-effort like the lookup: a caller is waiting, and a name with no pipeline detail is
+    still far better than no context at all.
+    """
+    if not settings.GHL_API_TOKEN or not contact_id:
+        return []
+    try:
+        async with httpx.AsyncClient(timeout=8) as client:
+            resp = await client.get(
+                f"{settings.GHL_API_BASE}/contacts/{contact_id}/opportunities",
+                headers=_headers(),
+            )
+        if resp.status_code >= 400:
+            return []
+        return (resp.json() or {}).get("opportunities") or []
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("ghl contact_opportunities failed: %r", exc)
+        return []

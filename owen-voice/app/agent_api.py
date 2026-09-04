@@ -63,6 +63,11 @@ class AgentConfig(BaseModel):
 
 
 class SessionIn(BaseModel):
+    # Caller context (CRM_CONTEXT_SPEC C6): OWEN's local half, already resolved, plus a
+    # RESOLVED provider descriptor. No "kind" ever reaches here -- whether a real CRM or one
+    # of OWEN's own adapters answers is a detail this service never learns (C16).
+    context: dict = Field(default_factory=dict)
+    context_provider: dict = Field(default_factory=dict)
     channel_id: str                 # the LIVE caller channel, already in OWEN's Stasis app
     linkedid: str = ""
     caller_number: str = ""
@@ -111,6 +116,8 @@ async def run_session(
     session.linkedid = body.linkedid
     session.caller_number = body.caller_number
     session.agent = body.agent.model_dump()
+    session.context = body.context or {}
+    session.context_provider = body.context_provider or {}
     if body.agent.half_duplex is not None:
         session.half_duplex = body.agent.half_duplex
     if body.agent.voice:

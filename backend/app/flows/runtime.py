@@ -387,6 +387,55 @@ def _dial_target_of(event_type: str, payload: dict) -> Optional[str]:
     return str(target) if target else None
 
 
+async def _enqueue_crm_report(spec, lid: str, caller_number, result) -> None:
+    """Queue a `crm_report` job if this agent has a provider configured (C15).
+
+    Resolved to a plain URL here, exactly as the lookup direction is, so the worker never
+    learns which CRM is behind it and a future in-house one needs no code in OWEN."""
+    cfg = spec.config.get("context_provider") if isinstance(spec.config, dict) else None
+    if not isinstance(cfg, dict):
+        return
+    kind = str(cfg.get("kind") or "none").lower()
+    if kind == "ghl":
+        if not settings.AGENT_RUNTIME_KEY:
+            return
+        url = f"{settings.OWEN_INTERNAL_URL.rstrip('/')}/api/agent-runtime/crm/report"
+        headers = {"X-OWEN-Key": settings.AGENT_RUNTIME_KEY}
+    elif kind == "http":
+        base = str(cfg.get("url") or "").rstrip("/")
+        if not base:
+            return
+        # Same base, `/report` instead of `/lookup` — one contract, two directions.
+        url = base[: -len("/lookup")] + "/report" if base.endswith("/lookup") else base + "/report"
+        headers = cfg.get("headers") if isinstance(cfg.get("headers"), dict) else {}
+    else:
+        return
+
+    data = result.data or {}
+    captures = []
+    if isinstance(data.get("captured"), dict) and data["captured"]:
+        captures.append({"fields": normalise_capture(data["captured"])})
+    link = ""
+    if settings.OWEN_CALL_URL_TEMPLATE:
+        link = settings.OWEN_CALL_URL_TEMPLATE.replace("{linkedid}", lid)
+
+    async with SessionLocal() as db:
+        await queue.enqueue(db, "crm_report", {
+            "url": url,
+            "headers": headers,
+            "body": {
+                "linkedid": lid,
+                "caller_number": caller_number or "",
+                "outcome": result.port,
+                "duration_s": None,
+                "captures": captures,
+                "transfer": (data.get("transfer") or {}).get("name"),
+                "owen_url": link or None,
+            },
+        })
+        await db.commit()
+
+
 async def _do_agent_transfer(ari, channel_id: str, lid: str, chosen: dict) -> bool:
     """Move the caller to the destination the agent picked. Returns True if it was handled.
 
@@ -557,6 +606,13 @@ async def run_flow_for_stasis(event: dict, ari: AriControl) -> None:
                     await dbw.commit()
             except Exception:  # noqa: BLE001 - never dead-air a caller over a failed write
                 logger.exception("flow runtime: storing agent output failed (linkedid=%s)", lid)
+
+            # CRM timeline entry (CRM_CONTEXT_SPEC C10). Enqueued, never awaited: the caller
+            # is still on the line and a slow CRM must not hold the flow.
+            try:
+                await _enqueue_crm_report(spec, lid, ctx.caller_number, result)
+            except Exception:  # noqa: BLE001 - reporting must never affect the call
+                logger.exception("flow runtime: queuing the CRM report failed (linkedid=%s)", lid)
 
             # D9: the agent may have named a destination from its OWN declared allowlist. If
             # it did, move the caller there and tell the interpreter to stand down. If it

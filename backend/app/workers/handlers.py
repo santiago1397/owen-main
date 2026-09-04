@@ -739,6 +739,31 @@ async def handle_monitor_stop(db: AsyncSession, payload: dict) -> None:
     await monitor.stop_listen(AsteriskAriClient(), **payload)
 
 
+async def handle_crm_report(db: AsyncSession, payload: dict) -> None:
+    """Push a call's outcome to the CRM as a TIMELINE ENTRY (CRM_CONTEXT_SPEC C10/C11/C15).
+
+    Post-call and through the queue, not mid-call by the agent: an agent writing to a CRM on
+    a mis-heard name with no review is how you get hundreds of junk contacts, and
+    WORKIZ_IMPORT.md already records how painful GHL cleanup is. The queue supplies retry,
+    backoff and dead-lettering for free.
+
+    Sends outcome + captures + a link, never the transcript -- a 40-turn transcript in a CRM
+    note is a worse copy of something OWEN already stores with the audio beside it."""
+    import httpx
+
+    url = str(payload.get("url") or "")
+    if not url:
+        return
+    body = dict(payload.get("body") or {})
+    headers = dict(payload.get("headers") or {})
+    async with httpx.AsyncClient(timeout=20) as client:
+        resp = await client.post(url, json=body, headers=headers)
+    if resp.status_code >= 400:
+        # Raise so the queue retries: a CRM briefly down should not silently lose the entry.
+        raise RuntimeError(f"crm report -> {resp.status_code} {resp.text[:200]}")
+    logger.info("crm_report: %s reported to %s", body.get("linkedid"), url)
+
+
 HANDLERS = {
     "recording_fetch": handle_recording_fetch,
     "transcribe": handle_transcribe,
@@ -751,4 +776,5 @@ HANDLERS = {
     "monitor_listen": handle_monitor_listen,
     "monitor_takeover": handle_monitor_takeover,
     "monitor_stop": handle_monitor_stop,
+    "crm_report": handle_crm_report,
 }

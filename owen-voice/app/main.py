@@ -118,6 +118,12 @@ async def attach_media_to_call(session: MediaSession) -> bool:
     Unlike the spike, we do NOT originate anything: the caller is already up, in OWEN's
     Stasis app, parked inside its `ai_agent` node. We only add ears and a mouth.
     """
+    # Caller context (CRM_CONTEXT_SPEC C5/C6). Started BEFORE the media channel and awaited
+    # only just before the greeting, so it runs during the 1-2s Asterisk takes to dial back
+    # into our listener. A lookup faster than that costs the caller nothing at all.
+    if session.context_provider.get("url"):
+        session._context_task = asyncio.create_task(_fetch_context(session))
+
     media_id = await ari.create_external_media(session_uuid=session.session_uuid)
     if not media_id:
         return False
@@ -134,6 +140,19 @@ async def attach_media_to_call(session: MediaSession) -> bool:
         await asyncio.sleep(0.1)
     logger.warning("attach: media never connected for linkedid=%s", session.linkedid)
     return False
+
+
+async def _fetch_context(session: MediaSession) -> dict:
+    """The external half of the caller context. Never raises; {} on any failure."""
+    from app.context import fetch_provider
+
+    return await fetch_provider(
+        session.context_provider,
+        caller_number=session.caller_number,
+        dialed_number=session.agent.get("dialed_number", "") if session.agent else "",
+        linkedid=session.linkedid,
+        timeout_s=settings.CONTEXT_TIMEOUT_S,
+    )
 
 
 async def teardown_session(session: MediaSession) -> None:

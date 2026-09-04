@@ -163,6 +163,15 @@ class Settings(BaseSettings):
     # Backstop only: the request is held open for the whole call, and the AGENT's guardrails
     # are what actually bound a conversation.
     VOICE_SERVICE_TIMEOUT_SECONDS: int = 900
+    # How owen-voice reaches OWEN's own CRM adapters (CRM_CONTEXT_SPEC C16). Docker DNS on
+    # callmon-net, same reasoning as VOICE_SERVICE_URL. Only used to resolve `kind: ghl` into
+    # a plain URL, so owen-voice speaks ONE protocol and never learns what a CRM is.
+    OWEN_INTERNAL_URL: str = "http://app:8888"
+    # Key owen-voice presents on /api/agent-runtime/*. Needs the `agent_write` scope.
+    AGENT_RUNTIME_KEY: str = ""
+    # Deep-link back to a call, put in the CRM timeline entry (C11). Blank = no link.
+    OWEN_CALL_URL_TEMPLATE: str = ""
+
 
     # Daily AI spend ceiling in USD (AI_AGENT_SPEC D14). DISTINCT from
     # VOICE_AGENT_ENGINE, which is a BEHAVIOUR switch forcing every agent to the

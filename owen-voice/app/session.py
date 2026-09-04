@@ -97,6 +97,15 @@ class MediaSession:
     caller_number: str = ""
     # The pinned agent-version config, as sent by OWEN. Empty for a standalone spike.
     agent: dict = field(default_factory=dict)
+    # Caller context (CRM_CONTEXT_SPEC). `context` is OWEN's local half, already resolved;
+    # `context_provider` is {url, headers, allowlist} for the external half, fetched here so
+    # it overlaps media attach (C6). `context_blob` is what actually reached the model, and
+    # `context_fields` the NAMES injected -- never the values (C4).
+    context: dict = field(default_factory=dict)
+    context_provider: dict = field(default_factory=dict)
+    context_blob: str = ""
+    context_fields: list = field(default_factory=list)
+    context_degraded: bool = False
     # The port handed back to the flow interpreter, and any tool output.
     result_port: str | None = None
     result_data: dict = field(default_factory=dict)
@@ -105,6 +114,8 @@ class MediaSession:
     # persisting it in step 3 is a write rather than a translation.
     transcript: list = field(default_factory=list)
 
+    # In-flight provider lookup, awaited (with a ceiling) just before the greeting.
+    _context_task: object = field(default=None, repr=False)
     _writer: Optional[asyncio.StreamWriter] = field(default=None, repr=False)
     # Set when the conversation has ended, so POST /sessions can block on it.
     done: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
@@ -138,6 +149,8 @@ class MediaSession:
             "turns": self.turns,
             "tool_calls": self.tool_calls,
             "usage": self.usage,
+            "context_fields": self.context_fields,
+            "context_degraded": self.context_degraded,
             "rms_min": round(self.rms_min, 1) if self.rms_n else None,
             "rms_max": round(self.rms_max, 1) if self.rms_n else None,
             "rms_avg": round(self.rms_sum / self.rms_n, 1) if self.rms_n else None,
