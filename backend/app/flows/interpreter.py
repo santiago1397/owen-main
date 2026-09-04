@@ -697,10 +697,22 @@ class FlowInterpreter:
         if self.run_agent is None:
             return "default"
         try:
-            port, _data = await self.run_agent(node)
+            port, data = await self.run_agent(node)
         except Exception:  # noqa: BLE001 - an agent failure must take the `failed` port, not dead-air
             logger.exception("interpreter %s: ai_agent session failed", self.linkedid)
             return "failed"
+        # The agent's output used to be destructured into `_data` and dropped on the floor —
+        # so `capture_lead` produced a structured lead that reached exactly nowhere, and four
+        # docstrings described a destination that was never built. The runtime's `run_agent`
+        # seam now persists it (call_captures + the transcript); the snapshot here is what
+        # makes the capture visible in the call's event timeline too.
+        data = data if isinstance(data, dict) else {}
+        captured = data.get("captured") if isinstance(data.get("captured"), dict) else None
+        self._event_extra = {
+            "agent_port": _port_label(port),
+            "agent_turns": data.get("turns") or 0,
+            "agent_captured": sorted(captured) if captured else None,
+        }
         if port == "end_call":
             return "complete"
         # `taken_over` passes through untranslated: _run_graph recognises it and stands down.

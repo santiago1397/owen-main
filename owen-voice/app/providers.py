@@ -134,7 +134,7 @@ class OpenAICompatibleLLM:
             logger.warning("llm: failed: %r", exc)
             return ""
 
-    async def reply_stream(self, system: str, history: list[dict]):
+    async def reply_stream(self, system: str, history: list[dict], tools: list | None = None):
         """Yield reply text as the model produces it.
 
         This is half of the latency fix. Waiting for the whole reply before speaking a word
@@ -153,6 +153,8 @@ class OpenAICompatibleLLM:
             "max_tokens": settings.LLM_MAX_TOKENS,
             "stream": True,
         }
+        if tools:
+            payload["tools"] = tools
         try:
             async with httpx.AsyncClient(timeout=_LLM_TIMEOUT) as c:
                 async with c.stream(
@@ -175,9 +177,15 @@ class OpenAICompatibleLLM:
                         except ValueError:
                             continue
                         for ch in obj.get("choices") or []:
-                            piece = (ch.get("delta") or {}).get("content")
+                            delta = ch.get("delta") or {}
+                            piece = delta.get("content")
                             if piece:
                                 yield piece
+                            # Tool calls arrive as deltas too. Yielded as a tagged tuple so the
+                            # conversation layer can act on them without this transport having
+                            # to know what any tool MEANS.
+                            for call in delta.get("tool_calls") or []:
+                                yield ("tool", call)
         except Exception as exc:  # noqa: BLE001 - caller falls back to the blocking path
             logger.warning("llm stream: failed: %r", exc)
             return

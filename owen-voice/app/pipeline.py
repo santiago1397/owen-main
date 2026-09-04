@@ -29,6 +29,7 @@ from app.config import settings
 from app.dsp import (TurnDetector, chunk_frames, looks_like_english, rms_of,
                      split_speakable)
 from app.providers import get_llm, get_stt, get_tts
+from app.tools import TOOLS, enabled_tools, openai_schema
 from app.session import MediaSession
 
 logger = logging.getLogger("voice.pipeline")
@@ -154,12 +155,18 @@ class Conversation:
         # makes an "army" possible: persona, voice and model differ per agent, and the
         # version that ran is already recorded against the call by OWEN.
         self.agent: dict = session.agent or {}
+        # Only the tools this agent VERSION toggled on. The registry is closed, so a stale
+        # toggle cannot smuggle in a capability that does not exist.
+        self.tools = enabled_tools(self.agent.get("tools"))
+        self._tool_schema = openai_schema(self.tools) if self.tools else None
         self.history: list[dict] = []
         self._turn: Optional[asyncio.Task] = None
         self._started = time.monotonic()
         self._last_voice = time.monotonic()
         # When the current burst of speech started playing, for the barge-in guard window.
         self._speaking_since: Optional[float] = None
+        # Streamed tool-call fragments for the turn in flight, keyed by index.
+        self._tool_calls: dict = {}
 
     # --- lifecycle ---
 
@@ -313,8 +320,11 @@ class Conversation:
                 buf = ""
                 try:
                     async for piece in self.llm.reply_stream(
-                        self.system_prompt, self._trimmed_history()
+                        self.system_prompt, self._trimmed_history(), self._tool_schema
                     ):
+                        if isinstance(piece, tuple) and piece and piece[0] == "tool":
+                            self._collect_tool_delta(piece[1])
+                            continue
                         buf += piece
                         ready, buf = split_speakable(buf)
                         for s in ready:
@@ -350,6 +360,7 @@ class Conversation:
                 frames = await self._speak(reply)
                 t_first = time.monotonic()
 
+            exit_port = self._dispatch_tools()
             t_done = time.monotonic()
             self.history.append({"role": "assistant", "content": reply})
             self.session.transcript.append({"speaker": "agent", "text": reply})
@@ -366,11 +377,71 @@ class Conversation:
             )
             self.session.last_turn_ms = int((t_done - t0) * 1000)
             self.session.last_first_audio_ms = first_ms
+
+            if exit_port:
+                # The agent asked to transfer or end. Let it finish the sentence it is
+                # speaking — cutting a caller off mid-goodbye to route them is worse than
+                # waiting a beat — then report the port and end the session.
+                await self._drain_playout()
+                self.session.result_port = exit_port
+                self.session.done.set()
         except asyncio.CancelledError:
             logger.info("session %s: turn abandoned (barge-in)", self.session.session_uuid)
             raise
         except Exception:  # noqa: BLE001 - a failed turn leaves the caller able to try again
             logger.exception("session %s: turn failed", self.session.session_uuid)
+
+    # --- tools -------------------------------------------------------------------------
+
+    def _collect_tool_delta(self, call: dict) -> None:
+        """Accumulate a streamed tool call. Arguments arrive as JSON fragments across many
+        deltas, so they are concatenated by index and only parsed once the turn ends."""
+        try:
+            idx = int(call.get("index") or 0)
+        except (TypeError, ValueError):
+            idx = 0
+        slot = self._tool_calls.setdefault(idx, {"name": "", "args": ""})
+        fn = call.get("function") or {}
+        if fn.get("name"):
+            slot["name"] = fn["name"]
+        if fn.get("arguments"):
+            slot["args"] += fn["arguments"]
+
+    def _dispatch_tools(self) -> Optional[str]:
+        """Act on the tools the model called this turn. Returns an EXIT PORT if one of them
+        was a flow-exit tool, else None.
+
+        The agent never bridges or hangs up: it returns a port and the flow interpreter drives
+        the graph edge. That separation is what keeps an LLM from being able to move a call
+        somewhere nobody wired."""
+        import json
+
+        exit_port = None
+        for slot in self._tool_calls.values():
+            name = slot.get("name") or ""
+            if name not in self.tools:
+                continue    # not toggled on, or not in the registry at all
+            try:
+                args = json.loads(slot.get("args") or "{}")
+            except ValueError:
+                args = {}
+            spec = TOOLS.get(name, {})
+            if spec.get("kind") == "flow_exit":
+                exit_port = spec.get("exit_port")
+                logger.info("session %s: agent tool %s -> port %s",
+                            self.session.session_uuid, name, exit_port)
+                continue
+            if name == "capture_lead" and isinstance(args, dict):
+                clean = {k: v for k, v in args.items() if v not in (None, "")}
+                if clean:
+                    # Merged, not replaced: an agent that captures a name early and an address
+                    # later has learned two things about one caller, not two different callers.
+                    existing = self.session.result_data.get("captured") or {}
+                    self.session.result_data["captured"] = {**existing, **clean}
+                    logger.info("session %s: captured %s",
+                                self.session.session_uuid, sorted(clean))
+        self._tool_calls = {}
+        return exit_port
 
     def _trimmed_history(self) -> list[dict]:
         """Keep the last N turns only.
@@ -380,6 +451,13 @@ class Conversation:
         same words. A window is the simplest honest answer."""
         limit = settings.LLM_HISTORY_TURNS * 2
         return self.history[-limit:] if limit > 0 else self.history
+
+    async def _drain_playout(self, *, max_wait_s: float = 15.0) -> None:
+        """Wait for queued speech to finish playing, bounded."""
+        waited = 0.0
+        while self.playout.speaking and waited < max_wait_s:
+            await asyncio.sleep(0.1)
+            waited += 0.1
 
     async def _speak(self, text: str) -> int:
         """Synthesize and queue one sentence, ENQUEUEING AS AUDIO ARRIVES.

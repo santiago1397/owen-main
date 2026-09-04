@@ -34,7 +34,8 @@ from app.core.calllog import clog
 from app.core.config import settings
 from app.db import SessionLocal
 from app.flows.interpreter import AriControl, FlowInterpreter
-from app.models import Agent, AgentVersion, Call, CallEvent, Flow, FlowVersion, Number
+from app.models import (Agent, AgentVersion, Call, CallCapture, CallEvent, Flow,
+                        FlowVersion, Number, Transcription)
 from app.providers.asterisk import linkedid as _linkedid
 from app.services import queue, sms
 from app.services.ingestion import _get_or_create_provider
@@ -232,6 +233,87 @@ async def _pin_agent_version(db, provider_id: int, provider_call_sid: str, av_id
     )
 
 
+# The SHARED CORE capture vocabulary (AI_AGENT_SPEC D7). Anything an agent reports outside
+# this set is preserved verbatim under `extra`, so a specialist agent can record what it needs
+# without ten agents inventing ten spellings of "customer name" and making cross-agent
+# reporting impossible.
+CAPTURE_CORE_FIELDS = ("name", "phone", "email", "address", "intent", "urgency", "notes")
+
+
+def normalise_capture(raw: dict) -> dict:
+    """Split an agent's captured payload into the shared core plus `extra`. Pure."""
+    core, extra = {}, {}
+    for key, value in (raw or {}).items():
+        if value in (None, ""):
+            continue
+        k = str(key).strip().lower()
+        if k in CAPTURE_CORE_FIELDS:
+            core[k] = value
+        else:
+            extra[str(key)] = value
+    if extra:
+        core["extra"] = extra
+    return core
+
+
+async def _persist_agent_output(
+    db, provider_id: int, provider_call_sid: str, av_id, data: dict
+) -> None:
+    """Write what the agent produced: the structured capture, and its transcript.
+
+    This is the destination four docstrings claimed already existed. `capture_lead` used to
+    set data["captured"], the runtime returned it, and the interpreter destructured it into
+    `_data` and dropped it — into a table that had never been created.
+
+    Best-effort by construction: a persistence failure must never turn into dead air on a live
+    call, so it is logged and swallowed. A partial capture from a call that dropped is still
+    worth keeping."""
+    call = (
+        await db.execute(
+            select(Call).where(
+                Call.provider_id == provider_id,
+                Call.provider_call_sid == provider_call_sid,
+            )
+        )
+    ).scalar_one_or_none()
+    if call is None:
+        return
+
+    captured = data.get("captured")
+    if isinstance(captured, dict) and captured:
+        fields = normalise_capture(captured)
+        if fields:
+            db.add(CallCapture(
+                call_id=call.id,
+                agent_version_id=av_id,
+                capture_type=str(data.get("capture_type") or "lead"),
+                fields=fields,
+            ))
+            logger.info("agent capture stored for %s: %s",
+                        provider_call_sid, sorted(fields))
+
+    # The agent already has a speaker-labelled transcript, so an agent leg skips post-call
+    # STT entirely — the same shape `transcriptions.segments` already stores for dual-channel
+    # recordings, which is why this is a write rather than a translation.
+    segments = data.get("transcript")
+    if isinstance(segments, list) and segments:
+        text = chr(10).join(
+            f"{t.get('speaker', 'agent')}: {t.get('text', '')}"
+            for t in segments if isinstance(t, dict)
+        )
+        db.add(Transcription(
+            call_id=call.id,
+            recording_id=None,
+            engine="owen_voice",
+            text=text,
+            language="en",
+            segments=segments,
+            status="completed",
+        ))
+        logger.info("agent transcript stored for %s (%d turns)",
+                    provider_call_sid, len(segments))
+
+
 async def _emit_node_event(
     db, provider_id: int, provider_call_sid: str, event_type: str,
     provider_sequence: str, payload: dict,
@@ -369,6 +451,17 @@ async def run_flow_for_stasis(event: dict, ari: AriControl) -> None:
                 caller_number=caller_number or None,
             )
             result = await session.run(spec, ctx)
+            # Persist BEFORE returning the port: the interpreter may route straight into a
+            # terminal node, and a lead captured at minute two must survive a call that ends
+            # at minute four. Own short session, like every other write on this path.
+            try:
+                async with SessionLocal() as dbw:
+                    await _persist_agent_output(
+                        dbw, provider_id, lid, version.id, result.data or {}
+                    )
+                    await dbw.commit()
+            except Exception:  # noqa: BLE001 - never dead-air a caller over a failed write
+                logger.exception("flow runtime: storing agent output failed (linkedid=%s)", lid)
             return (result.port, result.data)
         except Exception:  # noqa: BLE001 - never dead-air; the node takes `failed`/fallback
             logger.exception("flow runtime: ai_agent run failed (linkedid=%s)", lid)

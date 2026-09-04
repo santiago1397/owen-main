@@ -523,6 +523,46 @@ class AgentVersion(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
+class CallCapture(Base):
+    """Structured data an AI agent collected DURING a call (AI_AGENT_SPEC D7).
+
+    Append-only, one row per capture event — an agent may capture a name early and the
+    problem details later, and both matter with their own timestamps.
+
+    Field vocabulary is a SHARED CORE plus per-agent extras, the same split `call_analysis`
+    already uses (a controlled `category` alongside free-form `tags`): the core keys make
+    "how many emergency roof leaks did the army capture this month" answerable across every
+    agent, while `extra` lets a specialist record something nobody else needs.
+
+    A capture NEVER overwrites a human-entered field. Promoting one onto a `caller` is an
+    operator action, not an automatic consequence — humans win over models here as everywhere.
+    """
+
+    __tablename__ = "call_captures"
+    __table_args__ = (
+        Index("ix_call_captures_call", "call_id"),
+        Index("ix_call_captures_agent_version", "agent_version_id"),
+        Index("ix_call_captures_captured_at", "captured_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_uuid)
+    call_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("calls.id"))
+    # Which agent CONFIG produced this — free from version pinning, and the difference
+    # between "the army is fine" and "v3 regressed" being a query or an investigation.
+    agent_version_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("agent_versions.id")
+    )
+    capture_type: Mapped[str] = mapped_column(String, default="lead", server_default="lead")
+    fields: Mapped[dict | None] = mapped_column(JSONB)
+    captured_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    # Relay-once guard, same shape as messages/inbound_emails/calls, so captures ride the
+    # EXISTING call_relay_ghl handler rather than needing a new relay path.
+    relayed_to_ghl: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false())
+    relayed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
 class BillingRate(Base):
     """The BulkVS price sheet, as data. Seeded from app.services.billing.SEED_RATES.
 
