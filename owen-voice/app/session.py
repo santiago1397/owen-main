@@ -82,6 +82,8 @@ class MediaSession:
     vad_ends: int = 0
     barge_suppressed: int = 0
     half_duplex_dropped: int = 0
+    # Times playback ran dry mid-utterance. Should be 0; anything else is audible.
+    underruns: int = 0
     # None = use the global default; set per call to A/B it.
     half_duplex: bool | None = None
     noise_utterances: int = 0
@@ -126,6 +128,7 @@ class MediaSession:
             "vad_ends": self.vad_ends,
             "barge_suppressed": self.barge_suppressed,
             "half_duplex_dropped": self.half_duplex_dropped,
+            "underruns": self.underruns,
             "noise_utterances": self.noise_utterances,
             "last_turn_ms": self.last_turn_ms,
             "last_first_audio_ms": self.last_first_audio_ms,

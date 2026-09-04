@@ -35,6 +35,11 @@ logger = logging.getLogger("voice.pipeline")
 
 FRAME_PERIOD_S = 0.02
 
+# Frames buffered before playback starts (x20ms). 400ms comfortably covers the gap between
+# streamed TTS chunks; it is added to time-to-first-audio, so it is the direct trade between
+# latency and not stuttering.
+PRIME_FRAMES = 20
+
 
 class Playout:
     """Outbound audio queue drained at a drift-free 20 ms cadence.
@@ -53,15 +58,36 @@ class Playout:
         self._session = session
         self._writer = writer
         self._task: Optional[asyncio.Task] = None
+        # JITTER BUFFER. Streamed TTS arrives in irregular bursts while the pump drains at a
+        # strict 20ms. Emitting the instant the first chunk lands means the queue runs dry
+        # mid-word whenever the next chunk is slow, and a gap inside a word is exactly what
+        # "robotic" sounds like. So: wait until PRIME frames are queued (or the utterance is
+        # complete) before starting, and re-prime after any underrun.
+        #
+        # This is the regression that arrived WITH streaming: the original non-streaming path
+        # enqueued a whole reply at once and could never underrun, which is why the very first
+        # live call sounded fine and every one after it did not.
+        self._playing = False
+        self._complete = False
 
     def enqueue(self, pcm: bytes) -> int:
         frames = chunk_frames(pcm, AUDIO_FRAME_BYTES)
         self._q.extend(frames)
         return len(frames)
 
+    def mark_complete(self) -> None:
+        """The current utterance is fully synthesized: play whatever is queued even if it is
+        shorter than the prime threshold, so a two-word reply is not held back."""
+        self._complete = True
+
+    def begin_utterance(self) -> None:
+        self._complete = False
+
     def clear(self) -> int:
         dropped = len(self._q)
         self._q.clear()
+        self._playing = False
+        self._complete = False
         return dropped
 
     @property
@@ -81,7 +107,17 @@ class Playout:
         try:
             while True:
                 next_at += FRAME_PERIOD_S
-                if self._q:
+                if not self._playing:
+                    # Hold until there is enough buffered to ride out a slow chunk, unless
+                    # the utterance is already complete (nothing more is coming).
+                    if len(self._q) >= PRIME_FRAMES or (self._complete and self._q):
+                        self._playing = True
+                elif not self._q:
+                    # Underrun mid-utterance: stop and re-prime rather than emitting a gap
+                    # every 20ms until the next chunk lands.
+                    self._playing = False
+                    self._session.underruns += 1
+                if self._playing and self._q:
                     frame = self._q.popleft()
                     self._writer.write(encode_audio(frame))
                     self._session.tx_frames += 1
@@ -337,6 +373,7 @@ class Conversation:
         voice = self.session.tts_voice or settings.TTS_VOICE
         instructions = self.session.tts_instructions or ""
         model = self.session.tts_model or ""
+        self.playout.begin_utterance()
         frames = 0
         stream = getattr(self.tts, "synthesize_stream", None)
         if stream is not None:
@@ -344,6 +381,9 @@ class Conversation:
                 if pcm:
                     frames += self.playout.enqueue(pcm)
         if frames:
+            self.playout.mark_complete()
             return frames
         pcm = await self.tts.synthesize(text, voice, instructions=instructions, model=model)
-        return self.playout.enqueue(pcm) if pcm else 0
+        n = self.playout.enqueue(pcm) if pcm else 0
+        self.playout.mark_complete()
+        return n
