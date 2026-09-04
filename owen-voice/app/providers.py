@@ -15,13 +15,14 @@ degrades (says nothing, or falls through) rather than dead-airing.
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import Optional, Protocol
 
 import httpx
 
 from app.config import settings
-from app.dsp import downsample_24k_to_8k, wav_unwrap, wav_wrap
+from app.dsp import Downsampler24to8, downsample_24k_to_8k, wav_unwrap, wav_wrap
 
 logger = logging.getLogger("voice.providers")
 
@@ -127,6 +128,54 @@ class OpenAICompatibleLLM:
             logger.warning("llm: failed: %r", exc)
             return ""
 
+    async def reply_stream(self, system: str, history: list[dict]):
+        """Yield reply text as the model produces it.
+
+        This is half of the latency fix. Waiting for the whole reply before speaking a word
+        means the caller hears nothing until the model has finished thinking; streaming lets
+        the first sentence go to TTS while the rest is still being written. Falls back to the
+        blocking path on any streaming failure, so a provider with flaky SSE degrades to
+        slower rather than silent."""
+        if not settings.LLM_API_KEY:
+            return
+        messages = [{"role": "system", "content": system}] if system else []
+        messages += history
+        payload = {
+            "model": settings.LLM_MODEL,
+            "messages": messages,
+            "temperature": settings.LLM_TEMPERATURE,
+            "max_tokens": settings.LLM_MAX_TOKENS,
+            "stream": True,
+        }
+        try:
+            async with httpx.AsyncClient(timeout=_LLM_TIMEOUT) as c:
+                async with c.stream(
+                    "POST", f"{settings.LLM_BASE_URL}/chat/completions",
+                    headers={"Authorization": f"Bearer {settings.LLM_API_KEY}"},
+                    json=payload,
+                ) as r:
+                    if r.status_code >= 400:
+                        body = (await r.aread())[:200]
+                        logger.warning("llm stream: %s %s", r.status_code, body)
+                        return
+                    async for line in r.aiter_lines():
+                        if not line or not line.startswith("data:"):
+                            continue
+                        data = line[5:].strip()
+                        if data == "[DONE]":
+                            return
+                        try:
+                            obj = json.loads(data)
+                        except ValueError:
+                            continue
+                        for ch in obj.get("choices") or []:
+                            piece = (ch.get("delta") or {}).get("content")
+                            if piece:
+                                yield piece
+        except Exception as exc:  # noqa: BLE001 - caller falls back to the blocking path
+            logger.warning("llm stream: failed: %r", exc)
+            return
+
 
 # --- TTS -----------------------------------------------------------------------------------
 
@@ -178,6 +227,53 @@ class OpenAITTS:
         except Exception as exc:  # noqa: BLE001
             logger.warning("tts: failed: %r", exc)
             return b""
+
+    async def synthesize_stream(self, text: str, voice: str,
+                                instructions: str = "", model: str = ""):
+        """Yield 8 kHz PCM as it is synthesized — the other half of the latency fix.
+
+        Requests `pcm` rather than `wav`: the response is then raw 24 kHz little-endian
+        samples with NO header, so the first bytes off the wire are already playable and
+        there is nothing to wait for or parse. (A streamed `wav` would need its header
+        first and the length field is only correct at the end.)
+
+        Chunk boundaries are handled by dsp.Downsampler24to8, which carries the remainder —
+        each chunk is an arbitrary byte count and the group-of-3 averaging needs whole
+        groups, so dropping the remainder would tick at the chunk rate."""
+        text = (text or "").strip()
+        if not text or not settings.OPENAI_API_KEY:
+            return
+        payload = {
+            "model": model or settings.TTS_MODEL,
+            "voice": voice or settings.TTS_VOICE,
+            "input": text[: settings.TTS_MAX_CHARS],
+            "response_format": "pcm",
+        }
+        directive = instructions if instructions else settings.TTS_INSTRUCTIONS
+        if directive:
+            payload["instructions"] = directive
+        down = Downsampler24to8()
+        try:
+            async with httpx.AsyncClient(timeout=_TTS_TIMEOUT) as c:
+                async with c.stream(
+                    "POST", f"{settings.OPENAI_BASE_URL}/audio/speech",
+                    headers={"Authorization": f"Bearer {settings.OPENAI_API_KEY}"},
+                    json=payload,
+                ) as r:
+                    if r.status_code >= 400:
+                        body = (await r.aread())[:200]
+                        logger.warning("tts stream: %s %s", r.status_code, body)
+                        return
+                    async for chunk in r.aiter_bytes():
+                        out = down.feed(chunk)
+                        if out:
+                            yield out
+            tail = down.flush()
+            if tail:
+                yield tail
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("tts stream: failed: %r", exc)
+            return
 
 
 # --- selection ---------------------------------------------------------------------------------

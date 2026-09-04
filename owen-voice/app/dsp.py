@@ -145,6 +145,73 @@ def downsample_24k_to_8k(pcm24: bytes) -> bytes:
     return bytes(out)
 
 
+class Downsampler24to8:
+    """Stateful 24k -> 8k for a STREAMED response.
+
+    Streaming TTS hands us arbitrary byte counts, and the group-of-3 averaging only works on
+    whole groups — 3 samples = 6 bytes. A chunk that ends mid-group must carry its remainder
+    into the next call, or every chunk boundary drops up to two samples and the speech picks
+    up a periodic tick at exactly the chunk rate. That artefact is subtle enough to survive
+    review and obvious enough to hear, so the remainder is explicit.
+    """
+
+    def __init__(self) -> None:
+        self._rem = b""
+
+    def feed(self, chunk24: bytes) -> bytes:
+        buf = self._rem + chunk24
+        groups = (len(buf) // 2) // 3
+        used = groups * 6
+        self._rem = buf[used:]
+        return downsample_24k_to_8k(buf[:used]) if used else b""
+
+    def flush(self) -> bytes:
+        """Whatever is left at end of stream, padded to a whole group so the final syllable
+        is not clipped."""
+        if not self._rem:
+            return b""
+        pad = (-len(self._rem)) % 6
+        out = downsample_24k_to_8k(self._rem + bytes(pad))
+        self._rem = b""
+        return out
+
+
+# Sentence-ish boundaries. Deliberately simple: this decides when to START SPEAKING, so an
+# occasional early split costs a slightly odd pause, while waiting for a perfect parse costs
+# every caller a second of silence on every turn.
+_SENTENCE_END = ".!?" + chr(10)
+
+
+def split_speakable(buffer: str, *, force_at: int = 140) -> tuple[list[str], str]:
+    """Pull complete, speakable chunks out of a growing LLM buffer.
+
+    Returns (chunks_ready_to_speak, remaining_buffer). A chunk is emitted at sentence-ending
+    punctuation, or once the buffer passes `force_at` characters with no punctuation in sight
+    — some models produce long comma-spliced replies, and waiting for a full stop that never
+    arrives would hold the whole utterance back.
+    """
+    out: list[str] = []
+    start = 0
+    for i, ch in enumerate(buffer):
+        if ch in _SENTENCE_END:
+            # Require a following space/end so "3.5" or "Dr." is not split mid-number.
+            nxt = buffer[i + 1] if i + 1 < len(buffer) else " "
+            if nxt in (" ", chr(10), chr(9)) or ch == chr(10):
+                piece = buffer[start:i + 1].strip()
+                if piece:
+                    out.append(piece)
+                start = i + 1
+    rest = buffer[start:]
+    if not out and len(rest) >= force_at:
+        cut = rest.rfind(" ", 0, force_at)
+        cut = cut if cut > 0 else force_at
+        piece = rest[:cut].strip()
+        if piece:
+            out.append(piece)
+        rest = rest[cut:]
+    return out, rest.lstrip() if out else rest
+
+
 def chunk_frames(pcm: bytes, size: int = AUDIO_FRAME_BYTES) -> list[bytes]:
     """Split PCM into AudioSocket-sized frames, zero-padding the tail so the last frame is a
     full 20 ms — a short frame at the end is a click."""

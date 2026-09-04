@@ -26,7 +26,7 @@ from typing import Optional
 
 from app.audiosocket import AUDIO_FRAME_BYTES, encode_audio
 from app.config import settings
-from app.dsp import TurnDetector, chunk_frames, rms_of
+from app.dsp import TurnDetector, chunk_frames, rms_of, split_speakable
 from app.providers import get_llm, get_stt, get_tts
 from app.session import MediaSession
 
@@ -190,24 +190,62 @@ class Conversation:
             logger.info("session %s: caller: %s", self.session.session_uuid, text)
 
             self.history.append({"role": "user", "content": text})
-            reply = await self.llm.reply(settings.AGENT_SYSTEM_PROMPT, self._trimmed_history())
+
+            # PIPELINED: stream the reply, and hand each finished sentence to TTS while the
+            # model is still writing the next one. The measured cost of NOT doing this was
+            # llm(570ms) + tts(1300ms) of dead air before the caller heard a syllable; here
+            # the first sentence starts speaking while the rest is still being generated.
+            reply, frames, t_first = "", 0, None
+            buffer = ""
+            async for piece in self.llm.reply_stream(
+                settings.AGENT_SYSTEM_PROMPT, self._trimmed_history()
+            ):
+                buffer += piece
+                ready, buffer = split_speakable(buffer)
+                for sentence in ready:
+                    reply = f"{reply} {sentence}".strip()
+                    n = await self._speak(sentence)
+                    frames += n
+                    if t_first is None and n:
+                        t_first = time.monotonic()
+            tail = buffer.strip()
+            if tail:
+                reply = f"{reply} {tail}".strip()
+                n = await self._speak(tail)
+                frames += n
+                if t_first is None and n:
+                    t_first = time.monotonic()
+
             if not reply:
-                logger.warning("session %s: empty LLM reply", self.session.session_uuid)
-                return
-            t_llm = time.monotonic()
+                # Streaming produced nothing (provider without SSE, or an error). Fall back to
+                # the blocking call rather than leaving the caller unanswered.
+                logger.info("session %s: stream produced nothing, falling back",
+                            self.session.session_uuid)
+                reply = await self.llm.reply(
+                    settings.AGENT_SYSTEM_PROMPT, self._trimmed_history()
+                )
+                if not reply:
+                    logger.warning("session %s: empty LLM reply", self.session.session_uuid)
+                    return
+                frames = await self._speak(reply)
+                t_first = time.monotonic()
+
+            t_done = time.monotonic()
             self.history.append({"role": "assistant", "content": reply})
             self.session.transcript.append({"speaker": "agent", "text": reply})
             logger.info("session %s: agent: %s", self.session.session_uuid, reply)
 
-            frames = await self._speak(reply)
-            t_tts = time.monotonic()
+            # `first_audio` is the number the CALLER experiences — how long they waited in
+            # silence. `total` is only when the last sentence finished synthesizing, which
+            # they never notice because playback of the first one is already under way.
+            first_ms = int(((t_first or t_done) - t0) * 1000)
             logger.info(
-                "session %s: turn latency stt=%dms llm=%dms tts=%dms total=%dms (%d frames)",
-                self.session.session_uuid,
-                int((t_stt - t0) * 1000), int((t_llm - t_stt) * 1000),
-                int((t_tts - t_llm) * 1000), int((t_tts - t0) * 1000), frames,
+                "session %s: turn latency stt=%dms first_audio=%dms total=%dms (%d frames)",
+                self.session.session_uuid, int((t_stt - t0) * 1000),
+                first_ms, int((t_done - t0) * 1000), frames,
             )
-            self.session.last_turn_ms = int((t_tts - t0) * 1000)
+            self.session.last_turn_ms = int((t_done - t0) * 1000)
+            self.session.last_first_audio_ms = first_ms
         except asyncio.CancelledError:
             logger.info("session %s: turn abandoned (barge-in)", self.session.session_uuid)
             raise
@@ -224,12 +262,23 @@ class Conversation:
         return self.history[-limit:] if limit > 0 else self.history
 
     async def _speak(self, text: str) -> int:
-        pcm = await self.tts.synthesize(
-            text,
-            self.session.tts_voice or settings.TTS_VOICE,
-            instructions=self.session.tts_instructions or "",
-            model=self.session.tts_model or "",
-        )
-        if not pcm:
-            return 0
-        return self.playout.enqueue(pcm)
+        """Synthesize and queue one sentence, ENQUEUEING AS AUDIO ARRIVES.
+
+        Streaming here matters as much as streaming the LLM: the playout pump can start
+        emitting the opening syllables while the rest of the sentence is still being
+        synthesized, so time-to-first-audio stops depending on sentence length. Falls back
+        to the blocking call if streaming yields nothing, so a provider without streaming
+        support is slower rather than mute."""
+        voice = self.session.tts_voice or settings.TTS_VOICE
+        instructions = self.session.tts_instructions or ""
+        model = self.session.tts_model or ""
+        frames = 0
+        stream = getattr(self.tts, "synthesize_stream", None)
+        if stream is not None:
+            async for pcm in stream(text, voice, instructions=instructions, model=model):
+                if pcm:
+                    frames += self.playout.enqueue(pcm)
+        if frames:
+            return frames
+        pcm = await self.tts.synthesize(text, voice, instructions=instructions, model=model)
+        return self.playout.enqueue(pcm) if pcm else 0

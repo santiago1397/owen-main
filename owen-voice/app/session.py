@@ -68,6 +68,9 @@ class MediaSession:
     # --- conversation (step 2) ---
     turns: int = 0
     last_turn_ms: int = 0
+    # What the CALLER experienced: silence between them stopping and hearing the first
+    # syllable. `last_turn_ms` only records when synthesis finished, which nobody hears.
+    last_first_audio_ms: int = 0
     # What the VAD actually sees. Without this, "the agent never answered" is a guess
     # between a wrong threshold, a silent stream and a stream that is never silent.
     rms_min: float = 1e9
@@ -117,6 +120,7 @@ class MediaSession:
             "max_quiet_run": self.max_quiet_run,
             "vad_ends": self.vad_ends,
             "last_turn_ms": self.last_turn_ms,
+            "last_first_audio_ms": self.last_first_audio_ms,
             "transcript": self.transcript,
             "error": self.error,
             "verdict": self.verdict(),
