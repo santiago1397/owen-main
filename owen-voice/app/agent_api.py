@@ -146,6 +146,52 @@ async def run_session(
         registry.prune()
 
 
+@router.get("/active")
+async def active_sessions(x_owen_voice_key: Optional[str] = Header(default=None)) -> dict:
+    """Live agent sessions keyed by linkedid.
+
+    OWEN needs this to take a call over: the agent's media leg was created HERE, so OWEN has
+    no other way to learn which channel to eject when a supervisor seizes the call."""
+    _auth(x_owen_voice_key)
+    return {
+        "sessions": [
+            {
+                "linkedid": s.linkedid,
+                "session_uuid": s.session_uuid,
+                "call_channel_id": s.call_channel_id,
+                "media_channel_id": s.media_channel_id,
+                "bridge_id": s.bridge_id,
+                "turns": s.turns,
+                "duration_s": s.duration_s,
+            }
+            for s in registry.active()
+            if s.mode == "agent"
+        ]
+    }
+
+
+@router.post("/{linkedid}/stop")
+async def stop_session(
+    linkedid: str,
+    reason: str = "taken_over",
+    x_owen_voice_key: Optional[str] = Header(default=None),
+) -> dict:
+    """End a live agent session and report a specific PORT back to the flow.
+
+    Used by take-over: without it, ejecting the media leg would end the session as a plain
+    socket close and report `default`, and the flow would carry on down its default edge —
+    potentially playing voicemail at a caller who now has a human on the line. Setting the
+    port explicitly is what lets the interpreter recognise `taken_over` and stand down."""
+    _auth(x_owen_voice_key)
+    for s in registry.active():
+        if s.linkedid == linkedid and s.mode == "agent":
+            s.result_port = reason
+            s.done.set()
+            logger.info("sessions: %s stopped externally (%s)", linkedid, reason)
+            return {"ok": True, "session_uuid": s.session_uuid, "port": reason}
+    return {"ok": False, "reason": "no active session for that linkedid"}
+
+
 @router.get("/capacity")
 async def capacity() -> dict:
     return {

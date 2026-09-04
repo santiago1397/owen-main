@@ -43,6 +43,16 @@ logger = logging.getLogger("flows.interpreter")
 # Node types that TERMINATE the call: once run, the interpreter stops (no onward routing).
 TERMINAL_TYPES: frozenset[str] = frozenset({"voicemail", "hangup"})
 
+# A node returning this port means a HUMAN has seized the call (AI_AGENT_SPEC D4). It is
+# internal control, never a wireable graph edge (D5): the interpreter returns immediately and
+# touches NOTHING — no routing, no fallback, no hangup.
+#
+# Without this, an agent session that ends because a supervisor took over falls through the
+# normal path: the port is unwired, so it routes to `default_fallback` and plays a voicemail
+# greeting at a caller who is mid-sentence with a human operator — or, with no fallback
+# configured, `_safe_hangup()` hangs up on the caller the operator just rescued.
+PORT_TAKEN_OVER: str = "taken_over"
+
 # Ticket 17 parity nodes emit their transition event AFTER the handler runs (instead of the
 # usual emit-on-entry), so the payload can snapshot the OUTCOME (vars set, matched condition
 # row, request status). All of these run in bounded time (send_sms is fire-and-forget; the
@@ -361,6 +371,16 @@ class FlowInterpreter:
 
             if post_emit:
                 await self._emit_transition(step, current, ntype, extra=self._event_extra)
+
+            if port == PORT_TAKEN_OVER:
+                # A human owns this call now. Record it and stand down — no routing, no
+                # fallback, no hangup. See PORT_TAKEN_OVER.
+                await self._emit_exit(
+                    step, current, ntype, port, "taken_over", None, node_ms, errored
+                )
+                logger.info("interpreter %s: call taken over by a human; standing down",
+                            self.linkedid)
+                return "taken_over"
 
             if ntype in TERMINAL_TYPES:
                 await self._emit_exit(step, current, ntype, port, "terminal", None, node_ms, errored)
@@ -683,6 +703,7 @@ class FlowInterpreter:
             return "failed"
         if port == "end_call":
             return "complete"
+        # `taken_over` passes through untranslated: _run_graph recognises it and stands down.
         return port or "failed"
 
     # --- Ticket 17 parity nodes ---

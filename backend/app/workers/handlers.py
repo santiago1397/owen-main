@@ -684,6 +684,61 @@ async def handle_outbound_call(db: AsyncSession, payload: dict) -> None:
     task.add_done_callback(_OUTBOUND_TASKS.discard)
 
 
+async def handle_monitor_listen(db: AsyncSession, payload: dict) -> None:
+    """Ring a supervisor and bridge them to a SNOOP of a live call (AI_AGENT_SPEC D4).
+
+    Runs in the WORKER for the same reason handle_outbound_call does: the orchestration awaits
+    each leg's StasisStart, and only the worker's ARI consumer reads that event stream.
+    Detached so the drain loop is not blocked for the length of a monitoring session."""
+    import asyncio
+
+    from app.providers.asterisk_client import AsteriskAriClient
+    from app.telephony import monitor
+
+    async def _run() -> None:
+        try:
+            await monitor.start_listen(AsteriskAriClient(), **payload)
+        except Exception:  # noqa: BLE001 - monitoring must never disturb the call it watches
+            logger.exception("monitor listen failed")
+
+    task = asyncio.create_task(_run())
+    _OUTBOUND_TASKS.add(task)
+    task.add_done_callback(_OUTBOUND_TASKS.discard)
+
+
+async def handle_monitor_takeover(db: AsyncSession, payload: dict) -> None:
+    """Hand a live call to a human, permanently (AI_AGENT_SPEC D4).
+
+    Tells owen-voice to end the agent session with the `taken_over` port BEFORE ejecting its
+    media leg, so the flow interpreter recognises the outcome and stands down rather than
+    following its default edge into voicemail."""
+    import asyncio
+
+    from app.providers.asterisk_client import AsteriskAriClient
+    from app.telephony import monitor, voice_client
+
+    linkedid = str(payload.get("linkedid") or "")
+
+    async def _run() -> None:
+        try:
+            await voice_client.stop_session(linkedid, reason="taken_over")
+            await monitor.take_over(AsteriskAriClient(), **payload)
+        except Exception:  # noqa: BLE001
+            logger.exception("monitor takeover failed for %s", linkedid)
+
+    task = asyncio.create_task(_run())
+    _OUTBOUND_TASKS.add(task)
+    task.add_done_callback(_OUTBOUND_TASKS.discard)
+
+
+async def handle_monitor_stop(db: AsyncSession, payload: dict) -> None:
+    """End a listen session. Never touches the monitored call."""
+    from app.providers.asterisk_client import AsteriskAriClient
+    from app.telephony import monitor
+
+    await monitor.stop_listen(AsteriskAriClient(), **payload)
+
+
 HANDLERS = {
     "recording_fetch": handle_recording_fetch,
     "transcribe": handle_transcribe,
@@ -693,4 +748,7 @@ HANDLERS = {
     "call_relay_ghl": handle_call_relay_ghl,
     "email_relay_ghl": handle_email_relay_ghl,
     "outbound_call": handle_outbound_call,
+    "monitor_listen": handle_monitor_listen,
+    "monitor_takeover": handle_monitor_takeover,
+    "monitor_stop": handle_monitor_stop,
 }

@@ -175,11 +175,42 @@ class AsteriskAriClient:
     async def _client(self) -> httpx.AsyncClient:
         return httpx.AsyncClient(timeout=_CONTROL_TIMEOUT, auth=self._auth)
 
+
+    # --- human-ownership guard (AI_AGENT_SPEC D4) -----------------------------------------
+    # The invariant lives HERE, in the one place every automated path must pass through,
+    # rather than as a rule each call site is trusted to remember. Once a supervisor has
+    # seized a call, no flow, agent or default handler may touch that channel again: the
+    # interpreter would otherwise route an ended agent node to `default_fallback` and play a
+    # voicemail greeting at a caller who is mid-sentence with a human — or hang up on them.
+
+    @staticmethod
+    def _owned(channel_id: str, op: str) -> bool:
+        """True if `channel_id` belongs to a human-owned call, in which case the caller must
+        skip the operation. Defensive: an import or registry failure NEVER blocks telephony,
+        because a guard that can break call handling is worse than the bug it prevents."""
+        try:
+            from app.telephony import ownership
+
+            if ownership.is_channel_owned(channel_id):
+                logger.warning(
+                    "ari: refusing %s on channel %s — call is human-owned by %s",
+                    op, channel_id,
+                    ownership.owner_of(ownership.linkedid_of_channel(channel_id) or "") or "?",
+                )
+                return True
+        except Exception:  # noqa: BLE001
+            logger.debug("ari: ownership check unavailable", exc_info=True)
+        return False
+
     async def answer(self, channel_id: str) -> None:
+        if self._owned(channel_id, "answer"):
+            return
         clog(logger, "answer", channel=channel_id)
         await self._post(f"/ari/channels/{channel_id}/answer")
 
     async def play(self, channel_id: str, media: str) -> None:
+        if self._owned(channel_id, "play"):
+            return
         uri = await self._resolve_media(str(media))
         if not uri:
             return  # unplayable prompt (TTS failed): skip playback, flow continues
@@ -232,6 +263,8 @@ class AsteriskAriClient:
         return None
 
     async def record(self, channel_id: str, name: str) -> None:
+        if self._owned(channel_id, "record"):
+            return
         await self._post(
             f"/ari/channels/{channel_id}/record",
             params={"name": name, "format": "wav", "ifExists": "overwrite"},
@@ -705,6 +738,8 @@ class AsteriskAriClient:
         consent notice completes before operators ring and a voicemail greeting completes before
         the record beep. Best-effort: an unplayable prompt or a missing finished-event (timeout)
         just returns, never dead-airs."""
+        if self._owned(channel_id, "play_and_wait"):
+            return
         uri = await self._resolve_media(str(media))
         if not uri:
             return
@@ -1040,6 +1075,25 @@ class AsteriskAriClient:
             await self._delete(f"/ari/channels/{callee_channel_id}")
             await self._delete(f"/ari/channels/{op_channel_id}")
 
+    async def snoop(self, channel_id: str, *, spy: str = "both",
+                    whisper: str = "none") -> str | None:
+        """Create a SNOOP channel on a live call (AI_AGENT_SPEC D4).
+
+        `spy` is what the snooper HEARS, `whisper` what they can inject. Supervisor listen is
+        spy=both/whisper=none: the operator hears the caller and the agent, and neither hears
+        the operator. Whisper is unused by design — coaching an LLM by voice is meaningless.
+
+        Snooping is READ-ONLY on the target, so it is deliberately NOT ownership-guarded: a
+        supervisor must be able to listen to a call precisely when something is going wrong.
+        """
+        data = await self._request(
+            "POST", f"/channels/{channel_id}/snoop",
+            params={"spy": spy, "whisper": whisper, "app": settings.ARI_APP},
+        )
+        if not isinstance(data, dict):
+            return None
+        return data.get("id")
+
     async def record_bridge(self, bridge_id: str, name: str) -> None:
         """Start a mixed recording of a bridge (both legs) — outbound calls record by default."""
         await self._post(
@@ -1049,6 +1103,8 @@ class AsteriskAriClient:
         clog(logger, "record.start", bridge=bridge_id, name=name)
 
     async def hangup(self, channel_id: str) -> None:
+        if self._owned(channel_id, "hangup"):
+            return
         clog(logger, "hangup", channel=channel_id)
         await self._delete(f"/ari/channels/{channel_id}")
 

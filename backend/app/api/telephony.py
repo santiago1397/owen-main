@@ -272,3 +272,106 @@ async def outbound_call(
         "callee_channel": callee_channel_id,
         "warnings": warnings,
     }
+
+
+# --- Supervisor monitoring (AI_AGENT_SPEC D4/D5) -----------------------------------------
+# Listen to a live AI-agent call, and seize it when the agent misbehaves. The stated
+# requirement behind the whole take-over design: "I want a person to listen to the call and
+# be able to take control if the agent is not working properly."
+
+
+class MonitorIn(BaseModel):
+    linkedid: str                       # the call to monitor (== provider_call_sid)
+    channel_id: str | None = None       # caller channel; looked up from owen-voice if absent
+
+
+@router.get("/monitor/active")
+async def monitor_active(user: User = Depends(current_user)) -> dict:
+    """Live AI-agent conversations that can be monitored or seized."""
+    _require_enabled()
+    from app.telephony import voice_client
+
+    return {"sessions": await voice_client.active_sessions()}
+
+
+@router.post("/monitor/listen")
+async def monitor_listen(
+    body: MonitorIn,
+    user: User = Depends(current_user),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Ring this operator and let them listen in, inaudible to both caller and agent."""
+    _require_enabled()
+    from app.telephony import voice_client
+
+    sess = await voice_client.session_for(body.linkedid)
+    channel_id = body.channel_id or (sess or {}).get("call_channel_id")
+    if not channel_id:
+        raise HTTPException(404, "no live agent session for that linkedid")
+
+    operator_channel_id = uuid.uuid4().hex
+    await queue.enqueue(db, "monitor_listen", {
+        "operator_id": user.email,
+        "target_channel_id": channel_id,
+        "linkedid": body.linkedid,
+        "operator_channel_id": operator_channel_id,
+    })
+    logger.info("call.api.monitor.listen operator=%s linkedid=%s", user.email, body.linkedid)
+    return {"ok": True, "operator_channel": operator_channel_id}
+
+
+class TakeoverIn(MonitorIn):
+    # Supplied when the operator is already listening, so the snoop can be torn down and their
+    # existing leg moved into the call rather than ringing them a second time.
+    operator_channel_id: str | None = None
+    snoop_channel_id: str | None = None
+    monitor_bridge_id: str | None = None
+
+
+@router.post("/monitor/takeover")
+async def monitor_takeover(
+    body: TakeoverIn,
+    user: User = Depends(current_user),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Seize a live agent call. The agent stops, the operator is bridged to the caller, and
+    the call is marked human-owned so no automated path can touch it again."""
+    _require_enabled()
+    from app.telephony import voice_client
+
+    sess = await voice_client.session_for(body.linkedid)
+    channel_id = body.channel_id or (sess or {}).get("call_channel_id")
+    if not channel_id:
+        raise HTTPException(404, "no live agent session for that linkedid")
+
+    operator_channel_id = body.operator_channel_id or uuid.uuid4().hex
+    await queue.enqueue(db, "monitor_takeover", {
+        "operator_id": user.email,
+        "linkedid": body.linkedid,
+        "target_channel_id": channel_id,
+        "operator_channel_id": operator_channel_id,
+        "call_bridge_id": (sess or {}).get("bridge_id"),
+        "snoop_channel_id": body.snoop_channel_id,
+        "monitor_bridge_id": body.monitor_bridge_id,
+        "agent_channel_id": (sess or {}).get("media_channel_id"),
+    })
+    logger.info("call.api.monitor.takeover operator=%s linkedid=%s", user.email, body.linkedid)
+    return {"ok": True, "operator_channel": operator_channel_id, "owner": user.email}
+
+
+class MonitorStopIn(BaseModel):
+    operator_channel_id: str | None = None
+    snoop_channel_id: str | None = None
+    monitor_bridge_id: str | None = None
+
+
+@router.post("/monitor/stop")
+async def monitor_stop(
+    body: MonitorStopIn,
+    user: User = Depends(current_user),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Stop listening. Deliberately cannot affect the monitored call."""
+    _require_enabled()
+    await queue.enqueue(db, "monitor_stop", body.model_dump())
+    return {"ok": True}
