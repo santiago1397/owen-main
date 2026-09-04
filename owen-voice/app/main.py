@@ -78,6 +78,7 @@ async def _on_media_leg_start(channel_id: str, session: MediaSession) -> None:
     bridge_id = session.bridge_id or await ari.create_bridge()
     if not bridge_id:
         session.error = "bridge creation failed"
+        session.result_port = "failed"
         logger.error("session %s: bridge failed", session.session_uuid)
         await _teardown(session)
         return
@@ -88,6 +89,10 @@ async def _on_media_leg_start(channel_id: str, session: MediaSession) -> None:
         members.append(session.call_channel_id)
     if not await ari.add_to_bridge(bridge_id, *members):
         session.error = "addChannel failed"
+        # `failed`, never `default`: a call that could not be bridged did not have a
+        # conversation, and the flow must route to its fallback rather than carry on as if
+        # the agent had finished normally.
+        session.result_port = "failed"
         logger.error("session %s: addChannel failed; tearing down", session.session_uuid)
         await _teardown(session)
         return
@@ -122,6 +127,8 @@ async def attach_media_to_call(session: MediaSession) -> bool:
     # Wait for Asterisk to dial back into our AudioSocket listener and for the bridge to be
     # built on its StasisStart. Bounded: a caller must never wait on infrastructure.
     for _ in range(60):
+        if session.error:
+            return False           # bridging already failed; result_port is set
         if session.connected_at is not None and session.bridge_id:
             return True
         await asyncio.sleep(0.1)

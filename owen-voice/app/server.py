@@ -159,7 +159,9 @@ async def handle_connection(
             # The caller hanging up is a normal ending, not a failure: `default` means the
             # agent finished with no explicit exit tool.
             if session.result_port is None:
-                session.result_port = "default"
+                # Only when nothing else decided: an explicit failure (bridge/attach) or a
+                # guardrail has already set the port and must win over "the socket closed".
+                session.result_port = "failed" if session.error else "default"
             session.done.set()
             logger.info(
                 "audiosocket: session %s closed — rx=%d frames/%dB tx=%d frames peak=%d — %s",
