@@ -375,11 +375,23 @@ class Conversation:
         model = self.session.tts_model or ""
         self.playout.begin_utterance()
         frames = 0
+        # Collect the WHOLE sentence before queueing any of it. Enqueueing chunks as they
+        # arrive is what produced gaps inside words: the pump drains at a strict 20ms and a
+        # slow chunk empties the queue mid-syllable. A jitter buffer only narrows that window
+        # — 400ms of priming still underran twice in a two-turn call — whereas a complete
+        # sentence cannot underrun at all.
+        #
+        # The pipelining that actually pays is at the SENTENCE level, not the chunk level:
+        # sentence 2 is synthesized while sentence 1 is still playing, so this costs only the
+        # synthesis time of the FIRST sentence and nothing thereafter.
         stream = getattr(self.tts, "synthesize_stream", None)
         if stream is not None:
+            parts = []
             async for pcm in stream(text, voice, instructions=instructions, model=model):
                 if pcm:
-                    frames += self.playout.enqueue(pcm)
+                    parts.append(pcm)
+            if parts:
+                frames = self.playout.enqueue(b"".join(parts))
         if frames:
             self.playout.mark_complete()
             return frames
