@@ -201,7 +201,10 @@ async def usage_middleware(request: Request, call_next):
     `/query` still records itself (it alone knows the SQL and the row count) and flags the
     request so it is not counted twice.
     """
-    if not request.url.path.startswith("/api/ai"):
+    # Both API-key surfaces, not just /api/ai. `/api/agent-runtime/*` (AI_AGENT_SPEC D13) is
+    # the one that can MUTATE platform data, so leaving it out would mean the audit trail
+    # covered every read and none of the writes — exactly backwards.
+    if not request.url.path.startswith(("/api/ai", "/api/agent-runtime")):
         return await call_next(request)
     started = time.monotonic()
     response = await call_next(request)
