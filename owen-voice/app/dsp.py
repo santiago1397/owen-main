@@ -128,6 +128,15 @@ class TurnDetector:
 
 
 def downsample_24k_to_8k(pcm24: bytes) -> bytes:
+    """24k -> 8k for a complete buffer. Delegates to app/resample.py, which uses a real
+    anti-aliasing FIR; the 3-sample average this used to be passed 4 kHz at -3.5 dB and
+    was audibly robotic on a live call."""
+    from app.resample import decimate
+
+    return decimate(pcm24)
+
+
+def _downsample_box_legacy(pcm24: bytes) -> bytes:
     """24 kHz -> 8 kHz by averaging each group of 3 samples.
 
     OpenAI's TTS emits 24 kHz PCM and the phone network is 8 kHz. Averaging is a crude
@@ -146,7 +155,8 @@ def downsample_24k_to_8k(pcm24: bytes) -> bytes:
 
 
 class Downsampler24to8:
-    """Stateful 24k -> 8k for a STREAMED response.
+    """Stateful 24k -> 8k for a STREAMED response. Thin wrapper over resample.Decimator,
+    which carries both the filter tail and the decimation phase across chunks.
 
     Streaming TTS hands us arbitrary byte counts, and the group-of-3 averaging only works on
     whole groups — 3 samples = 6 bytes. A chunk that ends mid-group must carry its remainder
@@ -156,24 +166,15 @@ class Downsampler24to8:
     """
 
     def __init__(self) -> None:
-        self._rem = b""
+        from app.resample import Decimator
+
+        self._d = Decimator()
 
     def feed(self, chunk24: bytes) -> bytes:
-        buf = self._rem + chunk24
-        groups = (len(buf) // 2) // 3
-        used = groups * 6
-        self._rem = buf[used:]
-        return downsample_24k_to_8k(buf[:used]) if used else b""
+        return self._d.feed(chunk24)
 
     def flush(self) -> bytes:
-        """Whatever is left at end of stream, padded to a whole group so the final syllable
-        is not clipped."""
-        if not self._rem:
-            return b""
-        pad = (-len(self._rem)) % 6
-        out = downsample_24k_to_8k(self._rem + bytes(pad))
-        self._rem = b""
-        return out
+        return self._d.flush()
 
 
 # Sentence-ish boundaries. Deliberately simple: this decides when to START SPEAKING, so an
