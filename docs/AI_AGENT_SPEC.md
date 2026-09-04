@@ -539,6 +539,44 @@ building it twice.
 
 ---
 
+## Step 1 result — VERIFIED both directions, 2026-09-04
+
+`POST /spike/loopback` on the live host, with Asterisk as both audio source and sink.
+
+**RECEIVE** (`mode=echo`, a stock sound played into the bridge):
+
+```
+connected: true   rx_frames: 246   rx_bytes: 78720   peak_amplitude: 25648
+duration: 5.06s   verdict: "OK — audio flowed both ways"
+```
+
+246 frames × 320 bytes = 78,720 bytes exactly, and 246 × 20 ms = 4.92 s against a 5.06 s
+window — real-time pacing with no drift.
+
+**SEND** (`mode=tone`, a 440 Hz sine into an otherwise SILENT bridge, bridge recorded):
+
+```
+tx_frames: 241   rx_frames: 0        <- a bridge whose only member is the media channel
+                                        has no audio source; this is why the tone runs on
+                                        its own clock rather than being rx-driven
+recording: 8000 Hz mono 16-bit, 4.76 s
+  peak 8000/32767   rms 5656   dominant frequency 440.0 Hz
+```
+
+`peak` equals `tone.DEFAULT_AMPLITUDE` exactly, `440.0 Hz` equals `tone.DEFAULT_HZ` exactly,
+and 5656 is 8000/√2 — the RMS of a pure sine at that amplitude. The recording is bit-level
+consistent with what owen-voice generated, so it can only have come from bytes written back
+down the socket.
+
+**Therefore:** ARI `externalMedia` with `encapsulation=audiosocket, transport=tcp` works on
+this build; UUID correlation works; framing is correct; `slin` 8 kHz is carried intact; and
+audio moves in both directions at real-time cadence. **D3 is proven and the design's one
+load-bearing assumption holds.**
+
+Still worth doing once: a **real inbound call**. The loopback exercises no trunk, no codec
+negotiation with BulkVS and no network RTP, so it proves the AudioSocket transport rather
+than the whole call path.
+
 ## Verification items
 
 1. ✅ **AudioSocket support on the pinned Asterisk 22.10.1** — cleared 2026-09-03.
