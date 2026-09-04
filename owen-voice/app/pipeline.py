@@ -145,6 +145,15 @@ class Conversation:
         # interrupt itself. A real interruption is loud and sustained; an echo of our own
         # output is not.
         speaking = self.playout.speaking
+        if speaking and (self.session.half_duplex
+                         if self.session.half_duplex is not None
+                         else settings.HALF_DUPLEX):
+            # Half duplex: drop the frame before the detector ever sees it, and keep the
+            # detector's state clean so the caller's first words after we stop are not
+            # glued onto our own echo.
+            self.vad.reset()
+            self.session.half_duplex_dropped += 1
+            return self._guardrail()
         if speaking and self._speaking_since is None:
             self._speaking_since = time.monotonic()
         elif not speaking:

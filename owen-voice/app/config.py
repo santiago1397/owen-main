@@ -103,6 +103,13 @@ class Settings:
     # Never allow an interruption in the first moments of a reply: that is exactly when the
     # agent's own opening syllables would come back through a speakerphone.
     BARGE_GUARD_MS: int = _i("VOICE_BARGE_GUARD_MS", 900)
+    # HALF DUPLEX: ignore inbound audio entirely while the agent is speaking, so it cannot be
+    # interrupted by its own voice returning through the caller's speakerphone. That echo path
+    # cannot be tuned away with thresholds -- on a live call it tripped the detector, killed
+    # every reply, and each "utterance" transcribed to nothing because it was our own audio.
+    # The cost is losing genuine barge-in; being heard at all matters more. Turn it off once
+    # there is real echo cancellation, or for callers on a handset.
+    HALF_DUPLEX: bool = _s("VOICE_HALF_DUPLEX", "true").lower() not in ("0", "false", "no")
     # An utterance quieter than this is noise, not speech. Whisper-family models hallucinate
     # confidently on near-silence -- a live call produced "لا لا لا لا" and "Привет" from a
     # quiet line -- and each hallucination costs an STT call and a wrong turn.
