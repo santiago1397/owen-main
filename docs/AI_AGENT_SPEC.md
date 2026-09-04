@@ -515,15 +515,18 @@ one that admits ignorance."*
 The only thing here that can invalidate the design is whether audio round-trips. Everything
 else is code this codebase has demonstrably written before.
 
+> **STATUS 2026-09-04: steps 0-5 are built, deployed and green.** Step 3 onward has not yet
+> carried a real customer call — a test DID still needs pointing at an agent-bearing flow.
+
 | # | Ships | Risk retired |
 |---|---|---|
-| **0** | **Verify** — `curl` ARI for `encapsulation=audiosocket` on 22.10.1; confirm the BulkVS trunk channel limit | Both open unknowns. Hours. |
-| **1** | **Echo spike** — `owen-voice` accepts AudioSocket and echoes audio back. Call a test DID, hear yourself. No LLM/STT/TTS. | **The entire transport**, bidirectionally, at 8 kHz, through a real bridge |
-| **2** | Cascaded pipeline, one hardcoded agent: Flux → LLM → TTS, with barge-in | Latency budget, turn-taking, vendor integration |
-| **3** | Wire to the `ai_agent` node on a **test DID only**. Guardrails + `EV_TICK` carryover. Fast-fail concurrency (4). | Flow-runtime integration |
+| ✅ **0** | **Verify** — `curl` ARI for `encapsulation=audiosocket` on 22.10.1; confirm the BulkVS trunk channel limit | Both open unknowns. Hours. |
+| ✅ **1** | **Echo spike** — `owen-voice` accepts AudioSocket and echoes audio back. Call a test DID, hear yourself. No LLM/STT/TTS. | **The entire transport**, bidirectionally, at 8 kHz, through a real bridge |
+| ✅ **2** | Cascaded pipeline, one hardcoded agent: Flux → LLM → TTS, with barge-in | Latency budget, turn-taking, vendor integration |
+| ✅ **3** | Wire to the `ai_agent` node on a **test DID only**. Guardrails + `EV_TICK` carryover. Fast-fail concurrency (4). | Flow-runtime integration |
 | 🚦 | **GATE — no production DID before step 4** | |
-| **4** | Take-over: ownership registry, `taken_over`, snoop-listen, barge, central ARI guard | "The agent is broken and a human must grab this call" |
-| **5** | `call_captures` + inline transcript + fix the `_data` discard | The data requirement |
+| ✅ **4** | Take-over: ownership registry, `taken_over`, snoop-listen, barge, central ARI guard | "The agent is broken and a human must grab this call" |
+| ✅ **5** | `call_captures` + inline transcript + fix the `_data` discard | The data requirement |
 | **6** | Transfer allowlist (4 kinds) + agent slots | The army becomes routable |
 | **7** | Custom HTTP tools + `/api/agent-runtime` | Integration surface |
 | **8** | Cost rows + spend cap | Economics |
@@ -619,6 +622,39 @@ default for real callers; `/spike/loopback` takes `vad_end_frames` to override i
 
 **Still outstanding: a real inbound call.** Neither loopback exercises the trunk, BulkVS codec
 negotiation, or network RTP — and no human has yet heard the agent speak.
+
+## Delivered so far
+
+| Step | Evidence |
+|---|---|
+| 1 — transport | 246 frames received at exact real-time cadence, peak 25,648; a 440 Hz tone recorded back out of Asterisk at exactly the amplitude and frequency owen-voice generated |
+| 2 — pipeline | Real phone call, 3 turns, English conversation. Latency tuned from 2986 ms to ~1700 ms time-to-first-audio |
+| 3 — flow wiring | `owen_voice` engine registered; `POST /sessions` blocks and returns a port; capacity refuses instantly at 4; a dead channel correctly reports `failed` |
+| 4 — take-over | 19 checks, incl. proof that a seized call plays no voicemail and is not hung up on, with a control test proving ordinary flows still fall back |
+| 5 — captures | `call_captures` migrated and live; the interpreter no longer discards agent output; tool calling collects the lead |
+
+### Latency, measured on a live call
+
+| Stage | First build | Now |
+|---|---|---|
+| STT | 1295 ms (whisper-1) | **452–583 ms** (`gpt-4o-mini-transcribe`) |
+| LLM | 567 ms | unchanged — the cheapest stage |
+| TTS | 1112–1453 ms | streamed, sentence-pipelined |
+| **Time to first audio** | **2986 ms** | **~1700 ms** |
+
+Further gains need vendors: Deepgram Flux removes most of STT *and* the 600 ms turn-detection
+hangover (and makes `dsp.TurnDetector` deletable); Cartesia cuts TTS first-byte from ~629 ms to
+under 100 ms.
+
+### Audio faults found and fixed on live calls
+
+| Symptom | Cause |
+|---|---|
+| Caller heard fragments | The agent's own voice through a speakerphone tripped barge-in → half duplex |
+| Replies in Chinese/Arabic | STT hallucinates fluent text from noise; the LLM followed → English pinned, non-Latin transcripts dropped |
+| 20 ms of audio per reply | `np.frombuffer` on odd-length HTTP chunks |
+| Metallic | 3-tap box resampler passed 4 kHz at −3.5 dB → 63-tap FIR at −43 dB |
+| Robotic/choppy | Streamed chunks queued straight to playout left gaps inside words → whole-sentence buffering |
 
 ## Verification items
 
