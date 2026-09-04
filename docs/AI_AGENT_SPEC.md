@@ -5,6 +5,9 @@
 > subsystem the obvious alternative is usually the one that dead-airs a caller or bills you
 > twice.
 >
+> Companion: [`CRM_CONTEXT_SPEC.md`](CRM_CONTEXT_SPEC.md) — giving an agent the caller's
+> current state from a CRM at call start (designed 2026-09-04, not yet built).
+>
 > Companion docs: [`CODE_MAP.md`](CODE_MAP.md) (how OWEN works today — predates the
 > BulkVS/Asterisk half), [`FLOW_BUILDER_SPEC.md`](FLOW_BUILDER_SPEC.md) (the flow runtime
 > these agents run inside), [`../asterisk/README.md`](../asterisk/README.md).
