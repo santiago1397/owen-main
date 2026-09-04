@@ -577,6 +577,49 @@ Still worth doing once: a **real inbound call**. The loopback exercises no trunk
 negotiation with BulkVS and no network RTP, so it proves the AudioSocket transport rather
 than the whole call path.
 
+## Step 2 result — pipeline working end to end, 2026-09-04
+
+`POST /spike/loopback {"mode":"agent"}` — the cascaded pipeline against Asterisk's own speech,
+no phone, no caller.
+
+```
+turns: 1        vad_starts: 8   vad_ends: 8    rx_frames: 1514   tx_frames: 180
+transcript:
+  caller: "and hang up commands to simulate the actions of a standard telephone."
+  agent:  "I'm here to help with your roofing needs! May I have your name, please?"
+```
+
+The caller line is a real sentence from the `demo-congrats` prompt, so STT transcribed audio
+that genuinely crossed the bridge; the reply is in character from `AGENT_SYSTEM_PROMPT`; and
+180 frames (3.6 s) of synthesized speech went back. **STT → LLM → TTS all work against the
+existing OpenAI credentials.**
+
+### The latency number, and what it costs
+
+**`last_turn_ms: 3354`** — roughly 3× the spec's 800 ms–1.2 s target (§14). Not a defect;
+it is the price of the substitution this build made deliberately:
+
+| Cause | Cost | Fix |
+|---|---|---|
+| Batch STT — one Whisper request *after* the turn ends | the whole utterance's upload + inference, serialised after the caller stops | **Deepgram Flux**: streams during speech and detects end-of-turn itself (§4) |
+| Local VAD hangover — 700 ms of silence before we even believe the turn ended | 700 ms, every turn | Same: Flux's EOT replaces `dsp.TurnDetector` entirely |
+| TTS synthesized whole before playout starts | first-audio waits for the last word | Stream TTS and start playing the first chunk |
+
+So the single highest-value upgrade is **Deepgram for STT**, which removes the first two rows
+at once and lets `app/dsp.py`'s turn detector be deleted rather than tuned. That is exactly
+what §4 predicted, now measured on this system rather than taken on faith.
+
+### Known artifact of the self-test, not of the pipeline
+
+`max_quiet_run` showed the longest silence in the test stream was **26 frames (520 ms)**
+against the 700 ms end-of-turn threshold, so no turn could ever end until the threshold was
+overridden for the test. That is the audio *source*: `demo-congrats` is continuous recorded
+speech whose inter-sentence gaps never reach the pause a human leaves. 700 ms remains the
+default for real callers; `/spike/loopback` takes `vad_end_frames` to override it.
+
+**Still outstanding: a real inbound call.** Neither loopback exercises the trunk, BulkVS codec
+negotiation, or network RTP — and no human has yet heard the agent speak.
+
 ## Verification items
 
 1. ✅ **AudioSocket support on the pinned Asterisk 22.10.1** — cleared 2026-09-03.
