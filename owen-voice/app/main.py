@@ -99,7 +99,9 @@ async def _on_media_leg_start(channel_id: str, session: MediaSession) -> None:
 
     # Self-test. `echo` needs Asterisk to make a sound we can receive; `tone` must stay
     # SILENT so that anything in the recording provably came from us.
-    if session.mode == "echo":
+    if session.mode in ("echo", "agent"):
+        # `agent` uses the same stock sound as speech for the pipeline to hear, so STT -> LLM
+        # -> TTS can be exercised end to end without anyone picking up a phone.
         await ari.play_into_bridge(bridge_id, SELF_TEST_MEDIA)
     else:
         await ari.record_bridge(bridge_id, session.recording_name or "owen-voice-tone")
@@ -219,7 +221,9 @@ async def sessions() -> dict:
 
 
 class LoopbackIn(BaseModel):
-    mode: str = "echo"       # "echo" proves RECEIVE, "tone" proves SEND
+    # "echo" proves RECEIVE, "tone" proves SEND, "agent" runs the whole cascaded pipeline
+    # against Asterisk's own speech — a full end-to-end test with no phone.
+    mode: str = "echo"
     seconds: float = 4.0     # how long to run before reporting
 
 
@@ -239,8 +243,8 @@ async def spike_loopback(body: LoopbackIn) -> dict:
     negotiation with BulkVS and no RTP over the network — so it proves the AudioSocket
     transport, not the whole call path. A real call is still worth making.
     """
-    if body.mode not in ("echo", "tone"):
-        raise HTTPException(422, "mode must be 'echo' or 'tone'")
+    if body.mode not in ("echo", "tone", "agent"):
+        raise HTTPException(422, "mode must be 'echo', 'tone' or 'agent'")
 
     session = registry.create(label=f"loopback:{body.mode}")
     session.mode = body.mode
@@ -265,8 +269,9 @@ async def spike_loopback(body: LoopbackIn) -> dict:
     _media_legs[media_id] = session
 
     # Bridging + the play/record happen on the media leg's StasisStart (see
-    # _on_media_leg_start); wait for the audio to actually move before reporting.
-    await asyncio.sleep(max(0.5, min(body.seconds, 20.0)))
+    # _on_media_leg_start); wait for the audio to actually move before reporting. An `agent`
+    # run needs longer — it has to hear a turn, then wait on STT, the LLM and TTS.
+    await asyncio.sleep(max(0.5, min(body.seconds, 60.0)))
 
     if session.mode == "tone":
         await ari.stop_recording(session.recording_name or "")
@@ -279,6 +284,9 @@ async def spike_loopback(body: LoopbackIn) -> dict:
 class SpikeCallIn(BaseModel):
     to: str                      # E.164 number to ring — YOUR phone
     from_number: str | None = None   # owned DID for caller-ID; defaults to BULKVS_FROM_NUMBER
+    # "agent" talks to you (step 2); "echo" plays you back to yourself (step 1, for
+    # debugging the transport in isolation when a conversation misbehaves).
+    mode: str = "agent"
 
 
 @app.post("/spike/call")
@@ -298,7 +306,10 @@ async def spike_call(body: SpikeCallIn) -> dict:
     if not to:
         raise HTTPException(422, "to required")
 
+    if body.mode not in ("agent", "echo"):
+        raise HTTPException(422, "mode must be 'agent' or 'echo'")
     session = registry.create(label=f"spike->{to}")
+    session.mode = body.mode
     endpoint = f"PJSIP/{to}@{settings.TRUNK_NAME}"
 
     # Pre-assign the channel id so the StasisStart that follows is correlatable the moment it
@@ -323,7 +334,8 @@ async def spike_call(body: SpikeCallIn) -> dict:
         "ok": True,
         "session_uuid": session.session_uuid,
         "channel_id": channel_id,
-        "next": f"answer the call, speak, then GET /sessions to read the verdict",
+        "mode": session.mode,
+        "next": "answer the call, speak, then GET /sessions to read the verdict",
     }
 
 

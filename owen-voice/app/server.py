@@ -21,6 +21,7 @@ from app.audiosocket import (
 )
 from app.config import settings
 from app.session import MediaSession, peak_of, registry
+from app.pipeline import Conversation
 from app.tone import sine_frame
 
 logger = logging.getLogger("voice.audiosocket")
@@ -41,6 +42,7 @@ async def handle_connection(
     parser = FrameParser()
     session: MediaSession | None = None
     pump: asyncio.Task | None = None
+    convo: Conversation | None = None
     logger.info("audiosocket: connection from %s", peer)
 
     try:
@@ -73,6 +75,11 @@ async def handle_connection(
                                 sid, session.label, session.mode)
                     if session.mode == "tone":
                         pump = asyncio.create_task(_tone_pump(session, writer))
+                    elif session.mode == "agent":
+                        # Step 2: the cascaded pipeline replaces the echo. Greeting first,
+                        # so the caller is never met with silence.
+                        convo = Conversation(session, writer)
+                        await convo.start()
                     continue
 
                 if session is None:
@@ -92,6 +99,15 @@ async def handle_connection(
                     if session.mode == "tone":
                         # The tone pump owns the send side on its own clock — see
                         # _tone_pump. Nothing to write here.
+                        continue
+                    if session.mode == "agent":
+                        # Playout owns the send side; this only feeds turn detection.
+                        ended = await convo.on_frame(frame.payload) if convo else None
+                        if ended:
+                            logger.info("audiosocket: session %s guardrail %s — ending",
+                                        session.session_uuid, ended)
+                            session.error = None
+                            return
                         continue
                     writer.write(encode_audio(frame.payload))  # THE ECHO
                     session.tx_frames += 1
@@ -129,6 +145,8 @@ async def handle_connection(
     finally:
         if pump is not None:
             pump.cancel()
+        if convo is not None:
+            await convo.close()
         if session is not None:
             session.closed_at = asyncio.get_running_loop().time()
             session._writer = None

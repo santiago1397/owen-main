@@ -55,6 +55,13 @@ class MediaSession:
     dtmf: str = ""
     error: Optional[str] = None
 
+    # --- conversation (step 2) ---
+    turns: int = 0
+    last_turn_ms: int = 0
+    # Speaker-labelled, the shape the backend's `transcriptions.segments` already uses, so
+    # persisting it in step 3 is a write rather than a translation.
+    transcript: list = field(default_factory=list)
+
     _writer: Optional[asyncio.StreamWriter] = field(default=None, repr=False)
 
     @property
@@ -83,6 +90,9 @@ class MediaSession:
             "tx_bytes": self.tx_bytes,
             "peak_amplitude": self.peak_amplitude,
             "dtmf": self.dtmf,
+            "turns": self.turns,
+            "last_turn_ms": self.last_turn_ms,
+            "transcript": self.transcript,
             "error": self.error,
             "verdict": self.verdict(),
         }
@@ -93,6 +103,12 @@ class MediaSession:
             return f"error: {self.error}"
         if self.connected_at is None:
             return "asterisk never connected — check externalMedia + advertise host/port"
+        if self.mode == "agent":
+            if self.rx_frames == 0:
+                return "connected but no audio received — channel likely not bridged"
+            if self.turns == 0:
+                return "audio flowed but no complete turn — check VAD threshold / STT key"
+            return f"OK — {self.turns} conversational turn(s)"
         if self.mode == "tone":
             # A tone session deliberately ignores input, so rx says nothing about success —
             # the proof is that we sent, and that Asterisk's bridge recording is non-silent.
