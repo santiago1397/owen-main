@@ -54,12 +54,34 @@ def enabled_tools(toggles: dict | None) -> dict:
     return {n: t for n, t in TOOLS.items() if toggles.get(n)}
 
 
-def openai_schema(enabled: dict) -> list:
-    """The `tools` array for an OpenAI-compatible chat completion."""
-    return [
-        {"type": "function", "function": {
-            "name": name, "description": spec["description"],
-            "parameters": spec["parameters"],
-        }}
-        for name, spec in enabled.items()
-    ]
+def openai_schema(enabled: dict, transfer_targets: dict | None = None) -> list:
+    """The `tools` array for an OpenAI-compatible chat completion.
+
+    `transfer` is specialised against the agent's declared ALLOWLIST (AI_AGENT_SPEC D9): the
+    destination becomes an enum of names the operator wrote down, so the model picks WHICH
+    declared destination and can never name a number. That is the same property as the custom
+    tools in D6, and it is what stops an LLM being talked into dialling a premium-rate number
+    over the trunk. With no allowlist configured the tool keeps its plain form and the flow's
+    own `transfer` edge decides, exactly as before.
+    """
+    out = []
+    names = sorted(transfer_targets or {})
+    for name, spec in enabled.items():
+        params = spec["parameters"]
+        if name == "transfer" and names:
+            params = {
+                "type": "object",
+                "properties": {
+                    "destination": {
+                        "type": "string",
+                        "enum": names,
+                        "description": "Where to send the caller. Choose the closest match.",
+                    },
+                    "reason": {"type": "string"},
+                },
+                "required": ["destination"],
+            }
+        out.append({"type": "function", "function": {
+            "name": name, "description": spec["description"], "parameters": params,
+        }})
+    return out

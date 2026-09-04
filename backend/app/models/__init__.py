@@ -11,6 +11,7 @@ from app.models.models import (
     Caller,
     Call,
     CallAnalysis,
+    AgentSlot,
     CallCapture,
     CallCharge,
     CallEvent,

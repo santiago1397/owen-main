@@ -54,6 +54,9 @@ class AgentConfig(BaseModel):
     max_silence_seconds: Optional[int] = None
     half_duplex: Optional[bool] = None
     tts_instructions: str = ""
+    # Named destinations this agent may transfer to (D9). Names only reach the
+    # model; OWEN resolves each to a real target and performs the move.
+    transfer_targets: dict = Field(default_factory=dict)
 
 
 class SessionIn(BaseModel):

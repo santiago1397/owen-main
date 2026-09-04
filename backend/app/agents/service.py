@@ -35,6 +35,31 @@ def validate_agent_config(config: dict | None) -> tuple[list[str], list[str]]:
         if name not in TOOLS:
             errors.append(f"unknown tool '{name}' (not in the fixed tool registry)")
 
+    # Transfer allowlist (AI_AGENT_SPEC D9). Validated at ACTIVATION, because a malformed
+    # entry means the agent silently cannot reach a destination the operator believes it can.
+    targets = cfg.get("transfer_targets")
+    if targets is not None:
+        if not isinstance(targets, dict):
+            errors.append("transfer_targets must be an object of {name: {kind, target}}")
+        else:
+            for name, entry in targets.items():
+                if not isinstance(entry, dict):
+                    errors.append(f"transfer target '{name}' must be an object")
+                    continue
+                kind = str(entry.get("kind") or "number")
+                if kind not in ("number", "operator", "flow", "agent"):
+                    errors.append(
+                        f"transfer target '{name}' has unknown kind '{kind}' "
+                        "(number | operator | flow | agent)"
+                    )
+                if not str(entry.get("target") or "").strip():
+                    errors.append(f"transfer target '{name}' has no target")
+        if isinstance(targets, dict) and targets and not (cfg.get("tools") or {}).get("transfer"):
+            warnings.append(
+                "transfer_targets are declared but the `transfer` tool is toggled off — "
+                "the agent can never reach them"
+            )
+
     if not str(cfg.get("greeting") or "").strip():
         warnings.append("no greeting set — the agent will open with nothing scripted")
     if not str(cfg.get("persona") or "").strip():

@@ -53,6 +53,19 @@ TERMINAL_TYPES: frozenset[str] = frozenset({"voicemail", "hangup"})
 # configured, `_safe_hangup()` hangs up on the caller the operator just rescued.
 PORT_TAKEN_OVER: str = "taken_over"
 
+# The agent chose a destination from its own allowlist and the RUNTIME already moved the
+# caller there (AI_AGENT_SPEC D9). Like `taken_over`, this is internal control rather than a
+# wireable edge: the call has been handed off, so routing onward would send an already-
+# transferred caller into voicemail or hang up a bridge someone is talking on.
+#
+# An agent that returns the plain `transfer` port WITHOUT a destination still routes through
+# the graph's `transfer` edge as before — the flow author's wiring is unchanged, and the
+# allowlist only takes over when the agent actually picked somewhere.
+PORT_TRANSFERRED: str = "transferred"
+
+# Ports after which the interpreter stops and touches nothing.
+STAND_DOWN_PORTS: frozenset[str] = frozenset({PORT_TAKEN_OVER, PORT_TRANSFERRED})
+
 # Ticket 17 parity nodes emit their transition event AFTER the handler runs (instead of the
 # usual emit-on-entry), so the payload can snapshot the OUTCOME (vars set, matched condition
 # row, request status). All of these run in bounded time (send_sms is fire-and-forget; the
@@ -372,15 +385,15 @@ class FlowInterpreter:
             if post_emit:
                 await self._emit_transition(step, current, ntype, extra=self._event_extra)
 
-            if port == PORT_TAKEN_OVER:
-                # A human owns this call now. Record it and stand down — no routing, no
-                # fallback, no hangup. See PORT_TAKEN_OVER.
+            if port in STAND_DOWN_PORTS:
+                # The call has left our control — a human seized it, or the agent already
+                # transferred it. Record it and stand down: no routing, no fallback, no
+                # hangup. See PORT_TAKEN_OVER / PORT_TRANSFERRED.
                 await self._emit_exit(
-                    step, current, ntype, port, "taken_over", None, node_ms, errored
+                    step, current, ntype, port, port, None, node_ms, errored
                 )
-                logger.info("interpreter %s: call taken over by a human; standing down",
-                            self.linkedid)
-                return "taken_over"
+                logger.info("interpreter %s: standing down (%s)", self.linkedid, port)
+                return port
 
             if ntype in TERMINAL_TYPES:
                 await self._emit_exit(step, current, ntype, port, "terminal", None, node_ms, errored)

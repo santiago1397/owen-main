@@ -62,6 +62,13 @@ class RemoteVoiceAgentSession:
                 "max_call_seconds": guard.get("max_call_seconds"),
                 "max_silence_seconds": guard.get("max_silence_seconds"),
                 "tts_instructions": str(spec.config.get("tts_instructions") or ""),
+                # Only the NAMES travel; the targets stay here and are resolved
+                # against the pinned version when the agent picks one (D9).
+                "transfer_targets": {
+                    k: {"kind": (v or {}).get("kind", "number")}
+                    for k, v in (spec.config.get("transfer_targets") or {}).items()
+                    if isinstance(v, dict)
+                },
             },
         }
         headers = {}

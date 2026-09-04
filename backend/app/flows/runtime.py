@@ -34,8 +34,9 @@ from app.core.calllog import clog
 from app.core.config import settings
 from app.db import SessionLocal
 from app.flows.interpreter import AriControl, FlowInterpreter
-from app.models import (Agent, AgentVersion, Call, CallCapture, CallEvent, Flow,
-                        FlowVersion, Number, Transcription)
+from app.flows.transfer import resolve_transfer_target
+from app.models import (Agent, AgentSlot, AgentVersion, Call, CallCapture, CallEvent,
+                        Flow, FlowVersion, Number, Transcription)
 from app.providers.asterisk import linkedid as _linkedid
 from app.services import queue, sms
 from app.services.ingestion import _get_or_create_provider
@@ -206,6 +207,26 @@ async def _pin_forwarded_to(db, provider_id: int, provider_call_sid: str, target
     )
 
 
+async def _agent_id_for_node(db, node: dict) -> Optional[str]:
+    """The agent an `ai_agent` node runs: a direct `agent_id`, or a SLOT (D12).
+
+    A slot is a mutable pointer, so swapping which agent answers is a data edit rather than a
+    new flow version. Explicit `agent_id` still wins where a flow deliberately pins one."""
+    direct = node.get("agent_id") or node.get("agent")
+    if direct:
+        return str(direct)
+    slot = node.get("slot")
+    if not slot:
+        return None
+    row = (
+        await db.execute(select(AgentSlot).where(AgentSlot.name == str(slot)))
+    ).scalar_one_or_none()
+    if row is None or row.agent_id is None:
+        logger.warning("flow runtime: agent slot %r is unassigned", slot)
+        return None
+    return str(row.agent_id)
+
+
 async def _resolve_active_agent_version(db, agent_id) -> Optional[AgentVersion]:
     """The agent's ACTIVE version row, or None if the agent/version is missing (Ticket 11).
     The `ai_agent` node references an agent by id; the specific version is resolved (and
@@ -359,6 +380,66 @@ def _dial_target_of(event_type: str, payload: dict) -> Optional[str]:
     return str(target) if target else None
 
 
+async def _do_agent_transfer(ari, channel_id: str, lid: str, chosen: dict) -> bool:
+    """Move the caller to the destination the agent picked. Returns True if it was handled.
+
+    `flow` and `agent` stay INTERNAL — same channel, no PSTN round trip. `services/billing.py`
+    records from live BulkVS data that an inbound call forwarded back out over the same trunk
+    bills as inbound minutes AND outbound minutes; dialling our own DID to reach its flow
+    would double-bill every transfer, add PSTN latency and burn two trunk channels for one
+    conversation.
+    """
+    kind, target = chosen["kind"], chosen["target"]
+    clog(logger, "agent.transfer", linkedid=lid, kind=kind, target=target)
+    try:
+        if kind == "number":
+            result = await ari.dial_number(
+                channel_id, target, caller_id=None,
+                timeout_s=float(settings.OPERATOR_RING_TIMEOUT_SECONDS),
+            )
+            return result == "answered"
+        if kind == "operator":
+            result = await ari.dial_operator(
+                channel_id, [target], caller_id=None,
+                timeout_s=float(settings.OPERATOR_RING_TIMEOUT_SECONDS),
+            )
+            return result == "answered"
+        if kind == "flow":
+            # Resolve the target DID to its assigned flow and run that graph on THIS channel.
+            async with SessionLocal() as db:
+                _assigned, resolved = await _resolve_active_flow_version(db, target)
+            if resolved is None:
+                logger.warning("flow runtime: transfer target flow %r not runnable", target)
+                return False
+            fv_id, graph = resolved
+            logger.info("flow runtime: agent transferred %s into flow_version=%s", lid, fv_id)
+            await _run_graph_on_channel(ari, channel_id, lid, graph)
+            return True
+        if kind == "agent":
+            logger.info("flow runtime: agent-to-agent transfer to %s (linkedid=%s)",
+                        target, lid)
+            return False  # handled by the caller re-entering the node; not yet wired
+    except Exception:  # noqa: BLE001 - a failed transfer falls back to the graph edge
+        logger.exception("flow runtime: agent transfer failed (linkedid=%s)", lid)
+    return False
+
+
+async def _run_graph_on_channel(ari, channel_id: str, lid: str, graph: dict) -> None:
+    """Run another flow graph on a channel that is already answered and in Stasis."""
+    interp = FlowInterpreter(
+        graph=graph, channel_id=channel_id, ari=ari,
+        emit=_noop_emit, linkedid=lid, business_tz=settings.BUSINESS_TZ,
+    )
+    await interp.run()
+
+
+async def _noop_emit(event_type: str, provider_sequence: str, payload: dict) -> None:
+    """Events for a transferred-into flow are dropped rather than double-attributed: the call
+    already has a pinned flow_version, and writing a second graph's node events against it
+    would make the timeline read as one flow that impossibly ran two paths."""
+    return None
+
+
 async def run_flow_for_stasis(event: dict, ari: AriControl) -> None:
     """Entry point the consumer calls on an entry-channel StasisStart. Best-effort: any
     failure is logged, never raised into the WS loop (the consumer also guards this)."""
@@ -430,9 +511,16 @@ async def run_flow_for_stasis(event: dict, ari: AriControl) -> None:
         # VoiceAgentSession (dummy by default; kill-switch/per-agent engine), return its exit
         # PORT + tool data. The agent never bridges — the interpreter routes by the port.
         # Any failure -> ("failed", {}) so the node takes its `failed` port (then fallback).
-        agent_id = node.get("agent_id") or node.get("agent")
+        try:
+            async with SessionLocal() as dbs:
+                agent_id = await _agent_id_for_node(dbs, node)
+        except Exception:  # noqa: BLE001 - a DB hiccup takes the `failed` port, not dead air
+            logger.exception("flow runtime: agent lookup failed (linkedid=%s)", lid)
+            return ("failed", {})
         if not agent_id:
-            logger.warning("flow runtime: ai_agent node has no agent_id (linkedid=%s)", lid)
+            logger.warning(
+                "flow runtime: ai_agent node resolves to no agent (linkedid=%s)", lid
+            )
             return ("failed", {})
         try:
             async with SessionLocal() as dba:
@@ -462,6 +550,29 @@ async def run_flow_for_stasis(event: dict, ari: AriControl) -> None:
                     await dbw.commit()
             except Exception:  # noqa: BLE001 - never dead-air a caller over a failed write
                 logger.exception("flow runtime: storing agent output failed (linkedid=%s)", lid)
+
+            # D9: the agent may have named a destination from its OWN declared allowlist. If
+            # it did, move the caller there and tell the interpreter to stand down. If it
+            # only said "transfer" with no destination, fall through unchanged so the flow
+            # author's `transfer` edge still decides — the allowlist adds a capability, it
+            # does not take the graph's away.
+            if result.port == "transfer":
+                chosen = resolve_transfer_target(
+                    (version.config or {}).get("transfer_targets"),
+                    str((result.data or {}).get("destination") or ""),
+                )
+                if chosen is not None:
+                    moved = await _do_agent_transfer(ari, channel_id, lid, chosen)
+                    if moved:
+                        return ("transferred", {**(result.data or {}), "transfer": chosen})
+                elif (result.data or {}).get("destination"):
+                    # Named something not on its allowlist. Loud, because it is either a
+                    # misconfigured agent or a caller talking it into somewhere it may not go.
+                    logger.warning(
+                        "flow runtime: agent asked for undeclared destination %r "
+                        "(linkedid=%s); falling back to the graph's transfer edge",
+                        (result.data or {}).get("destination"), lid,
+                    )
             return (result.port, result.data)
         except Exception:  # noqa: BLE001 - never dead-air; the node takes `failed`/fallback
             logger.exception("flow runtime: ai_agent run failed (linkedid=%s)", lid)

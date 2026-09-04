@@ -158,7 +158,10 @@ class Conversation:
         # Only the tools this agent VERSION toggled on. The registry is closed, so a stale
         # toggle cannot smuggle in a capability that does not exist.
         self.tools = enabled_tools(self.agent.get("tools"))
-        self._tool_schema = openai_schema(self.tools) if self.tools else None
+        self._tool_schema = (
+            openai_schema(self.tools, self.agent.get("transfer_targets"))
+            if self.tools else None
+        )
         self.history: list[dict] = []
         self._turn: Optional[asyncio.Task] = None
         self._started = time.monotonic()
@@ -428,6 +431,11 @@ class Conversation:
             spec = TOOLS.get(name, {})
             if spec.get("kind") == "flow_exit":
                 exit_port = spec.get("exit_port")
+                # The destination the agent picked from its allowlist rides back with the
+                # port; OWEN resolves the NAME to a real target and performs the move, so a
+                # number never crosses this boundary (D9).
+                if name == "transfer" and isinstance(args, dict) and args.get("destination"):
+                    self.session.result_data["destination"] = str(args["destination"])
                 logger.info("session %s: agent tool %s -> port %s",
                             self.session.session_uuid, name, exit_port)
                 continue

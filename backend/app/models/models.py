@@ -523,6 +523,29 @@ class AgentVersion(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
+class AgentSlot(Base):
+    """A named, swappable pointer to an agent (AI_AGENT_SPEC D12).
+
+    An `ai_agent` node references a SLOT ("receptionist") rather than a concrete agent, so
+    swapping which agent answers is a data edit instead of a new flow version. Flow-version
+    history then keeps meaning "the routing changed" rather than "someone tried a different
+    agent", and A/B testing an army becomes possible: point a slot at agent A for a week,
+    agent B the next, and compare `call_captures` honestly.
+
+    Pinning is unaffected — the concrete `agent_version_id` is still resolved and pinned onto
+    each call, so past calls stay attributable no matter where the slot points now.
+    """
+
+    __tablename__ = "agent_slots"
+
+    name: Mapped[str] = mapped_column(String, primary_key=True)
+    agent_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("agents.id"))
+    description: Mapped[str | None] = mapped_column(String)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
 class CallCapture(Base):
     """Structured data an AI agent collected DURING a call (AI_AGENT_SPEC D7).
 
