@@ -515,8 +515,41 @@ one that admits ignorance."*
 The only thing here that can invalidate the design is whether audio round-trips. Everything
 else is code this codebase has demonstrably written before.
 
-> **STATUS 2026-09-04: steps 0-5 are built, deployed and green.** Step 3 onward has not yet
-> carried a real customer call — a test DID still needs pointing at an agent-bearing flow.
+> **STATUS 2026-09-04.** Steps 0–5 built, deployed and green. Steps 6–8 built and committed
+> LOCALLY, **not yet deployed** — see the deploy checklist below. Nothing has yet carried a
+> real customer call: a test DID still needs pointing at an agent-bearing flow.
+
+## Deploy checklist — steps 6-8 (not yet run)
+
+Three commits are local-only: `26fbc35` (step 6), `59d87ac` (step 7), `233f68f` (step 8).
+
+**Migrations to apply** (self-apply at startup behind the advisory lock):
+
+| Revision | Adds |
+|---|---|
+| `a1c4e7f2b830` | `call_captures` *(already deployed with step 5)* |
+| `b2d5f8a3c914` | `agent_slots` |
+| `c3e6a9d1f725` | `call_charges.provenance` / `.agent_version_id` / `.usage` |
+
+**New env (all optional, all default to off/safe):**
+
+```
+AI_DAILY_SPEND_CAP_USD=0     # 0 = no cap. A COST switch, not the behaviour kill-switch.
+```
+
+**Verify after deploy** — these need the container and could not run locally:
+
+```bash
+docker exec callmon_app alembic current           # expect c3e6a9d1f725 (head)
+docker exec callmon_app python -m tests.test_ai_cost
+docker exec callmon_app python -m tests.test_transfer_allowlist
+docker exec callmon_app python -m tests.test_ownership
+docker exec callmon_app python -c "from app.main import app;   print(sorted(r.path for r in app.routes if 'agent-runtime' in r.path))"
+```
+
+**Rates ship as published list prices.** Check `app/services/ai_cost.py::DEFAULT_RATES`
+against a real OpenAI invoice before planning around any figure it produces. Every row it
+writes is stamped `derived`, never `rated`, precisely so it cannot be mistaken for one.
 
 | # | Ships | Risk retired |
 |---|---|---|
@@ -527,9 +560,9 @@ else is code this codebase has demonstrably written before.
 | 🚦 | **GATE — no production DID before step 4** | |
 | ✅ **4** | Take-over: ownership registry, `taken_over`, snoop-listen, barge, central ARI guard | "The agent is broken and a human must grab this call" |
 | ✅ **5** | `call_captures` + inline transcript + fix the `_data` discard | The data requirement |
-| **6** | Transfer allowlist (4 kinds) + agent slots | The army becomes routable |
-| **7** | Custom HTTP tools + `/api/agent-runtime` | Integration surface |
-| **8** | Cost rows + spend cap | Economics |
+| ✅ **6** | Transfer allowlist (4 kinds) + agent slots | The army becomes routable |
+| ✅ **7** | Custom HTTP tools + `/api/agent-runtime` | Integration surface |
+| ✅ **8** | Cost rows + spend cap | Economics |
 
 **Why the gate sits there:** step 3 is the first moment a real caller can reach an agent. The
 stated requirement is that a human can seize a call when the agent misbehaves — so production
