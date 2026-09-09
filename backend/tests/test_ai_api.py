@@ -274,8 +274,11 @@ def test_regressions():
     check("a usage middleware exists to audit every AI request",
           hasattr(deps, "usage_middleware"))
     src = pathlib.Path(deps.__file__).read_text(encoding="utf-8")
-    check("...scoped to /api/ai so it never touches other routes",
-          'startswith("/api/ai")' in src)
+    # Widened to the agent-runtime write surface too (AI_AGENT_SPEC D13): auditing every read
+    # and none of the writes would be exactly backwards. Still scoped to the two API-key
+    # surfaces, so no other route pays for it.
+    check("...scoped to the API-key surfaces so it never touches other routes",
+          'startswith(("/api/ai", "/api/agent-runtime"))' in src)
     check("...and skips requests a route already recorded (no double-count)",
           "ai_usage_recorded" in src)
     import app.main as main_mod

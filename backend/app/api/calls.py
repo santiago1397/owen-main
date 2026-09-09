@@ -208,7 +208,7 @@ async def get_call(
     # produced two rows, and the order is the story of the call.
     capture_rows = (
         await db.execute(
-            select(CallCapture).where(CallCapture.call_id == call.id)
+            select(CallCapture).where(CallCapture.call_id == call_id)
             .order_by(CallCapture.captured_at)
         )
     ).scalars().all()

@@ -481,14 +481,18 @@ class Conversation:
         exit_port = None
         for slot in self._tool_calls.values():
             name = slot.get("name") or ""
-            if name not in self.tools:
-                if find_custom(self.custom, name):
-                    self._pending_custom.append((name, args))
-                continue    # not toggled on, or not in the registry at all
+            # Parsed BEFORE the registry check: a custom tool needs its arguments too, and
+            # reading them only in the platform-tool branch left `args` unbound on the first
+            # custom call — an UnboundLocalError swallowed by _handle_turn's except, so custom
+            # tools silently never ran.
             try:
                 args = json.loads(slot.get("args") or "{}")
             except ValueError:
                 args = {}
+            if name not in self.tools:
+                if find_custom(self.custom, name):
+                    self._pending_custom.append((name, args))
+                continue    # not toggled on, or not in the registry at all
             spec = TOOLS.get(name, {})
             if spec.get("kind") == "flow_exit":
                 exit_port = spec.get("exit_port")
