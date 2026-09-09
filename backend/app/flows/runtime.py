@@ -607,12 +607,18 @@ async def run_flow_for_stasis(event: dict, ari: AriControl) -> None:
             except Exception:  # noqa: BLE001 - never dead-air a caller over a failed write
                 logger.exception("flow runtime: storing agent output failed (linkedid=%s)", lid)
 
-            # Register the agent's bridge recording (agent observability). owen-voice records
-            # a bridge IT owns, in ITS OWN Stasis app, so the RecordingFinished event is
-            # delivered there and OWEN's consumer never sees it. The name travels back on the
-            # result instead, and we synthesise the same event shape the consumer would have
-            # received -- so the row, the spool move, transcribe and analyze all reuse the
-            # existing path rather than growing a parallel one.
+            # Register the agent's bridge recording (agent observability).
+            #
+            # BELT AND BRACES, not the primary path. I assumed OWEN's consumer could not see
+            # this recording, because owen-voice records a bridge belonging to its OWN Stasis
+            # app. That assumption was wrong: on the first real call the worker logged
+            # `ingest_recording_event sid=...-agent-1` four seconds after the hangup and the
+            # fetch/transcribe chain ran on its own. ARI delivered RecordingFinished to OWEN's
+            # app as well, presumably because the bridge held a channel that app owns.
+            #
+            # This stays because it costs nothing and closes the gap if that ever stops being
+            # true (a bridge with no OWEN-owned channel, an ARI version change). It is
+            # idempotent on the recording SID, so the two paths cannot double-register.
             rec_name = str((result.data or {}).get("recording_name") or "")
             if rec_name:
                 try:

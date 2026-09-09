@@ -158,6 +158,13 @@ class Settings:
     # land in the existing pipeline (fetch -> transcribe -> analyze) and obey the same
     # RECORDING_RETENTION_DAYS sweep as every other recording. Set false to disable.
     AGENT_RECORD: bool = _s("VOICE_AGENT_RECORD", "true").lower() not in ("0", "false", "no")
+    # IDLE WATCHDOG. Every guardrail below is evaluated on FRAME ARRIVAL, so when frames simply
+    # stop none of them can fire. Observed live: the caller hung up, Asterisk left the
+    # externalMedia channel Up with the AudioSocket connection open, no EOF ever reached us,
+    # and the session sat "connected" holding one of MAX_SESSIONS slots until the 330s request
+    # timeout. Four short calls in five minutes would exhaust capacity with nobody talking.
+    # RTP gaps are milliseconds, so several seconds of NOTHING means the far end is gone.
+    AGENT_IDLE_SECONDS: float = float(_s("VOICE_AGENT_IDLE_SECONDS", "8") or 8)
     DG_TTS_URL: str = _s("VOICE_DG_TTS_URL", "wss://api.deepgram.com/v1/speak")
     # REST fallback for the non-streaming synthesize() path (greetings, short fixed prompts).
     DG_TTS_REST_URL: str = _s("VOICE_DG_TTS_REST_URL", "https://api.deepgram.com/v1/speak")

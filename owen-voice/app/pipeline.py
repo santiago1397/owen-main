@@ -170,6 +170,9 @@ class Conversation:
         # starts after the turn has definitively ended) is completely unaffected.
         self._commit = asyncio.Event()
         self._commit.set()
+        # Idle watchdog state. Frame-driven guardrails cannot notice the absence of frames.
+        self._last_frame = time.monotonic()
+        self._watchdog: Optional[asyncio.Task] = None
         self.llm = get_llm(
             base_url=str((session.agent or {}).get("llm_base_url") or ""),
             model=str((session.agent or {}).get("model") or ""),
@@ -216,6 +219,7 @@ class Conversation:
 
     async def start(self, *, greet: bool = True) -> None:
         self.playout.start()
+        self._watchdog = asyncio.create_task(self._watch_idle())
         if self.stream_stt is not None:
             # DEGRADE, do not fail: a socket that will not open before the call has begun is
             # not the mid-call vendor switch M6 forbids -- nothing has been spoken yet, so
@@ -279,7 +283,43 @@ class Conversation:
             logger.info("session %s: caller context injected (%s)",
                         self.session.session_uuid, ", ".join(fields))
 
+    async def _watch_idle(self) -> None:
+        """End the session when frames STOP, which no other guardrail can detect.
+
+        The caller hanging up does not always close the AudioSocket connection: Asterisk can
+        leave the externalMedia channel Up, so there is no EOF, the read loop never returns,
+        and every guardrail -- max_call, max_silence -- is stranded because each is only
+        evaluated when a frame arrives. The session then holds one of MAX_SESSIONS slots until
+        the request timeout, which is minutes of capacity for a call that already ended.
+
+        Setting `done` is what unwinds it: POST /sessions returns and its finally hangs up the
+        media channel, which closes the connection. `end_call`, not `failed` -- the caller
+        leaving is a normal ending, and the flow should route on rather than treat it as an
+        error.
+        """
+        idle = float(settings.AGENT_IDLE_SECONDS or 0)
+        if idle <= 0:
+            return
+        try:
+            while True:
+                await asyncio.sleep(1.0)
+                gap = time.monotonic() - self._last_frame
+                if gap >= idle:
+                    logger.info(
+                        "session %s: no audio for %.1fs — the far end is gone, ending",
+                        self.session.session_uuid, gap,
+                    )
+                    self.session.result_port = self.session.result_port or "end_call"
+                    self.session.done.set()
+                    return
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 - a watchdog must never take the call down
+            logger.exception("session %s: idle watchdog failed", self.session.session_uuid)
+
     async def close(self) -> None:
+        if self._watchdog is not None:
+            self._watchdog.cancel()
         if self._stt_pump is not None:
             self._stt_pump.cancel()
         if self.stream_stt is not None:
@@ -296,6 +336,7 @@ class Conversation:
 
     async def on_frame(self, pcm: bytes) -> Optional[str]:
         """Feed one 20 ms frame. Returns a reason string if a guardrail ended the call."""
+        self._last_frame = time.monotonic()
         level = rms_of(pcm)
         self.session.rms_min = min(self.session.rms_min, level)
         self.session.rms_max = max(self.session.rms_max, level)
