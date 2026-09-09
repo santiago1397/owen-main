@@ -10,7 +10,7 @@ import logging
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -46,13 +46,29 @@ async def ingest_message_event(
 
     number = None
     if evt.to_number:
+        # Match the OWNING provider row, the DID's `owner_provider`, OR the provider carrying
+        # its media — never provider_id alone. A BulkVS DID adopted from a legacy Twilio row
+        # keeps `provider_id = twilio` (number_sync re-stamps owner/media and deliberately
+        # leaves provider_id, so the row's history stays intact), while its inbound SMS
+        # ingests under `bulkvs`. A provider_id-only match therefore found nothing, and every
+        # message to such a DID lost its number AND its campaign — 3 of 6 in the table when
+        # this was found, one of them to a DID that has a campaign.
+        #
+        # ingest_status_event already carries this fix for CALLS; this is the sibling path
+        # that was left behind. Calls ingest under the MEDIA provider ('asterisk') and SMS
+        # under the OWNER ('bulkvs'), which is why owner_provider has to be in the match too.
         number = (
             await db.execute(
                 select(Number).where(
-                    Number.provider_id == provider.id, Number.phone_number == evt.to_number
+                    Number.phone_number == evt.to_number,
+                    or_(
+                        Number.provider_id == provider.id,
+                        Number.owner_provider == provider.name,
+                        Number.media_provider == provider.name,
+                    ),
                 )
             )
-        ).scalar_one_or_none()
+        ).scalars().first()
         if number is None:
             logger.warning(
                 "ingest_message_event: no registered Number for to=%s (provider=%s, sid=%s) "

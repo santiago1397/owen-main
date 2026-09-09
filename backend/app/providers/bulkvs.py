@@ -23,6 +23,8 @@ texts would then collapse to one row — acceptable for the inbox).
 """
 
 import hashlib
+import re
+from urllib.parse import unquote_plus
 
 from app.providers.base import NormalizedMessageEvent
 
@@ -81,6 +83,31 @@ def _media_list(params: dict) -> list[str]:
     return [str(m) for m in raw if m]
 
 
+_PERCENT_ESCAPE = re.compile(r"%[0-9A-Fa-f]{2}")
+
+
+def _decode_body(raw):
+    """BulkVS form-urlencodes the `Message` field INSIDE its JSON payload.
+
+    Confirmed against a live MO webhook (2026-09-09), which delivered:
+        "Hi%2C+I+got+your+%23+on+Google+Biz+as+a+roofing+pro..."
+    so every inbound SMS was stored — and displayed — with %2C for commas and + for spaces.
+
+    Guarded rather than decoded unconditionally, because `unquote_plus` turns '+' into a
+    space: if BulkVS ever sends a plain body, "call me + I'll answer" would be quietly
+    mangled. A form-encoded body has had its spaces replaced by '+', so a body CONTAINING a
+    space was never encoded and is returned untouched.
+    """
+    if not isinstance(raw, str) or not raw or " " in raw:
+        return raw
+    if "+" not in raw and not _PERCENT_ESCAPE.search(raw):
+        return raw          # nothing encoded to undo (a single word, "STOP", …)
+    try:
+        return unquote_plus(raw)
+    except Exception:       # noqa: BLE001 - an undecodable body is kept verbatim, never dropped
+        return raw
+
+
 class BulkvsAdapter:
     """Only inbound messaging is modelled — BulkVS has no status/recording webhooks here."""
 
@@ -91,12 +118,13 @@ class BulkvsAdapter:
         # Trust the tracking-number query override we control (webhooks/bulkvs.py) over the
         # payload's To, mirroring the Twilio/SignalWire handling.
         to = _first(params.get("_tracking_number") or params.get("To") or params.get("to"))
-        body = (
+        raw_body = (
             params.get("Message")
             or params.get("Body")
             or params.get("message")
             or params.get("body")
         )
+        body = _decode_body(raw_body)
         media_urls = _media_list(params)
         timestamp = str(
             params.get("Timestamp")
@@ -109,8 +137,11 @@ class BulkvsAdapter:
 
         from_e = _to_e164(str(frm)) if frm else None
         to_e = _to_e164(str(to)) if to else None
+        # Hashed on the RAW body, not the decoded one: the SID is the idempotency key, and
+        # re-deriving it from decoded text would make every already-stored message look new
+        # if BulkVS ever redelivered it.
         sid = "bulkvs-" + hashlib.sha256(
-            f"{from_e or ''}|{to_e or ''}|{body or ''}|{timestamp}".encode()
+            f"{from_e or ''}|{to_e or ''}|{raw_body or ''}|{timestamp}".encode()
         ).hexdigest()
 
         return NormalizedMessageEvent(

@@ -119,10 +119,49 @@ def test_thread_grouping():
     check("NULL key thread grouped", len(threads2) == 1 and threads2[0].number_id is None)
 
 
+def test_body_decoding():
+    """BulkVS form-urlencodes the Message field INSIDE its JSON payload.
+
+    Verbatim from a live MO webhook (2026-09-09) — every inbound SMS was stored and shown
+    with %2C for commas and + for spaces until this was fixed."""
+    print("")
+    print("body decoding")
+    a = BulkvsAdapter()
+
+    live = ("Hi%2C+I+got+your+%23+on+Google+Biz+as+a+roofing+pro+in+Boca+Raton%2C+I+need+"
+            "some+work+done%2C+What%27s+best+email+to+send+work+scope%2C+Marwan.+"
+            "Reply+STOP+to+unsubscribe.")
+    evt = a.parse_message_event({"From": "18776588515", "To": ["15618788090"],
+                                 "Message": live, "RefId": "283EFF92"})
+    check("percent escapes decoded", "%2C" not in (evt.body or ""))
+    check("commas restored", evt.body.startswith("Hi, I got your # on Google Biz"))
+    check("plus signs became spaces", " " in evt.body and "+" not in evt.body)
+    check("apostrophe restored", "What's best email" in evt.body)
+
+    # The SID is the idempotency key and must not move because we now decode the text.
+    before = a.parse_message_event({"From": "18776588515", "To": ["15618788090"],
+                                    "Message": live, "RefId": "283EFF92"}).provider_message_sid
+    check("sid stable across the decode change", evt.provider_message_sid == before)
+
+    # unquote_plus turns '+' into a space, so a body that was never encoded must be left be.
+    plain = "Call me + I'll answer, 100% sure"
+    evt2 = a.parse_message_event({"From": "1954", "To": ["1954"], "Message": plain})
+    check("an unencoded body is untouched", evt2.body == plain)
+
+    # Single word, nothing to undo.
+    evt3 = a.parse_message_event({"From": "1954", "To": ["1954"], "Message": "STOP"})
+    check("single-word body untouched", evt3.body == "STOP")
+
+    # Encoded single word still decodes.
+    evt4 = a.parse_message_event({"From": "1954", "To": ["1954"], "Message": "50%25"})
+    check("encoded single word decoded", evt4.body == "50%")
+
+
 def main():
     test_parse()
     test_ip_verification()
     test_thread_grouping()
+    test_body_decoding()
     print("\nALL BULKVS-MESSAGE CHECKS PASSED")
 
 

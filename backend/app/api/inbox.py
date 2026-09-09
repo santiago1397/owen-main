@@ -66,6 +66,7 @@ def _msg_stmt():
             Message.number_id,
             Message.direction,
             Message.body,
+            Message.to_number,
             Message.status,
             Message.num_media,
             Message.media_urls,
@@ -258,7 +259,12 @@ async def get_thread(
             "num_media": r["num_media"],
             "media_urls": r["media_urls"] or [],
             "at": r["received_at"],
-            "our_number": r["number_phone"],
+            # Fall back to the number the SMS was actually addressed to when the DID has no
+            # `numbers` row (or had none at ingest). The join is the right source — it carries
+            # the friendly name — but a NULL there used to render as nothing at all, so a
+            # message to an unregistered DID gave no clue which of your numbers was texted,
+            # even though `to_number` held it the whole time.
+            "our_number": r["number_phone"] or r["to_number"],
             "our_name": r["number_name"],
         }
         for r in msg_rows
