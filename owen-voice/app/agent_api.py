@@ -88,6 +88,14 @@ class SessionOut(BaseModel):
     # Vendor-reported usage, for OWEN's DERIVED cost rows (D14).
     usage: dict = Field(default_factory=dict)
     session_uuid: str = ""
+    # How the conversation PERFORMED, not just what it said (agent observability). OWEN
+    # persists this onto the call so it outlives this container's logs and can be compared
+    # across a deploy -- which is the only way to tell a tuning change from a good day.
+    metrics: dict = Field(default_factory=dict)
+    turn_metrics: list = Field(default_factory=list)
+    # The bridge recording, if one was made. OWEN registers it: this bridge belongs to
+    # owen-voice's Stasis app, so its RecordingFinished never reaches OWEN's consumer.
+    recording_name: str = ""
 
 
 def _auth(key: Optional[str]) -> None:
@@ -156,6 +164,9 @@ async def run_session(
             transcript=session.transcript,
             usage=session.usage,
             session_uuid=session.session_uuid,
+            metrics=session.agent_metrics(),
+            turn_metrics=session.turn_metrics,
+            recording_name=session.recording_name or "",
         )
     except Exception:  # noqa: BLE001 - never raise into the flow; `failed` routes to fallback
         logger.exception("sessions: run failed for linkedid=%s", body.linkedid)

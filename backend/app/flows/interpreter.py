@@ -721,10 +721,17 @@ class FlowInterpreter:
         # makes the capture visible in the call's event timeline too.
         data = data if isinstance(data, dict) else {}
         captured = data.get("captured") if isinstance(data.get("captured"), dict) else None
+        # `agent_metrics` is how the conversation PERFORMED (latency percentiles, underruns,
+        # caller audio level, eager hit rate). It lands on the call's event timeline so it
+        # outlives the container's logs, and so "did that tuning change help?" is answerable
+        # by comparing calls rather than by remembering how the last one sounded.
+        metrics = data.get("metrics") if isinstance(data.get("metrics"), dict) else None
         self._event_extra = {
             "agent_port": _port_label(port),
             "agent_turns": data.get("turns") or 0,
             "agent_captured": sorted(captured) if captured else None,
+            "agent_metrics": metrics or None,
+            "agent_recording": data.get("recording_name") or None,
         }
         if port == "end_call":
             return "complete"

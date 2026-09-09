@@ -607,6 +607,22 @@ async def run_flow_for_stasis(event: dict, ari: AriControl) -> None:
             except Exception:  # noqa: BLE001 - never dead-air a caller over a failed write
                 logger.exception("flow runtime: storing agent output failed (linkedid=%s)", lid)
 
+            # Register the agent's bridge recording (agent observability). owen-voice records
+            # a bridge IT owns, in ITS OWN Stasis app, so the RecordingFinished event is
+            # delivered there and OWEN's consumer never sees it. The name travels back on the
+            # result instead, and we synthesise the same event shape the consumer would have
+            # received -- so the row, the spool move, transcribe and analyze all reuse the
+            # existing path rather than growing a parallel one.
+            rec_name = str((result.data or {}).get("recording_name") or "")
+            if rec_name:
+                try:
+                    await _register_agent_recording(provider_id, lid, rec_name)
+                except Exception:  # noqa: BLE001 - a lost recording is a lost diagnostic,
+                    # never a lost call. It must not touch the port the caller is routed on.
+                    logger.exception(
+                        "flow runtime: registering agent recording failed (linkedid=%s)", lid
+                    )
+
             # CRM timeline entry (CRM_CONTEXT_SPEC C10). Enqueued, never awaited: the caller
             # is still on the line and a slow CRM must not hold the flow.
             try:
@@ -770,3 +786,29 @@ async def _fallback_forward(ari: AriControl, channel_id: str, lid: str) -> None:
             await ari.hangup(channel_id)
         except Exception:  # noqa: BLE001
             logger.exception("FLOW FALLBACK: final hangup failed (linkedid=%s)", lid)
+
+
+async def _register_agent_recording(provider_id, linkedid: str, name: str) -> None:
+    """Put an owen-voice bridge recording into the ordinary recordings pipeline.
+
+    The event is synthesised rather than awaited because it will never arrive: the bridge
+    belongs to owen-voice's Stasis app. `state: "done"` and the `{linkedid}-agent-N` name are
+    exactly what the ARI adapter expects, so `parse_recording_event` normalises it and the
+    fetch handler does the local spool move for the `asterisk` provider as usual.
+    """
+    from app.providers.asterisk import AsteriskEventRouter
+    from app.services import queue
+    from app.services.recordings import ingest_recording_event
+
+    event = {"type": "RecordingFinished",
+             "recording": {"name": name, "state": "done", "format": "wav"}}
+    rec = AsteriskEventRouter().route_recording(event)
+    if rec is None:
+        logger.warning("flow runtime: agent recording %r did not normalise", name)
+        return
+    async with SessionLocal() as db:
+        row = await ingest_recording_event(db, "asterisk", rec)
+        await db.commit()
+    if row is not None:
+        await queue.enqueue("recording_fetch", {"recording_id": str(row.id)})
+        logger.info("flow runtime: registered agent recording %s (linkedid=%s)", name, linkedid)

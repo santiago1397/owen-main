@@ -422,7 +422,7 @@ class Conversation:
                     if ev.transcript and self._draft is None:
                         self._draft_for = ev.transcript
                         self._commit.clear()
-                        self._draft = self._begin_turn(ev.transcript)
+                        self._draft = self._begin_turn(ev.transcript, drafted=True)
 
                 elif ev.kind == "resumed":
                     # The prediction was wrong -- the caller kept talking. Nothing was spoken,
@@ -452,8 +452,8 @@ class Conversation:
         except Exception:  # noqa: BLE001 - the pump must never take the call down
             logger.exception("session %s: turn pump failed", self.session.session_uuid)
 
-    def _begin_turn(self, text: str) -> asyncio.Task:
-        self._turn = asyncio.create_task(self._handle_turn(b"", text=text))
+    def _begin_turn(self, text: str, drafted: bool = False) -> asyncio.Task:
+        self._turn = asyncio.create_task(self._handle_turn(b"", text=text, drafted=drafted))
         return self._turn
 
     def _cancel_turn(self, why: str) -> None:
@@ -480,7 +480,7 @@ class Conversation:
 
     # --- one turn ---
 
-    async def _handle_turn(self, audio: bytes, text: str = "") -> None:
+    async def _handle_turn(self, audio: bytes, text: str = "", drafted: bool = False) -> None:
         """STT -> LLM -> TTS for one caller utterance. Cancellable at any point: a barge-in
         mid-turn should abandon the answer, not queue it up behind the caller's new question.
 
@@ -601,6 +601,18 @@ class Conversation:
             )
             self.session.last_turn_ms = int((t_done - t0) * 1000)
             self.session.last_first_audio_ms = first_ms
+            # The full breakdown, kept per turn. `stt_ms` is 0 on the streaming path by
+            # construction (the transcript is final when EndOfTurn fires) -- that zero IS the
+            # evidence Flux is doing its job, so it is recorded rather than omitted.
+            self.session.turn_metrics.append({
+                "turn": len(self.session.turn_metrics) + 1,
+                "stt_ms": int((t_stt - t0) * 1000),
+                "first_audio_ms": first_ms,
+                "total_ms": int((t_done - t0) * 1000),
+                "frames": frames,
+                "reply_chars": len(reply),
+                "drafted": bool(drafted),
+            })
 
             if exit_port:
                 # The agent asked to transfer or end. Let it finish the sentence it is

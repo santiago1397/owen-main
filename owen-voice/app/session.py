@@ -39,7 +39,11 @@ class MediaSession:
     #   "tone" — emit a sine and ignore input, so a bridge recording proves the send path
     #            even with no human and nothing else making sound
     mode: str = "echo"
-    # Bridge recording name, for the tone self-test (the send-path evidence).
+    # Bridge recording name. Two uses: the tone self-test's send-path evidence, and (agent
+    # observability) the recording of a real agent conversation. It travels back to OWEN in
+    # the session result, because owen-voice's bridge lives in ITS OWN Stasis app -- the
+    # RecordingFinished event is delivered to this service and never to OWEN's consumer, so
+    # OWEN cannot learn the recording exists any other way.
     recording_name: str | None = None
     # Per-session end-of-turn override. Exists for the self-test: its audio source is a
     # continuous recorded prompt whose gaps never reach the 700ms a human's pause does, so
@@ -123,6 +127,12 @@ class MediaSession:
     # itself or just burning LLM calls.
     eager_hits: int = 0
     eager_retracted: int = 0
+    # PER-TURN METRICS (agent observability). `last_*` above answers "how did the final turn
+    # go", which is the least interesting turn on the call. Keeping every turn is what makes
+    # "is this getting better or worse" answerable across a deploy, and it is what OWEN
+    # persists onto the call so the question survives the container's log rotation.
+    # One small dict per turn -- bounded by turns, not by frames.
+    turn_metrics: list = field(default_factory=list)
     # Speaker-labelled, the shape the backend's `transcriptions.segments` already uses, so
     # persisting it in step 3 is a write rather than a translation.
     transcript: list = field(default_factory=list)
@@ -141,6 +151,43 @@ class MediaSession:
     def duration_s(self) -> float:
         end = self.closed_at if self.closed_at is not None else time.monotonic()
         return round(end - self.created_at, 2)
+
+    def agent_metrics(self) -> dict:
+        """One row per call, summarising how the conversation actually performed.
+
+        Percentiles rather than a mean: latency is what a caller FEELS, and a mean hides the
+        one turn in five that took three seconds -- which is the turn they remember. p95 on a
+        handful of turns is coarse, but it is the shape of the distribution that matters here,
+        not a precise quantile.
+        """
+        firsts = sorted(m.get("first_audio_ms", 0) for m in self.turn_metrics)
+        def pct(p: float) -> int:
+            if not firsts:
+                return 0
+            i = min(len(firsts) - 1, int(round((len(firsts) - 1) * p)))
+            return int(firsts[i])
+        rms_avg = (self.rms_sum / self.rms_n) if self.rms_n else 0.0
+        return {
+            "turns": len(self.turn_metrics),
+            "first_audio_ms_p50": pct(0.5),
+            "first_audio_ms_p95": pct(0.95),
+            "first_audio_ms_max": int(firsts[-1]) if firsts else 0,
+            # Should be 0. Anything else was audible as a gap inside a word, and is the
+            # number that decides whether streaming playout was the right call.
+            "underruns": self.underruns,
+            "stt_degraded": self.stt_degraded,
+            "stt_failed": self.stt_failed,
+            "eager_hits": self.eager_hits,
+            "eager_retracted": self.eager_retracted,
+            # Caller-side audio. peak==0 with rx_frames>0 means we were bridged to silence;
+            # peak at full scale means the caller's leg is clipping before it reaches us.
+            "caller_peak": int(self.peak_amplitude),
+            "caller_rms_avg": round(rms_avg, 1),
+            "half_duplex_dropped": self.half_duplex_dropped,
+            "barge_suppressed": self.barge_suppressed,
+            "noise_utterances": self.noise_utterances,
+            "recording_name": self.recording_name,
+        }
 
     def snapshot(self) -> dict:
         """JSON-able state for the control API — the evidence that the transport worked."""
@@ -178,6 +225,8 @@ class MediaSession:
             "stt_failed": self.stt_failed,
             "eager_hits": self.eager_hits,
             "eager_retracted": self.eager_retracted,
+            "turn_metrics": self.turn_metrics,
+            "agent_metrics": self.agent_metrics(),
             "last_turn_ms": self.last_turn_ms,
             "last_first_audio_ms": self.last_first_audio_ms,
             "transcript": self.transcript,

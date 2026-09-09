@@ -100,7 +100,29 @@ async def _on_media_leg_start(channel_id: str, session: MediaSession) -> None:
                 session.session_uuid, "+".join(members), bridge_id, session.mode)
 
     if session.call_channel_id:
-        return  # a real call: the human supplies the audio
+        # A REAL call. Record the mixed bridge, so an agent conversation leaves audio behind
+        # rather than only a transcript. Without this "does it sound right?" has no answer but
+        # someone's memory of the call, and no tuning change can be judged against the last one.
+        #
+        # The name follows the Asterisk convention OWEN's recordings pipeline already reads
+        # ({linkedid}-{tag}-{n}), so once OWEN registers it the existing fetch -> transcribe ->
+        # analyze chain applies unchanged. OWEN has to be TOLD, though: this bridge belongs to
+        # owen-voice's own Stasis app, so RecordingFinished is delivered here and never to
+        # OWEN's consumer. The name travels back in the session result.
+        if settings.AGENT_RECORD:
+            name = f"{session.linkedid or session.session_uuid}-agent-1"
+            cap = int(session.agent.get("max_call_seconds")
+                      or settings.AGENT_MAX_CALL_SECONDS or 300)
+            if await ari.record_bridge(bridge_id, name, max_seconds=cap):
+                session.recording_name = name
+                logger.info("session %s: recording bridge as %s (cap %ds)",
+                            session.session_uuid, name, cap)
+            else:
+                # Best effort by design: losing the recording is a lost diagnostic, not a
+                # lost call, and must never take the conversation down with it.
+                logger.warning("session %s: bridge recording failed to start",
+                               session.session_uuid)
+        return  # the human supplies the audio
 
     # Self-test. `echo` needs Asterisk to make a sound we can receive; `tone` must stay
     # SILENT so that anything in the recording provably came from us.

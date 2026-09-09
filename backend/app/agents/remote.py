@@ -155,9 +155,20 @@ class RemoteVoiceAgentSession:
         if data.get("usage"):
             result = dict(result)
             result["usage"] = data["usage"]
+        # Agent observability. Carried on the same result the transcript rides, so the
+        # interpreter can stamp it onto the call's event timeline without a second round trip
+        # and without owen-voice needing database access it deliberately does not have (D2).
+        for key in ("metrics", "turn_metrics", "recording_name"):
+            if data.get(key):
+                result = dict(result)
+                result[key] = data[key]
+        m = data.get("metrics") if isinstance(data.get("metrics"), dict) else {}
         logger.info(
-            "owen_voice: linkedid=%s finished on port '%s' after %s turn(s)",
+            "owen_voice: linkedid=%s finished on port '%s' after %s turn(s) "
+            "first_audio p50=%sms p95=%sms underruns=%s rec=%s",
             ctx.linkedid, port, data.get("turns") or 0,
+            m.get("first_audio_ms_p50"), m.get("first_audio_ms_p95"),
+            m.get("underruns"), data.get("recording_name") or "-",
         )
         return AgentResult(port=port, data=result)
 

@@ -150,6 +150,14 @@ class Settings:
     # through. It also interacts with latency -- slower speech means the FIRST sentence takes
     # longer to finish, and time-to-first-audio is measured to its end. Judge it down a phone.
     DG_TTS_SPEED: float = float(_s("VOICE_DG_TTS_SPEED", "1.0") or 1.0)
+
+    # --- agent observability -----------------------------------------------------------------
+    # Record the mixed bridge on a real agent call. On by default: a conversation that leaves
+    # only a transcript cannot be judged for SOUND, and every tuning change so far has been
+    # argued from synthesis samples rather than from what the caller actually heard. Recordings
+    # land in the existing pipeline (fetch -> transcribe -> analyze) and obey the same
+    # RECORDING_RETENTION_DAYS sweep as every other recording. Set false to disable.
+    AGENT_RECORD: bool = _s("VOICE_AGENT_RECORD", "true").lower() not in ("0", "false", "no")
     DG_TTS_URL: str = _s("VOICE_DG_TTS_URL", "wss://api.deepgram.com/v1/speak")
     # REST fallback for the non-streaming synthesize() path (greetings, short fixed prompts).
     DG_TTS_REST_URL: str = _s("VOICE_DG_TTS_REST_URL", "https://api.deepgram.com/v1/speak")
