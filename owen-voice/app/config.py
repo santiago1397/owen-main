@@ -125,12 +125,18 @@ class Settings:
     # dsp.Downsampler24to8 from the hot path, and with it a whole class of resampler bug the
     # project has already paid for once (the 3-tap box filter heard as metallic).
     DG_TTS_MODEL: str = _s("VOICE_DG_TTS_MODEL", "aura-2-thalia-en")
-    # OUTPUT LEVEL. Measured on the first live call: the caller's inbound audio peaked at
-    # 32124 (full scale) while Aura-2 came back peaking ~10-12k, RMS about -29 dBFS against a
-    # telephony norm near -20 dBov. The agent was ~9 dB quiet, so the caller heard themselves
-    # loud and the agent thin and distant -- most of what "sounds like a walkie-talkie" is.
-    # 2.2 lifts it without pushing the loudest syllables into the limiter. Set 1.0 to disable.
-    DG_TTS_GAIN: float = float(_s("VOICE_DG_TTS_GAIN", "2.2") or 1.0)
+    # OUTPUT LEVEL. The caller's inbound audio peaked at 32124 (full scale) on the first live
+    # call while Aura-2 comes back quieter, so the caller hears themselves loud and the agent
+    # further away. Loudness reads as presence, so closing that gap helps -- but only to a
+    # point: too hot is its own distortion, and worse down a narrowband line than too quiet.
+    #
+    # Measured across five utterances rather than guessed from one (the first sample was an
+    # outlier that made this look like a 9 dB problem; it is closer to 3 dB):
+    #     raw rms   -22.6 .. -25.4 dBFS      raw peak  10445 .. 19939  (5.6 dB spread)
+    #     gain 1.5  worst peak 29908, no clipping, rms -19.1 .. -21.9  <- the telephony norm
+    #     gain 1.7  worst peak 33896 -> CLIPS
+    # So 1.5 is the ceiling before the loudest utterances hit the limiter. Set 1.0 to disable.
+    DG_TTS_GAIN: float = float(_s("VOICE_DG_TTS_GAIN", "1.5") or 1.0)
     # 8000 asks Deepgram to do the downsample; 24000 asks for full band and resamples here
     # with dsp.Downsampler24to8 (63-tap FIR). Measured on the same sentence, Deepgram's own
     # 8k left 3.5% of energy above 3.4kHz versus 0.7% through our filter -- suggestive of a
