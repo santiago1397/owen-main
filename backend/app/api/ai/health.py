@@ -16,7 +16,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.ai.deps import AuthedKey, require_scope
@@ -97,7 +97,16 @@ async def pipeline_health(
     # no amount of engineering will revive it: Twilio deletes recordings on its own retention
     # schedule, and `recordings.status` is already set to 'absent' for these. Counting them as
     # dead jobs put ~388 permanent, unfixable entries in front of the ~30 that are real.
-    GONE_UPSTREAM = Job.last_error.ilike("%404%")
+    #
+    # The same argument covers a payload that was never fetchable: SignalWire's Call Flow
+    # Builder once posted the literal string "%{call.recording.url}" instead of substituting
+    # it, so three job rows for one August recording retry a URL that is not a URL. Counting
+    # those as live faults left `status` permanently `degraded` over work no engineer can do
+    # — which is how a verdict stops being read at all.
+    GONE_UPSTREAM = or_(
+        Job.last_error.ilike("%404%"),
+        Job.last_error.ilike("%missing an 'http://' or 'https://' protocol%"),
+    )
     dead_jobs = (await db.execute(
         select(func.count()).select_from(Job)
         .where(Job.status == "failed", Job.attempts >= MAX_ATTEMPTS, ~GONE_UPSTREAM)
@@ -279,8 +288,9 @@ async def pipeline_health(
                 "done": job_counts.get("done", 0),
                 "failed": job_counts.get("failed", 0),
                 "dead": dead_jobs,
-                # Counted apart from `dead` on purpose: the provider deleted the media, so
-                # these can never succeed and are not an OWEN fault.
+                # Counted apart from `dead` on purpose: these can never succeed — the
+                # provider deleted the media, or the URL it gave us was never a URL — so
+                # they are permanent history, not work waiting for someone.
                 "dead_media_gone_upstream": dead_gone_upstream,
                 "oldest_pending_run_after": oldest_pending.isoformat() if oldest_pending else None,
             },
