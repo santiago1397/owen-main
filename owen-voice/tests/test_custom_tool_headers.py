@@ -10,8 +10,18 @@ Run:  python -m tests.test_custom_tool_headers      (from owen-voice/)
 
 import os
 import sys
+import types
 
 sys.path.insert(0, ".")
+
+# app.providers (used by the voice-resolution test at the bottom) imports httpx at module
+# load. We exercise no I/O here, so stub it rather than requiring the dependency.
+for _m in ("httpx", "websockets"):
+    if _m not in sys.modules:
+        _mod = types.ModuleType(_m)
+        _mod.Timeout = lambda *a, **k: None
+        _mod.AsyncClient = object
+        sys.modules[_m] = _mod
 
 from app.custom_tools import normalise, resolve_headers  # noqa: E402
 
@@ -75,6 +85,35 @@ def test_multiple_and_repeated_references():
     os.environ["TEST_B"] = "bb"
     out = resolve_headers({"X": "${TEST_A}-${TEST_B}-${TEST_A}"})
     check(out["X"] == "aa-bb-aa", "every occurrence is replaced, not just the first")
+
+
+# --- voice/model resolution (VOICE_STACK_MIGRATION M5) --------------------------------------
+# Kept here rather than in a new file because it is the same class of bug: a promise made in
+# one place that the runtime did not keep.
+
+def test_a_foreign_voice_falls_back_instead_of_going_on_the_wire():
+    print("\ntest_a_foreign_voice_falls_back_instead_of_going_on_the_wire")
+    import os as _os
+    import importlib
+    _os.environ["VOICE_TTS_PROVIDER"] = "deepgram"
+    _os.environ["DEEPGRAM_API_KEY"] = "x"
+    import app.config, app.providers
+    importlib.reload(app.config); importlib.reload(app.providers)
+    tts = app.providers.get_tts()
+
+    # THE REGRESSION, observed in production on the first configured agent: an agent carrying
+    # the OpenAI voice `alloy` was switched to Deepgram. We sent model=alloy, Deepgram answered
+    # 400 INVALID_QUERY_PARAMETER, synthesis returned b"" on every turn, and the agent was
+    # SILENT for the whole call with nothing in the flow marking it broken. Activation warned
+    # "the provider default will be used" — and the runtime did not do that.
+    check(tts.resolved_model("alloy", "") == app.config.settings.DG_TTS_MODEL,
+          "an OpenAI voice under Deepgram falls back to the default")
+    check(tts.resolved_model("aura-2-apollo-en", "") == "aura-2-apollo-en",
+          "a real Aura-2 voice is passed through untouched")
+    check(tts.resolved_model("", "") == app.config.settings.DG_TTS_MODEL,
+          "no voice at all uses the configured default")
+    check(not tts.resolved_model("alloy", "").startswith("alloy"),
+          "the invalid value never reaches the query string")
 
 
 if __name__ == "__main__":

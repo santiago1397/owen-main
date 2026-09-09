@@ -318,8 +318,21 @@ class DeepgramTTS:
 
     def resolved_model(self, voice: str = "", model: str = "") -> str:
         """Deepgram has ONE axis: the voice IS the model (aura-2-thalia-en). An agent's stored
-        `voice` therefore wins over `model`, which is the opposite of the OpenAI class."""
-        return voice or model or settings.DG_TTS_MODEL
+        `voice` therefore wins over `model`, which is the opposite of the OpenAI class.
+
+        A voice belonging to ANOTHER provider falls back to the default instead of being sent.
+        This is not defensive padding -- it happened on the first real agent: an agent carrying
+        the OpenAI voice `alloy` was switched to Deepgram, we sent `model=alloy`, Deepgram
+        answered 400 INVALID_QUERY_PARAMETER, synthesis returned b"" every turn, and the agent
+        was SILENT on every reply with nothing in the call flow marking it as broken. Activation
+        already warns that the default will be used; this is the half that makes that true.
+        """
+        chosen = (voice or model or "").strip()
+        if chosen and not chosen.startswith("aura-"):
+            logger.warning("dg tts: %r is not a Deepgram voice; using %s",
+                           chosen, settings.DG_TTS_MODEL)
+            return settings.DG_TTS_MODEL
+        return chosen or settings.DG_TTS_MODEL
 
     def _params(self, model: str = "") -> dict:
         return {
@@ -342,7 +355,7 @@ class DeepgramTTS:
             return b""
         # `voice` IS the model for Deepgram (aura-2-thalia-en), unlike OpenAI where voice and
         # model are separate axes. An agent's stored voice wins; M5 resolves unknowns upstream.
-        params = self._params(voice or model)
+        params = self._params(self.resolved_model(voice, model))
         try:
             async with httpx.AsyncClient(timeout=_TTS_TIMEOUT) as c:
                 r = await c.post(settings.DG_TTS_REST_URL, params=params,
@@ -362,7 +375,7 @@ class DeepgramTTS:
         text = (text or "").strip()
         if not text or not settings.DEEPGRAM_API_KEY:
             return
-        params = self._params(voice or model)
+        params = self._params(self.resolved_model(voice, model))
         payload = {"text": text[: settings.TTS_MAX_CHARS]}
         try:
             async with httpx.AsyncClient(timeout=_TTS_TIMEOUT) as c:
