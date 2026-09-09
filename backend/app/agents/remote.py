@@ -79,6 +79,11 @@ class RemoteVoiceAgentSession:
                 "voice": spec.voice,
                 "model": spec.model,
                 "llm_base_url": str(spec.config.get("llm_base_url") or ""),
+                # Per-agent provider pins (VOICE_STACK_MIGRATION M4). Normally EMPTY, so the
+                # env default decides; owen-voice layers any lock above these. Sent from the
+                # PINNED version so "which vendor ran that call" stays answerable afterwards.
+                "stt_provider": str(spec.config.get("stt_provider") or ""),
+                "tts_provider": str(spec.config.get("tts_provider") or ""),
                 "knowledge": spec.knowledge,
                 "tools": spec.tools or {},
                 "max_call_seconds": guard.get("max_call_seconds"),

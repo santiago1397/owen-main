@@ -30,14 +30,45 @@ const ENGINES: { value: string; label: string }[] = [
 ];
 const TOOLS = ["transfer", "end_call", "capture_lead", "send_sms"];
 
-// OpenAI TTS voices. Free-text was a trap: a typo produced a silent agent with no error.
-const VOICES = ["alloy", "ash", "ballad", "coral", "echo", "fable", "nova", "onyx", "sage", "shimmer", "verse"];
+// Voices are PER PROVIDER (VOICE_STACK_MIGRATION M5) — the two vendors share no names at all,
+// so the list has to follow the selected provider or every stored voice silently becomes wrong.
+// Free-text was a trap either way: a typo produced a silent agent with no error.
+const VOICES_BY_PROVIDER: Record<string, string[]> = {
+  openai: ["alloy", "ash", "ballad", "coral", "echo", "fable", "nova", "onyx", "sage", "shimmer", "verse"],
+  // Deepgram ships ~49 English Aura-2 voices; these are the ones worth offering by default.
+  // The full list is at developers.deepgram.com — any aura-2-*-en id is valid.
+  deepgram: [
+    "aura-2-thalia-en", "aura-2-apollo-en", "aura-2-asteria-en", "aura-2-luna-en",
+    "aura-2-orion-en", "aura-2-arcas-en", "aura-2-athena-en", "aura-2-hermes-en",
+    "aura-2-helena-en", "aura-2-zeus-en",
+  ],
+};
+const TTS_PROVIDERS = [
+  { value: "", label: "(server default)" },
+  { value: "deepgram", label: "deepgram — Aura-2, native 8 kHz" },
+  { value: "openai", label: "openai — gpt-4o-mini-tts" },
+];
+const STT_PROVIDERS = [
+  { value: "", label: "(server default)" },
+  { value: "deepgram", label: "deepgram — Flux, detects end-of-turn itself" },
+  { value: "openai", label: "openai — batch, local turn detection" },
+];
+
+// M11. `knowledge` is re-sent to the model on EVERY turn, so its length is a recurring cost
+// rather than a one-off. Activation refuses anything past this, and the counter below is what
+// stops that being a surprise at save time.
+const KNOWLEDGE_MAX = 6000;
 
 const TRANSFER_KINDS = ["number", "operator", "flow", "agent"];
 
 const EMPTY_CONFIG = {
   persona: "",
-  voice: "alloy",
+  voice: "",
+  // Blank = follow the server default (M4). A per-agent pin is the exception, not the norm:
+  // pinning here means a vendor incident cannot be ended from .env.prod without re-versioning
+  // this agent, since versions are immutable.
+  stt_provider: "",
+  tts_provider: "",
   greeting: "",
   model: "gpt-4o-mini",
   engine: "owen_voice",
@@ -224,6 +255,15 @@ function AgentEditor({ agentId, onClose }: { agentId: string; onClose: () => voi
         <label>In-context knowledge
           <textarea rows={3} value={config.knowledge} onChange={(e) => set("knowledge", e.target.value)}
             placeholder="Facts the agent can reference" style={{ width: "100%" }} />
+          <span className="muted" style={{
+            fontSize: 12,
+            color: (config.knowledge || "").length > KNOWLEDGE_MAX ? "var(--danger, #c0392b)" : undefined,
+          }}>
+            {(config.knowledge || "").length} / {KNOWLEDGE_MAX} characters
+            {(config.knowledge || "").length > KNOWLEDGE_MAX
+              ? " — too long to activate. This is sent on every turn, so it is paid for on every turn: move per-customer detail into a tool."
+              : " — sent to the model on every turn"}
+          </span>
         </label>
         <label>Greeting
           <input value={config.greeting} onChange={(e) => set("greeting", e.target.value)}
@@ -231,7 +271,30 @@ function AgentEditor({ agentId, onClose }: { agentId: string; onClose: () => voi
         </label>
         <label>Voice
           <select value={config.voice} onChange={(e) => set("voice", e.target.value)} style={{ width: "100%" }}>
-            {VOICES.map((v) => <option key={v} value={v}>{v}</option>)}
+            {/* A voice stored under the OTHER provider is kept as an option rather than
+                silently reset to the top of the list — losing someone's choice on a provider
+                switch is worse than showing it as invalid. Activation warns; it never fails. */}
+            <option value="">(server default)</option>
+            {(() => {
+              const provider = config.tts_provider || "openai";
+              const list = VOICES_BY_PROVIDER[provider] || [];
+              const cur = config.voice || "";
+              return (cur && !list.includes(cur) ? [cur, ...list] : list).map((v) => (
+                <option key={v} value={v}>
+                  {v === cur && !list.includes(v) ? `${v} (not a ${provider} voice)` : v}
+                </option>
+              ));
+            })()}
+          </select>
+        </label>
+        <label>Speech-to-text
+          <select value={config.stt_provider || ""} onChange={(e) => set("stt_provider", e.target.value)} style={{ width: "100%" }}>
+            {STT_PROVIDERS.map((p) => <option key={p.value} value={p.value}>{p.label}</option>)}
+          </select>
+        </label>
+        <label>Text-to-speech
+          <select value={config.tts_provider || ""} onChange={(e) => set("tts_provider", e.target.value)} style={{ width: "100%" }}>
+            {TTS_PROVIDERS.map((p) => <option key={p.value} value={p.value}>{p.label}</option>)}
           </select>
         </label>
         <label>Model

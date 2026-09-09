@@ -110,6 +110,19 @@ class MediaSession:
     result_port: str | None = None
     result_data: dict = field(default_factory=dict)
     noise_utterances: int = 0
+    # --- streaming STT (VOICE_STACK_MIGRATION M1/M2) ---
+    # The configured streaming STT would not connect, so this call ran on the local turn
+    # detector instead. Counted because the failure mode to fear is silent: every call still
+    # works, 600ms slower, and nobody notices Flux has been down for a week.
+    stt_degraded: bool = False
+    # The stream died MID-call. Unlike the above this is not survivable -- the session ends
+    # on the `failed` port and the flow routes to voicemail (M6).
+    stt_failed: bool = False
+    # Eager end-of-turn accounting: how often a draft was committed as-is, versus retracted
+    # when the caller carried on. The ratio is what says whether eager mode is paying for
+    # itself or just burning LLM calls.
+    eager_hits: int = 0
+    eager_retracted: int = 0
     # Speaker-labelled, the shape the backend's `transcriptions.segments` already uses, so
     # persisting it in step 3 is a write rather than a translation.
     transcript: list = field(default_factory=list)
@@ -161,6 +174,10 @@ class MediaSession:
             "half_duplex_dropped": self.half_duplex_dropped,
             "underruns": self.underruns,
             "noise_utterances": self.noise_utterances,
+            "stt_degraded": self.stt_degraded,
+            "stt_failed": self.stt_failed,
+            "eager_hits": self.eager_hits,
+            "eager_retracted": self.eager_retracted,
             "last_turn_ms": self.last_turn_ms,
             "last_first_audio_ms": self.last_first_audio_ms,
             "transcript": self.transcript,

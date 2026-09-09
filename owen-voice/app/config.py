@@ -88,8 +88,52 @@ class Settings:
     # judge it down a real phone, never on laptop speakers.
     TTS_INSTRUCTIONS: str = _s("VOICE_TTS_INSTRUCTIONS", "")
 
+    # --- Deepgram (VOICE_STACK_MIGRATION M1-M3) ----------------------------------------------
+    # One credential for both legs. Flux (STT) and Aura-2 (TTS) are separate services on the
+    # same account, so a single key configures the whole stack.
+    DEEPGRAM_API_KEY: str = _s("DEEPGRAM_API_KEY")
+
+    # --- provider layering (M4) --------------------------------------------------------------
+    # Precedence is LOCK > agent version > env default, mirroring VOICE_AGENT_ENGINE exactly.
+    # A lock exists so a vendor incident can be ended from .env.prod in one restart, without
+    # editing -- and therefore re-versioning -- every agent that pinned a provider. Empty means
+    # "not locked"; agents decide, and the env values above are the fallback.
+    STT_PROVIDER_LOCK: str = _s("VOICE_STT_PROVIDER_LOCK")
+    TTS_PROVIDER_LOCK: str = _s("VOICE_TTS_PROVIDER_LOCK")
+
+    # STT. `flux-general-en` speaks linear16@8000 natively -- the AudioSocket format exactly,
+    # so caller bytes reach Deepgram with NO resampling in the hot path.
+    DG_STT_MODEL: str = _s("VOICE_DG_STT_MODEL", "flux-general-en")
+    DG_STT_URL: str = _s("VOICE_DG_STT_URL", "wss://api.deepgram.com/v2/listen")
+    # Confidence required to call a turn ENDED (0.5-1.0, Deepgram default 0.7). Lower = faster
+    # and more false turn-ends; higher = slower and safer. The knob to reach for when the p90
+    # tail (Deepgram publishes ~1s) hurts more than the median helps.
+    DG_EOT_THRESHOLD: float = float(_s("VOICE_DG_EOT_THRESHOLD", "0.7") or 0.7)
+    # EAGER end-of-turn (M2): Flux predicts the turn end early so the LLM can DRAFT while the
+    # caller finishes. 0 disables. Deepgram's own range is 0.3-0.9. This is a pure latency
+    # buy -- it costs 50-70% more LLM calls, which at ~$0.0013/conversation-hour is noise.
+    # NEVER start TTS on an eager event: a TurnResumed after audio began is the agent talking
+    # over a caller who never stopped.
+    DG_EAGER_EOT_THRESHOLD: float = float(_s("VOICE_DG_EAGER_EOT_THRESHOLD", "0.5") or 0.0)
+    # Hard ceiling before Flux calls a turn on silence alone (500-60000, default 5000).
+    DG_EOT_TIMEOUT_MS: int = _i("VOICE_DG_EOT_TIMEOUT_MS", 4000)
+    # Deepgram strongly recommends ~80ms chunks; our AudioSocket frames are 20ms, so we batch
+    # 4 of them. Sending 20ms frames works but costs needless syscalls and WS framing.
+    DG_SEND_CHUNK_FRAMES: int = _i("VOICE_DG_SEND_CHUNK_FRAMES", 4)
+
+    # TTS. linear16@8000 comes back ready for AudioSocket -- this is what deletes
+    # dsp.Downsampler24to8 from the hot path, and with it a whole class of resampler bug the
+    # project has already paid for once (the 3-tap box filter heard as metallic).
+    DG_TTS_MODEL: str = _s("VOICE_DG_TTS_MODEL", "aura-2-thalia-en")
+    DG_TTS_URL: str = _s("VOICE_DG_TTS_URL", "wss://api.deepgram.com/v1/speak")
+    # REST fallback for the non-streaming synthesize() path (greetings, short fixed prompts).
+    DG_TTS_REST_URL: str = _s("VOICE_DG_TTS_REST_URL", "https://api.deepgram.com/v1/speak")
+
     # --- Turn detection ---------------------------------------------------------------------
-    # Ours to do because we are not on Deepgram Flux, which has end-of-turn built in.
+    # Used ONLY on the batch-STT path. Deepgram Flux does end-of-turn itself, and when
+    # STT_PROVIDER=deepgram every knob below is inert (VOICE_STACK_MIGRATION M1). They stay
+    # because the local detector is the fallback until Flux's p90 tail has been heard on real
+    # calls -- deleting dsp.TurnDetector is a separate commit with evidence attached (M7).
     VAD_SPEECH_RMS: float = float(_s("VOICE_VAD_SPEECH_RMS", "700") or 700)
     # x20ms. 600ms rather than 700: this silence is pure perceived latency on EVERY turn and
     # is not counted in turn timings (the clock starts when the turn ends). Short enough to

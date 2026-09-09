@@ -35,10 +35,13 @@ def check(cond, label):
     print(f"  ok  {label}")
 
 
+# The shipping stack (VOICE_STACK_MIGRATION M1/M3). Deliberately NOT gpt-4o-mini-tts: that
+# model bills in audio tokens and now has no per-character rate, so it belongs in the
+# unrated test below rather than in the one asserting a complete, fully-priced session.
 FULL = {
-    "stt_model": "gpt-4o-mini-transcribe", "stt_audio_seconds": 45,
+    "stt_model": "flux-general-en", "stt_audio_seconds": 45,
     "llm_model": "gpt-4o-mini", "llm_tokens_in": 2400, "llm_tokens_out": 320,
-    "tts_model": "gpt-4o-mini-tts", "tts_characters": 900,
+    "tts_model": "aura-2-thalia-en", "tts_characters": 900,
 }
 
 
@@ -52,9 +55,31 @@ def test_a_complete_session_prices_every_stage():
     check(not any_unrated, "the total is complete")
 
 
+def test_token_billed_tts_is_unrated_not_guessed():
+    """`gpt-4o-mini-tts` bills in AUDIO TOKENS and OpenAI publishes no character conversion.
+
+    It used to carry 0.015 -- the `tts-1` per-CHARACTER rate applied to a model not billed per
+    character. That is confidently wrong rather than unknown, and every TTS figure the Billing
+    tab showed was fiction. Absence of the key is the fix, and this test is what stops someone
+    helpfully adding it back.
+    """
+    c = tts_charge("gpt-4o-mini-tts", 900)
+    check(c.unrated, "a token-billed model is unrated even with usage present")
+    check(c.amount == Decimal("0"), "no amount is invented")
+    check("rate" in (c.unrated_reason or ""), f"the reason names the cause ({c.unrated_reason})")
+
+
+def test_voice_variants_resolve_to_the_family_rate():
+    """Aura-2 ships ~49 English voices as separate model ids that all bill identically."""
+    named = tts_charge("aura-2-apollo-en", 1000)
+    check(not named.unrated, "a voice variant is rated, not unrated")
+    check(named.amount == tts_charge("aura-2-thalia-en", 1000).amount,
+          "every Aura-2 voice costs the same")
+
+
 def test_missing_usage_is_unrated_not_zero():
     """The rule the carrier kernel already holds itself to."""
-    c = tts_charge("gpt-4o-mini-tts", None)
+    c = tts_charge("tts-1", None)
     check(c.unrated, "absent usage marks the line unrated")
     check(c.amount == Decimal("0"), "an unrated line carries no amount")
     check("usage" in (c.unrated_reason or ""), f"the reason says why ({c.unrated_reason})")

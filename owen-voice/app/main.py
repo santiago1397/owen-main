@@ -295,6 +295,14 @@ class LoopbackIn(BaseModel):
     seconds: float = 4.0     # how long to run before reporting
     # End-of-turn override in 20ms frames; see MediaSession.vad_end_frames.
     vad_end_frames: int | None = None
+    # --- vendor bake-off (VOICE_STACK_MIGRATION M10) ---
+    # Override the STT/TTS vendor for THIS run only, so two stacks can be compared against the
+    # same audio in the same minute. Every latency figure behind the Deepgram migration is a
+    # vendor CLAIM; this is how they become numbers measured on this box. Empty = env default.
+    stt_provider: str | None = None
+    tts_provider: str | None = None
+    tts_voice: str | None = None
+    tts_model: str | None = None
 
 
 @app.post("/spike/loopback")
@@ -320,6 +328,19 @@ async def spike_loopback(body: LoopbackIn) -> dict:
     session.mode = body.mode
     session.recording_name = f"owen-voice-loopback-{session.session_uuid[:8]}"
     session.vad_end_frames = body.vad_end_frames
+    # Per-run vendor pins (M10). Conversation reads these from session.agent exactly as it
+    # would from a real pinned agent version, so the bake-off exercises the SAME code path a
+    # live call takes -- not a parallel one that could pass while production fails.
+    if body.stt_provider or body.tts_provider:
+        session.agent = dict(session.agent or {})
+        if body.stt_provider:
+            session.agent["stt_provider"] = body.stt_provider
+        if body.tts_provider:
+            session.agent["tts_provider"] = body.tts_provider
+    if body.tts_voice:
+        session.tts_voice = body.tts_voice
+    if body.tts_model:
+        session.tts_model = body.tts_model
 
     bridge_id = await ari.create_bridge()
     if not bridge_id:

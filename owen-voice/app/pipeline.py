@@ -28,7 +28,8 @@ from app.audiosocket import AUDIO_FRAME_BYTES, encode_audio
 from app.config import settings
 from app.dsp import (TurnDetector, chunk_frames, looks_like_english, rms_of,
                      split_speakable)
-from app.providers import get_llm, get_stt, get_tts
+from app.providers import (get_llm, get_stt, get_streaming_stt, get_tts,
+                           streaming_stt_available)
 from app.context import render_blob
 from app.custom_tools import find as find_custom
 from app.custom_tools import normalise as normalise_custom
@@ -148,12 +149,32 @@ class Conversation:
             speech_rms=settings.VAD_SPEECH_RMS,
             end_frames=session.vad_end_frames or settings.VAD_END_FRAMES,
         )
-        self.stt = get_stt()
+        # Per-agent provider pins (M4), layered under any env LOCK by resolve_provider. Read
+        # from the PINNED version, so which vendor ran a given call stays answerable later.
+        _agent_cfg = session.agent or {}
+        _stt_pin = str(_agent_cfg.get("stt_provider") or "")
+        _tts_pin = str(_agent_cfg.get("tts_provider") or "")
+        self.stt = get_stt(_stt_pin)
+        # Streaming STT drives its OWN turn detection (M1), so when one is configured the
+        # local `self.vad` above is never consulted. It is still constructed because it is
+        # the fallback if the socket refuses to open -- see start().
+        self.stream_stt = get_streaming_stt(_stt_pin) if streaming_stt_available(_stt_pin) else None
+        self._stt_pump: Optional[asyncio.Task] = None
+        # EAGER MODE (M2): the reply drafted while the caller may still be talking, and the
+        # transcript it was drafted from. Deepgram guarantees the EndOfTurn transcript matches
+        # the EagerEndOfTurn one exactly, so the draft is reusable without comparison.
+        self._draft: Optional[asyncio.Task] = None
+        self._draft_for: str = ""
+        # The playback gate. A turn may GENERATE freely; it may not put a frame on the wire
+        # until this is set. Set by default so the local-VAD path (where a turn only ever
+        # starts after the turn has definitively ended) is completely unaffected.
+        self._commit = asyncio.Event()
+        self._commit.set()
         self.llm = get_llm(
             base_url=str((session.agent or {}).get("llm_base_url") or ""),
             model=str((session.agent or {}).get("model") or ""),
         )
-        self.tts = get_tts()
+        self.tts = get_tts(_tts_pin)
         # The PINNED agent-version config sent by OWEN (step 3). Empty for a standalone
         # spike, in which case the env defaults stand in. Reading it per session is what
         # makes an "army" possible: persona, voice and model differ per agent, and the
@@ -195,6 +216,19 @@ class Conversation:
 
     async def start(self, *, greet: bool = True) -> None:
         self.playout.start()
+        if self.stream_stt is not None:
+            # DEGRADE, do not fail: a socket that will not open before the call has begun is
+            # not the mid-call vendor switch M6 forbids -- nothing has been spoken yet, so
+            # falling back to the local VAD changes no voice and strands no caller. It is
+            # logged at WARNING because the trap is a deployment where Flux never connects
+            # and every call still "works", 600ms slower, with nobody the wiser.
+            if not await self.stream_stt.start():
+                logger.warning("session %s: streaming STT unavailable, falling back to the "
+                               "local turn detector", self.session.session_uuid)
+                self.stream_stt = None
+                self.session.stt_degraded = True
+            else:
+                self._stt_pump = asyncio.create_task(self._pump_turn_events())
         await self._resolve_context()
         greeting = (
             str(self.agent.get("greeting") or settings.AGENT_GREETING).strip() if greet else ""
@@ -246,6 +280,14 @@ class Conversation:
                         self.session.session_uuid, ", ".join(fields))
 
     async def close(self) -> None:
+        if self._stt_pump is not None:
+            self._stt_pump.cancel()
+        if self.stream_stt is not None:
+            # Best effort: the RTP is already gone by the time we get here, so a socket that
+            # refuses to close politely is not worth delaying teardown for.
+            await self.stream_stt.close()
+        # Nothing may stay parked on the gate while we are tearing down.
+        self._commit.set()
         if self._turn is not None:
             self._turn.cancel()
         self.playout.stop()
@@ -277,6 +319,15 @@ class Conversation:
             self._speaking_since = time.monotonic()
         elif not speaking:
             self._speaking_since = None
+
+        # STREAMING STT (M1): the vendor owns turn detection, so the local detector below is
+        # never consulted and turns arrive asynchronously via _pump_turn_events. Note this sits
+        # AFTER the half-duplex drop above on purpose: while the agent is speaking those frames
+        # are our own echo, and feeding them to Flux would let the agent end its own turn.
+        if self.stream_stt is not None:
+            await self.stream_stt.feed(pcm)
+            return self._guardrail()
+
         self.vad.speech_rms = settings.VAD_SPEECH_RMS * (
             settings.VAD_BARGE_SCALE if speaking else 1.0
         )
@@ -324,7 +375,100 @@ class Conversation:
 
         return self._guardrail()
 
+    # --- vendor-driven turns (M1/M2) ---
+
+    async def _pump_turn_events(self) -> None:
+        """Turn the streaming STT's events into turns.
+
+        This replaces `on_frame`'s local-VAD branch entirely. The shape is the state machine
+        Deepgram documents for eager end-of-turn, and the one rule that matters is that a
+        DRAFT may be generated but never SPOKEN: a `resumed` arriving after audio started is
+        the agent talking over a caller who never actually stopped.
+        """
+        stt = self.stream_stt
+        if stt is None:
+            return
+        try:
+            while True:
+                ev = await stt.events.get()
+
+                if ev.kind == "error":
+                    # The socket is gone, and with it any ability to hear the caller. Do not
+                    # limp on: pin the port to `failed` so the flow routes to default_fallback
+                    # (voicemail), which is a DESIGNED outcome (M6) rather than an improvised
+                    # one. Pinning it here wins over server.py's `or "end_call"` at close --
+                    # this is not a graceful ending and must not be reported as one.
+                    logger.warning("session %s: streaming STT failed mid-call",
+                                   self.session.session_uuid)
+                    self.session.stt_failed = True
+                    self.session.error = "stt stream failed"
+                    self.session.result_port = "failed"
+                    self._commit.set()      # never leave a turn parked on the gate
+                    return
+
+                if ev.kind == "start":
+                    self.session.vad_starts += 1
+                    self._last_voice = time.monotonic()
+                    # BARGE-IN, on semantics rather than energy. Under half duplex we never
+                    # fed our own audio, so this can only be the caller.
+                    dropped = self.playout.clear()
+                    if dropped:
+                        logger.info("session %s: barge-in, dropped %d queued frames",
+                                    self.session.session_uuid, dropped)
+                    self._cancel_turn("caller interrupted")
+
+                elif ev.kind == "eager_end":
+                    # DRAFT. Start the whole turn, but hold its audio at the gate below.
+                    if ev.transcript and self._draft is None:
+                        self._draft_for = ev.transcript
+                        self._commit.clear()
+                        self._draft = self._begin_turn(ev.transcript)
+
+                elif ev.kind == "resumed":
+                    # The prediction was wrong -- the caller kept talking. Nothing was spoken,
+                    # so this costs one abandoned LLM call and no awkwardness.
+                    self.session.eager_retracted += 1
+                    self._cancel_turn("turn resumed")
+                    self._commit.set()
+
+                elif ev.kind == "end":
+                    self._last_voice = time.monotonic()
+                    if not ev.transcript:
+                        continue
+                    # Deepgram guarantees the EndOfTurn transcript matches the EagerEndOfTurn
+                    # one exactly, so a live draft for the same text is reusable as-is. The
+                    # inequality branch is defensive: if that contract ever breaks we start
+                    # over rather than speak a reply to something the caller did not say.
+                    if self._draft is not None and not self._draft.done():
+                        if ev.transcript == self._draft_for:
+                            self.session.eager_hits += 1
+                            self._commit.set()      # release the audio it already generated
+                            continue
+                        self._cancel_turn("draft transcript did not match")
+                    self._commit.set()
+                    self._begin_turn(ev.transcript)
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 - the pump must never take the call down
+            logger.exception("session %s: turn pump failed", self.session.session_uuid)
+
+    def _begin_turn(self, text: str) -> asyncio.Task:
+        self._turn = asyncio.create_task(self._handle_turn(b"", text=text))
+        return self._turn
+
+    def _cancel_turn(self, why: str) -> None:
+        if self._turn is not None and not self._turn.done():
+            logger.info("session %s: abandoning turn (%s)", self.session.session_uuid, why)
+            self._turn.cancel()
+        self._draft = None
+        self._draft_for = ""
+
     def _guardrail(self) -> Optional[str]:
+        # A dead STT stream ends the call on the NEXT frame rather than waiting for the
+        # silence guardrail to notice 30s later. The port was already pinned to `failed` by
+        # the pump, so the connection handler's `or "end_call"` cannot soften it.
+        if self.session.stt_failed:
+            return "stt_stream_failed"
         now = time.monotonic()
         if settings.AGENT_MAX_CALL_SECONDS and \
                 now - self._started >= settings.AGENT_MAX_CALL_SECONDS:
@@ -336,18 +480,31 @@ class Conversation:
 
     # --- one turn ---
 
-    async def _handle_turn(self, audio: bytes) -> None:
+    async def _handle_turn(self, audio: bytes, text: str = "") -> None:
         """STT -> LLM -> TTS for one caller utterance. Cancellable at any point: a barge-in
-        mid-turn should abandon the answer, not queue it up behind the caller's new question."""
+        mid-turn should abandon the answer, not queue it up behind the caller's new question.
+
+        `text` short-circuits the STT leg: a streaming vendor has already produced the final
+        transcript by the time it tells us the turn ended (M1), so there is nothing left to
+        transcribe. That saved round trip -- 452-583ms measured on this host -- is the single
+        largest term in the latency budget."""
         t0 = time.monotonic()
         try:
-            # 8kHz, 16-bit mono: two bytes per sample.
             u = self.session.usage
-            u["stt_model"] = settings.STT_MODEL
-            u["stt_audio_seconds"] = round(
-                u.get("stt_audio_seconds", 0) + len(audio) / (8000 * 2), 2
-            )
-            text = await self.stt.transcribe(audio)
+            if text:
+                # Streaming: usage is the SOCKET's wall clock, not this utterance. Billing is
+                # per connected minute, so summing utterances under-reports by ~2x (M9). It is
+                # stamped once from the session rather than accumulated per turn.
+                u["stt_model"] = settings.DG_STT_MODEL
+                u["stt_audio_seconds"] = round(time.monotonic() - self._started, 2)
+                u["stt_billing"] = "stream"
+            else:
+                # 8kHz, 16-bit mono: two bytes per sample.
+                u["stt_model"] = settings.STT_MODEL
+                u["stt_audio_seconds"] = round(
+                    u.get("stt_audio_seconds", 0) + len(audio) / (8000 * 2), 2
+                )
+                text = await self.stt.transcribe(audio)
             if not text:
                 logger.info("session %s: empty transcript, ignoring turn",
                             self.session.session_uuid)
@@ -402,6 +559,11 @@ class Conversation:
                     if sentence is None:
                         break
                     reply = f"{reply} {sentence}".strip()
+                    # THE PLAYBACK GATE (M2). Everything above this line -- the LLM stream,
+                    # the sentence split -- may run on a merely PREDICTED turn end. Nothing
+                    # below it may, because past here the caller hears us. On the local-VAD
+                    # path this is already set and costs one no-op await.
+                    await self._commit.wait()
                     n = await self._speak(sentence)
                     frames += n
                     if t_first is None and n:
@@ -586,7 +748,12 @@ class Conversation:
         model = self.session.tts_model or ""
         self.playout.begin_utterance()
         u = self.session.usage
-        u["tts_model"] = model or settings.TTS_MODEL
+        # Ask the ENGINE what it actually used, rather than assuming OpenAI's axes. For
+        # Deepgram the voice IS the model (aura-2-thalia-en), so `model` is empty here and
+        # recording settings.TTS_MODEL would attribute the spend to a vendor that never ran
+        # -- which ai_cost.py would then price as unrated, or worse, price wrongly.
+        resolve = getattr(self.tts, "resolved_model", None)
+        u["tts_model"] = resolve(voice, model) if resolve else (model or settings.TTS_MODEL)
         u["tts_characters"] = u.get("tts_characters", 0) + len(text)
         frames = 0
         # Collect the WHOLE sentence before queueing any of it. Enqueueing chunks as they

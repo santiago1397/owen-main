@@ -15,12 +15,15 @@ degrades (says nothing, or falls through) rather than dead-airing.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+from dataclasses import dataclass
 from typing import Optional, Protocol
 
 import httpx
 
+from app.audiosocket import AUDIO_FRAME_BYTES
 from app.config import settings
 from app.dsp import Downsampler24to8, downsample_24k_to_8k, wav_unwrap, wav_wrap
 
@@ -211,6 +214,10 @@ class OpenAITTS:
 
     name = "openai"
 
+    def resolved_model(self, voice: str = "", model: str = "") -> str:
+        """What actually gets billed. Voice and model are separate axes here."""
+        return model or settings.TTS_MODEL
+
     async def synthesize(self, text: str, voice: str,
                          instructions: str = "", model: str = "") -> bytes:
         text = (text or "").strip()
@@ -290,15 +297,310 @@ class OpenAITTS:
             return
 
 
+class DeepgramTTS:
+    """Deepgram Aura-2 -> 8 kHz PCM, with NO resampling anywhere (M3).
+
+    The whole reason this class exists is `sample_rate=8000&container=none`: Deepgram returns
+    raw little-endian 16-bit samples already at telephony rate, so the bytes off the wire go
+    straight into AudioSocket. OpenAITTS has to pull 24 kHz and run dsp.Downsampler24to8 over
+    every chunk; this path has no downsampler at all, which removes both the CPU (on a box
+    shared with Asterisk) and the bug class that produced the metallic-audio fault.
+
+    REST rather than the Speak WebSocket on purpose: `synthesize_stream` is called once per
+    SENTENCE, so a WS would be opened and torn down per sentence for no gain. Chunked REST
+    gives the same first-byte behaviour with none of the lifecycle.
+
+    Returns b"" / yields nothing on any failure -- silence is recoverable, an exception in a
+    live call is not. Same contract as OpenAITTS.
+    """
+
+    name = "deepgram"
+
+    def resolved_model(self, voice: str = "", model: str = "") -> str:
+        """Deepgram has ONE axis: the voice IS the model (aura-2-thalia-en). An agent's stored
+        `voice` therefore wins over `model`, which is the opposite of the OpenAI class."""
+        return voice or model or settings.DG_TTS_MODEL
+
+    def _params(self, model: str = "") -> dict:
+        return {
+            "model": model or settings.DG_TTS_MODEL,
+            "encoding": "linear16",
+            "sample_rate": "8000",
+            # Without this Deepgram wraps linear16 in a WAV header, whose length field is only
+            # correct once the whole utterance exists -- useless for streaming.
+            "container": "none",
+        }
+
+    @property
+    def _headers(self) -> dict:
+        return {"Authorization": f"Token {settings.DEEPGRAM_API_KEY}"}
+
+    async def synthesize(self, text: str, voice: str,
+                         instructions: str = "", model: str = "") -> bytes:
+        text = (text or "").strip()
+        if not text or not settings.DEEPGRAM_API_KEY:
+            return b""
+        # `voice` IS the model for Deepgram (aura-2-thalia-en), unlike OpenAI where voice and
+        # model are separate axes. An agent's stored voice wins; M5 resolves unknowns upstream.
+        params = self._params(voice or model)
+        try:
+            async with httpx.AsyncClient(timeout=_TTS_TIMEOUT) as c:
+                r = await c.post(settings.DG_TTS_REST_URL, params=params,
+                                 headers=self._headers, json={"text": text[: settings.TTS_MAX_CHARS]})
+            if r.status_code >= 400:
+                logger.warning("dg tts: %s %s", r.status_code, r.text[:200])
+                return b""
+            return r.content
+        except Exception as exc:  # noqa: BLE001 - a failed reply must not kill the call
+            logger.warning("dg tts: failed: %r", exc)
+            return b""
+
+    async def synthesize_stream(self, text: str, voice: str,
+                                instructions: str = "", model: str = ""):
+        """Yield 8 kHz PCM as it is synthesized. No downsampler, so no chunk-boundary
+        remainder to carry -- every chunk is already whole samples at the right rate."""
+        text = (text or "").strip()
+        if not text or not settings.DEEPGRAM_API_KEY:
+            return
+        params = self._params(voice or model)
+        payload = {"text": text[: settings.TTS_MAX_CHARS]}
+        try:
+            async with httpx.AsyncClient(timeout=_TTS_TIMEOUT) as c:
+                async with c.stream("POST", settings.DG_TTS_REST_URL, params=params,
+                                    headers=self._headers, json=payload) as r:
+                    if r.status_code >= 400:
+                        body = (await r.aread())[:200]
+                        logger.warning("dg tts stream: %s %s", r.status_code, body)
+                        return
+                    async for chunk in r.aiter_bytes():
+                        if chunk:
+                            yield chunk
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("dg tts stream: failed: %r", exc)
+            return
+
+
+# --- streaming STT (VOICE_STACK_MIGRATION M1) -----------------------------------------------
+
+@dataclass
+class TurnEvent:
+    """One turn-lifecycle event from a streaming STT.
+
+    `kind` is deliberately our own vocabulary rather than Deepgram's, so a second streaming
+    vendor (AssemblyAI, Cartesia Ink-2) maps onto the same four words without the pipeline
+    learning anything about either.
+
+        start       the caller began speaking       -> barge-in
+        eager_end   PREDICTED turn end              -> draft the LLM reply, DO NOT speak
+        resumed     the prediction was wrong        -> discard the draft
+        end         committed turn end, final text  -> speak
+        error       the stream is gone              -> fail the session
+    """
+
+    kind: str
+    transcript: str = ""
+    confidence: float = 0.0
+
+
+class StreamingSpeechToText(Protocol):
+    """The seam batch STT cannot express.
+
+    `SpeechToText.transcribe(pcm) -> str` assumes the CALLER of the STT decides when a turn
+    ended. Flux inverts that: audio streams continuously and the vendor announces the turn
+    boundary along with the final transcript. That is not a faster transcribe(), it is a
+    different control flow, so it gets its own protocol rather than being forced through the
+    old one (M1).
+    """
+
+    name: str
+
+    async def start(self) -> bool: ...
+    async def feed(self, pcm8k: bytes) -> None: ...
+    async def close(self) -> None: ...
+
+
+class DeepgramFluxSTT:
+    """Deepgram Flux over wss://api.deepgram.com/v2/listen (M1, M2).
+
+    Audio goes in continuously; `events` receives TurnEvents. Two savings over the batch path,
+    and they are different things: the 600 ms local VAD hangover disappears because Flux
+    decides end-of-turn semantically, and the STT round trip disappears because the transcript
+    is ALREADY FINAL when EndOfTurn arrives.
+
+    EAGER MODE (M2). When DG_EAGER_EOT_THRESHOLD is set, Flux emits EagerEndOfTurn on a
+    PREDICTED turn end. Deepgram's contract, which this class relies on: the EndOfTurn
+    transcript exactly matches the EagerEndOfTurn transcript, so a draft prepared eagerly needs
+    no reconciliation. The pipeline may draft an LLM reply on `eager_end`; it must NOT speak
+    until `end`, because a `resumed` after audio began is the agent talking over a caller who
+    never stopped.
+
+    NEVER RAISES into the call path. A dead socket becomes a single `error` event and the
+    session fails to voicemail (M6) -- the path the system already tests.
+    """
+
+    name = "deepgram"
+
+    def __init__(self) -> None:
+        self.events: "asyncio.Queue[TurnEvent]" = asyncio.Queue()
+        self._ws = None
+        self._reader: Optional[asyncio.Task] = None
+        self._buf = bytearray()
+        # Deepgram recommends ~80ms chunks; AudioSocket hands us 20ms frames.
+        self._chunk_bytes = AUDIO_FRAME_BYTES * max(1, settings.DG_SEND_CHUNK_FRAMES)
+        self._closed = False
+
+    def _url(self) -> str:
+        from urllib.parse import urlencode
+
+        q = {
+            "model": settings.DG_STT_MODEL,
+            "encoding": "linear16",     # exactly what AudioSocket carries -- no resampling
+            "sample_rate": "8000",
+            "eot_threshold": f"{settings.DG_EOT_THRESHOLD:.2f}",
+            "eot_timeout_ms": str(settings.DG_EOT_TIMEOUT_MS),
+        }
+        if settings.DG_EAGER_EOT_THRESHOLD > 0:
+            q["eager_eot_threshold"] = f"{settings.DG_EAGER_EOT_THRESHOLD:.2f}"
+        return f"{settings.DG_STT_URL}?{urlencode(q)}"
+
+    async def start(self) -> bool:
+        if not settings.DEEPGRAM_API_KEY:
+            logger.warning("dg stt: no DEEPGRAM_API_KEY, refusing to start")
+            return False
+        try:
+            import websockets
+
+            self._ws = await websockets.connect(
+                self._url(),
+                extra_headers={"Authorization": f"Token {settings.DEEPGRAM_API_KEY}"},
+                open_timeout=5,
+                # Our own frames are the liveness signal; Deepgram closes on its own timeout.
+                ping_interval=None,
+                max_size=None,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("dg stt: connect failed: %r", exc)
+            return False
+        self._reader = asyncio.create_task(self._read_loop())
+        logger.info("dg stt: connected model=%s eager=%s",
+                    settings.DG_STT_MODEL, settings.DG_EAGER_EOT_THRESHOLD or "off")
+        return True
+
+    # Deepgram's `event` values -> our vocabulary. Anything absent (Update, and any value a
+    # future model version introduces) is IGNORED rather than guessed at: an unknown turn
+    # event must never be mistaken for a turn ending.
+    _EVENTS = {
+        "StartOfTurn": "start",
+        "EagerEndOfTurn": "eager_end",
+        "TurnResumed": "resumed",
+        "EndOfTurn": "end",
+    }
+
+    async def _read_loop(self) -> None:
+        try:
+            async for raw in self._ws:
+                if isinstance(raw, (bytes, bytearray)):
+                    continue        # Flux sends no binary; ignore rather than crash
+                try:
+                    msg = json.loads(raw)
+                except ValueError:
+                    continue
+                mtype = msg.get("type")
+                if mtype == "Error":
+                    logger.warning("dg stt: fatal %s", str(msg)[:200])
+                    await self.events.put(TurnEvent("error"))
+                    return
+                if mtype != "TurnInfo":
+                    continue        # Connected / ConfigureSuccess / ...
+                kind = self._EVENTS.get(str(msg.get("event") or ""))
+                if kind is None:
+                    continue
+                # Deepgram sends confidences as strings in places; coerce defensively.
+                try:
+                    conf = float(msg.get("end_of_turn_confidence") or 0.0)
+                except (TypeError, ValueError):
+                    conf = 0.0
+                await self.events.put(TurnEvent(
+                    kind=kind,
+                    transcript=str(msg.get("transcript") or "").strip(),
+                    confidence=conf,
+                ))
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            if not self._closed:
+                logger.warning("dg stt: stream ended: %r", exc)
+                await self.events.put(TurnEvent("error"))
+
+    async def feed(self, pcm8k: bytes) -> None:
+        """Buffer 20 ms frames and flush at the recommended chunk size. Never raises: a send
+        failure surfaces through the read loop's `error` event, not here in the audio path."""
+        if self._ws is None or self._closed or not pcm8k:
+            return
+        self._buf.extend(pcm8k)
+        if len(self._buf) < self._chunk_bytes:
+            return
+        chunk, self._buf = bytes(self._buf), bytearray()
+        try:
+            await self._ws.send(chunk)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("dg stt: send failed: %r", exc)
+
+    async def close(self) -> None:
+        self._closed = True
+        if self._ws is not None:
+            try:
+                await self._ws.send(json.dumps({"type": "CloseStream"}))
+            except Exception:  # noqa: BLE001 - best effort; we are tearing down anyway
+                pass
+            try:
+                await self._ws.close()
+            except Exception:  # noqa: BLE001
+                pass
+        if self._reader is not None:
+            self._reader.cancel()
+
+
 # --- selection ---------------------------------------------------------------------------------
 
 _STT = {"openai": OpenAISTT}
 _LLM = {"openai_compatible": OpenAICompatibleLLM}
-_TTS = {"openai": OpenAITTS}
+_TTS = {"openai": OpenAITTS, "deepgram": DeepgramTTS}
+# Streaming STT is a DIFFERENT seam, not another entry in _STT: these classes do not implement
+# transcribe(). Keeping the registries apart is what stops get_stt() ever returning something
+# the batch call path cannot use.
+_STREAM_STT = {"deepgram": DeepgramFluxSTT}
 
 
-def get_stt() -> SpeechToText:
-    return _STT.get(settings.STT_PROVIDER, OpenAISTT)()
+def resolve_provider(kind: str, agent_choice: str = "") -> str:
+    """Which vendor answers for this call (M4): LOCK > agent version > env default.
+
+    The lock is the incident switch. Without it, ending a vendor outage would mean editing
+    every agent that pinned that vendor -- and since agent versions are IMMUTABLE, "editing"
+    means re-versioning each one, mid-incident. One env value and a restart instead.
+    """
+    if kind == "stt":
+        return (settings.STT_PROVIDER_LOCK or str(agent_choice or "")
+                or settings.STT_PROVIDER).strip()
+    return (settings.TTS_PROVIDER_LOCK or str(agent_choice or "")
+            or settings.TTS_PROVIDER).strip()
+
+
+def streaming_stt_available(agent_choice: str = "") -> bool:
+    """True when the resolved STT provider drives its own turn detection.
+
+    The pipeline uses this to decide which loop it is running -- local VAD, or vendor EOT.
+    """
+    return resolve_provider("stt", agent_choice) in _STREAM_STT
+
+
+def get_streaming_stt(agent_choice: str = "") -> Optional[StreamingSpeechToText]:
+    cls = _STREAM_STT.get(resolve_provider("stt", agent_choice))
+    return cls() if cls else None
+
+
+def get_stt(agent_choice: str = "") -> SpeechToText:
+    return _STT.get(resolve_provider("stt", agent_choice), OpenAISTT)()
 
 
 def get_llm(base_url: str = "", model: str = "") -> LanguageModel:
@@ -306,8 +608,8 @@ def get_llm(base_url: str = "", model: str = "") -> LanguageModel:
     return cls(base_url=base_url, model=model)
 
 
-def get_tts() -> TextToSpeech:
-    return _TTS.get(settings.TTS_PROVIDER, OpenAITTS)()
+def get_tts(agent_choice: str = "") -> TextToSpeech:
+    return _TTS.get(resolve_provider("tts", agent_choice), OpenAITTS)()
 
 
 # --- custom tool execution (AI_AGENT_SPEC D6) -----------------------------------------------
@@ -321,7 +623,7 @@ async def call_custom_tool(tool: dict, args: dict) -> tuple[int, object]:
     """
     import httpx
 
-    from app.custom_tools import SYNC_BUDGET_S
+    from app.custom_tools import SYNC_BUDGET_S, resolve_headers
 
     timeout = SYNC_BUDGET_S if tool.get("mode") == "sync" else 20.0
     method = tool.get("method", "GET")
@@ -332,7 +634,10 @@ async def call_custom_tool(tool: dict, args: dict) -> tuple[int, object]:
         kwargs["json"] = args or {}
     try:
         async with httpx.AsyncClient(timeout=timeout) as c:
-            r = await c.request(method, tool["url"], headers=tool.get("headers") or None, **kwargs)
+            # Secrets are resolved from the environment HERE, never stored in the pinned
+            # version the declaration came from (M14).
+            r = await c.request(method, tool["url"],
+                                headers=resolve_headers(tool.get("headers")) or None, **kwargs)
         try:
             return r.status_code, r.json()
         except ValueError:

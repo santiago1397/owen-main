@@ -48,6 +48,11 @@ class AgentConfig(BaseModel):
     voice: str = ""
     model: str = ""
     llm_base_url: str = ""
+    # Per-agent provider pins (M4). Empty = follow the env default; a lock in .env.prod
+    # overrides both. Unknown names fall back to the registry default rather than failing:
+    # a stale pin must not strand a caller.
+    stt_provider: str = ""
+    tts_provider: str = ""
     knowledge: str = ""
     tools: dict = Field(default_factory=dict)
     max_call_seconds: Optional[int] = None

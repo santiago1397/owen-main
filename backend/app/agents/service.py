@@ -15,7 +15,61 @@ from app.agents.session import AgentSpec, _ENGINES
 from app.agents.tools import TOOLS
 from app.flows.service import next_version_number
 
-__all__ = ["next_version_number", "build_spec", "validate_agent_config"]
+__all__ = ["next_version_number", "build_spec", "validate_agent_config",
+           "KNOWLEDGE_MAX_CHARS", "voice_warning"]
+
+# VOICE_STACK_MIGRATION M11. `knowledge` is concatenated WHOLE into the system prompt by a
+# property recomputed EVERY TURN, and until this cap it was the one completely unbounded input
+# in the loop -- nothing truncated it in the UI, the schema, the spec, the wire or the prompt.
+# A 50 KB blob is ~12k tokens re-billed per turn, silently. The caller-context path solved the
+# identical problem with MAX_SUMMARY_CHARS/MAX_FACTS; this is knowledge's version of that.
+#
+# 6000 is a STARTING LINE, not a finding. Hitting it is the signal that one agent may no longer
+# be the right shape (D12 agent_slots is built and unused) -- with real calls to argue it.
+KNOWLEDGE_MAX_CHARS = 6000
+
+# Per-provider voice vocabularies (M5). Deepgram ships ~49 English Aura-2 voices and adds more,
+# so it is validated by PREFIX rather than by an enumeration that would be stale within a month.
+_OPENAI_VOICES = frozenset({
+    "alloy", "ash", "ballad", "coral", "echo", "fable",
+    "nova", "onyx", "sage", "shimmer", "verse",
+})
+
+
+def _capped_knowledge(raw, agent_id: str = "") -> str:
+    text = str(raw or "")
+    if len(text) <= KNOWLEDGE_MAX_CHARS:
+        return text
+    import logging
+
+    logging.getLogger("agents.service").warning(
+        "agent %s: knowledge is %d chars, truncating to %d for the prompt. This version was "
+        "activated before the cap existed; re-author it rather than relying on the truncation.",
+        agent_id or "?", len(text), KNOWLEDGE_MAX_CHARS,
+    )
+    return text[:KNOWLEDGE_MAX_CHARS]
+
+
+def voice_warning(provider: str, voice: str) -> str | None:
+    """A wrong voice is a WARNING, never an error (M5).
+
+    Changing TTS vendor invalidates every stored voice string at once. Refusing to activate
+    agents that were fine yesterday is a worse outcome than one call in the default voice, so
+    an unknown voice resolves to the provider default and says so. Returns None when fine.
+    """
+    voice = str(voice or "").strip()
+    if not voice:
+        return None
+    provider = str(provider or "").strip().lower()
+    if provider == "deepgram":
+        if not voice.startswith("aura-"):
+            return (f"voice '{voice}' is not a Deepgram voice (expected aura-2-<name>-en); "
+                    "the provider default will be used")
+    elif provider in ("openai", ""):
+        if voice not in _OPENAI_VOICES:
+            return (f"voice '{voice}' is not an OpenAI voice; the provider default will be "
+                    "used")
+    return None
 
 
 def validate_agent_config(config: dict | None) -> tuple[list[str], list[str]]:
@@ -77,6 +131,22 @@ def validate_agent_config(config: dict | None) -> tuple[list[str], list[str]]:
                 "the agent can never reach them"
             )
 
+    # Knowledge budget (M11). A HARD error, because this is exactly what activation validation
+    # is for: the operator learns while editing, not when the bill arrives. Every turn of every
+    # call pays for this text.
+    knowledge = str(cfg.get("knowledge") or "")
+    if len(knowledge) > KNOWLEDGE_MAX_CHARS:
+        errors.append(
+            f"knowledge is {len(knowledge)} characters, over the {KNOWLEDGE_MAX_CHARS} limit. "
+            "It is re-sent to the model on EVERY turn, so this is paid for repeatedly. Move "
+            "per-customer detail into a tool, or split the agent."
+        )
+
+    # Voice (M5) -- warning only, so a provider switch never bricks an existing agent.
+    warn = voice_warning(str(cfg.get("tts_provider") or ""), cfg.get("voice"))
+    if warn:
+        warnings.append(warn)
+
     if not str(cfg.get("greeting") or "").strip():
         warnings.append("no greeting set — the agent will open with nothing scripted")
     if not str(cfg.get("persona") or "").strip():
@@ -100,7 +170,11 @@ def build_spec(agent_id: str, version_id: str | None, config: dict | None) -> Ag
         model=str(cfg.get("model") or ""),
         engine=str(cfg.get("engine") or "dummy"),
         tools=cfg.get("tools") if isinstance(cfg.get("tools"), dict) else {},
-        knowledge=str(cfg.get("knowledge") or ""),
+        # Truncated even though activation already rejects an over-budget draft: versions
+        # activated BEFORE the cap existed are immutable and still runnable, and one of those
+        # would otherwise re-bill an unbounded prompt on every turn forever. Loud, not silent
+        # -- the log names the agent so it can be re-authored rather than quietly degraded.
+        knowledge=_capped_knowledge(cfg.get("knowledge"), agent_id),
         guardrails=cfg.get("guardrails") if isinstance(cfg.get("guardrails"), dict) else {},
         config=cfg,
     )

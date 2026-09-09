@@ -25,7 +25,12 @@ Writes default to async for exactly that reason.
 
 from __future__ import annotations
 
+import logging
+import os
+import re
 from typing import Optional
+
+logger = logging.getLogger("voice.custom_tools")
 
 # Hard ceiling for a SYNC tool. Not a suggestion — past this the caller thinks the line died.
 SYNC_BUDGET_S = 0.8
@@ -134,3 +139,44 @@ def validate(raw) -> list[str]:
                 "wait — use mode 'async'"
             )
     return errors
+
+
+# --- credentials (VOICE_STACK_MIGRATION M14) ------------------------------------------------
+
+_ENV_REF = re.compile(r"\$\{([A-Z0-9_]+)\}")
+
+
+def resolve_headers(headers) -> dict:
+    """Expand `${ENV_VAR}` references in header values, at CALL time.
+
+    WHY THIS EXISTS. A tool declaration lives in `agent_versions.config`, which is immutable,
+    versioned forever, and readable through the agents API. A CRM key written there is
+    plaintext in the database, copied into every subsequent version row, and rotating it means
+    re-authoring every agent that used it. So the declaration stores a NAME and the secret
+    stays in .env.prod:
+
+        {"Authorization": "Bearer ${CRM_API_KEY}"}
+
+    An UNSET variable expands to empty rather than leaving the literal `${...}` on the wire.
+    Sending the placeholder would present the string "Bearer ${CRM_API_KEY}" as a credential --
+    it would fail anyway, but it would also write the variable name into someone else's access
+    log. Empty fails cleanly and is logged here, once, with the name that was missing.
+    """
+    out = {}
+    for key, value in (headers or {}).items():
+        text = str(value)
+        missing = []
+
+        def _sub(m):
+            name = m.group(1)
+            val = os.environ.get(name, "")
+            if not val:
+                missing.append(name)
+            return val
+
+        resolved = _ENV_REF.sub(_sub, text)
+        if missing:
+            logger.warning("custom tool header %r references unset env var(s): %s",
+                           key, ", ".join(missing))
+        out[str(key)] = resolved
+    return out

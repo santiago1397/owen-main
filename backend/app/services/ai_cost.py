@@ -39,16 +39,37 @@ PROVENANCE_DERIVED = "derived"  # we computed it from vendor-reported usage
 # per-minute figure: a talkative caller and a quiet one cost very different amounts for the
 # same wall-clock minute, and a per-minute average hides exactly the thing worth watching.
 DEFAULT_RATES = {
-    # per second of audio transcribed
+    # --- STT, per second ---
+    # BATCH vendors bill only the audio actually sent (one utterance per turn).
     "stt.gpt-4o-mini-transcribe": Decimal("0.0001"),
     "stt.whisper-1": Decimal("0.0001"),
-    # per 1000 tokens, split in/out
+    # STREAMING vendors bill the SOCKET, not the speech: an hour-long connection carrying
+    # thirty minutes of audio is billed for the hour. owen-voice reports wall-clock seconds
+    # for these (pipeline stamps usage["stt_billing"]="stream"), so the same per-second unit
+    # is correct here -- but the seconds mean something different, and the 5x cost jump this
+    # produces is real and expected (VOICE_STACK_MIGRATION M9), not a bug to be tuned away.
+    "stt.flux-general-en": Decimal("0.00012833"),      # Deepgram $0.0077/min PAYG / 60
+    "stt.flux-general-multi": Decimal("0.00012833"),
+    "stt.nova-3": Decimal("0.00012833"),
+    # --- LLM, per 1000 tokens, split in/out ---
     "llm.in.gpt-4o-mini": Decimal("0.00015"),
     "llm.out.gpt-4o-mini": Decimal("0.0006"),
-    # per 1000 characters synthesized
-    "tts.gpt-4o-mini-tts": Decimal("0.015"),
+    # --- TTS, per 1000 characters ---
     "tts.tts-1": Decimal("0.015"),
+    "tts.aura-2": Decimal("0.030"),                    # Deepgram PAYG
+    # `gpt-4o-mini-tts` is DELIBERATELY ABSENT. It bills in AUDIO TOKENS, and OpenAI publishes
+    # no character-to-token conversion, so there is no honest per-character rate to put here.
+    # It previously carried 0.015 -- the `tts-1` per-CHARACTER rate applied to a model that is
+    # not billed per character, which is confidently wrong rather than unknown. Omitting the
+    # key makes tts_charge() emit an `unrated` row with reason "no rate for model", which is
+    # this module's stated contract: a bill that quietly under-reports is worse than one that
+    # admits ignorance.
 }
+
+# Aura-2 ships ~49 English voices as separate model ids (aura-2-thalia-en, aura-2-apollo-en,
+# ...) that all bill identically. Rating each by name would mean a table edit every time an
+# operator picks a different voice -- and a silent `unrated` row when someone forgets.
+_RATE_ALIASES = (("stt.flux-", "stt.flux-general-en"), ("tts.aura-2-", "tts.aura-2"))
 
 _CENTS = Decimal("0.000001")
 
@@ -70,7 +91,15 @@ class AiCharge:
 
 
 def _rate(rates: dict, code: str):
-    value = (rates or DEFAULT_RATES).get(code)
+    table = rates or DEFAULT_RATES
+    value = table.get(code)
+    if value is None:
+        # Fall back to a family rate before giving up: a voice variant is not a new price.
+        # An explicit entry always wins, so overriding one voice stays possible.
+        for prefix, family in _RATE_ALIASES:
+            if code.startswith(prefix) and family in table:
+                value = table[family]
+                break
     if value is None:
         return None
     try:

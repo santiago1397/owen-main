@@ -202,6 +202,11 @@ async def crm_lookup(
     # State, not just identity — the thing a CRM knows and OWEN does not (C9).
     opps = await ghl_api.contact_opportunities(contact.get("id") or "")
     open_opps = [o for o in opps if str(o.get("status") or "").lower() == "open"]
+    # CLOSED work is context too (M15). It was previously fetched and thrown away, so an agent
+    # could not answer "did you finish my roof last month?" about a job it was looking straight
+    # at. Won and lost are kept apart: "we completed a job for you" and "you decided not to go
+    # ahead" are very different things to say to someone.
+    closed_won = [o for o in opps if str(o.get("status") or "").lower() == "won"]
     summary_bits = []
     if open_opps:
         first = open_opps[0]
@@ -212,8 +217,17 @@ async def crm_lookup(
         )
         if first.get("monetaryValue"):
             facts["open_value"] = str(first["monetaryValue"])
-        if first.get("pipelineStageId"):
-            facts["stage"] = str(first.get("stageName") or first["pipelineStageId"])
+        # NAMED stages only. GHL frequently omits `stageName`, and the previous fallback put
+        # the raw pipelineStageId here -- a UUID, in a blob that is prepended to the system
+        # prompt, which an agent will eventually read down the phone to a customer. An unknown
+        # stage is better left unsaid than said as a UUID.
+        stage_name = str(first.get("stageName") or "").strip()
+        if stage_name:
+            facts["stage"] = stage_name
+    if closed_won:
+        summary_bits.append(
+            f"{len(closed_won)} completed job" + ("s" if len(closed_won) > 1 else "")
+        )
     return {
         "display_name": name or None,
         "summary": ". ".join(summary_bits),
