@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import Call, CallEvent, Caller, Number, Provider
 from app.providers.base import NormalizedCallEvent, looks_like_tracking_number
+from app.services.number_match import owned_number_clause
 
 logger = logging.getLogger("ingestion")
 
@@ -47,7 +48,22 @@ async def _get_or_create_caller(db: AsyncSession, phone: str, seen_at: datetime)
         await db.execute(select(Caller).where(Caller.phone_number == phone))
     ).scalar_one_or_none()
     if prior is not None and prior.last_seen_at is not None and seen_at < prior.last_seen_at:
-        logger.warning(
+        # DEBUG, not WARNING. This condition is CONTINUOUS, not exceptional: the reconciler
+        # replays provider REST results newest-first every 5 minutes, so it fires on ordinary
+        # healthy operation. At WARNING it produced 5,741 of the 6,090 rows in `app_logs` —
+        # 94% — and buried the three lines that named a real bug (inbound SMS losing its
+        # number and campaign for seven weeks). A detector that fires continuously is a
+        # METRIC, not an alert.
+        #
+        # The signal is not lost, it moved somewhere durable and countable: the standing
+        # damage is `callers.first_seen_at > last_seen_at`, reported as
+        # `data_quality.callers_first_seen_after_last_seen` by /api/ai/health/pipeline. That
+        # is the real number (685 of 4,000 when this was written) and it does not depend on
+        # anyone reading a log at the moment it scrolls past.
+        #
+        # This is the same lesson providers/base.py::looks_like_tracking_number already
+        # records for the "no registered Number" warnings — learned there, untreated here.
+        logger.debug(
             "caller %s ingested OUT OF ORDER: event at %s predates last_seen_at %s by %.0fs — "
             "last_seen_at will regress (first_seen_at/last_seen_at have no monotonic guard)",
             phone, seen_at.isoformat(), prior.last_seen_at.isoformat(),
@@ -91,13 +107,10 @@ async def ingest_status_event(
             from app.core.config import settings as _settings
             stmt = stmt.where(Number.media_provider == _settings.BULKVS_MEDIA_PROVIDER)
         else:
-            # Match the OWNING provider (Twilio/SignalWire, whose media_provider is NULL) OR the
-            # provider carrying the MEDIA. A BulkVS DID is owned by the 'bulkvs' provider row but
-            # its calls ingest under 'asterisk', so a provider_id-only match found nothing and
-            # every inbound BulkVS call lost its number and campaign attribution.
-            stmt = stmt.where(
-                or_(Number.provider_id == provider.id, Number.media_provider == provider.name)
-            )
+            # One rule, one home: app/services/number_match.py, shared with the SMS path.
+            # It was implemented twice and the copies drifted for seven weeks — the file's
+            # docstring has the timeline.
+            stmt = stmt.where(owned_number_clause(provider.id, provider.name))
         number = (await db.execute(stmt)).scalar_one_or_none()
         if number is None:
             # A real-looking DID with no `numbers` row is an actionable attribution gap; a

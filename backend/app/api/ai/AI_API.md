@@ -218,6 +218,20 @@ It returns **two separate lists**, and you should report both:
 `degraded` means something needs an engineer. An empty `problems` list with a non-empty
 `needs_attention` means the system is fine and somebody is losing leads.
 
+Two blocks are worth reading even when the verdict is `healthy`:
+
+- **`attribution`** — `unattributed_calls_24h` / `unattributed_messages_24h` count traffic
+  that arrived on a DID with no `numbers` row. Those carry no campaign, so they are missing
+  from Campaign ROI entirely. Attribution ran at 100% on every day of the two weeks before
+  this was added, so a non-zero value here is a real signal, not background. Non-zero also
+  raises a `needs_attention` line.
+- **`data_quality.callers_first_seen_after_last_seen`** — callers whose `last_seen_at` has
+  been dragged behind their `first_seen_at` by out-of-order ingestion (provider REST APIs
+  return calls newest-first and the reconciler replays them that way; `last_seen_at` is
+  written unconditionally). A standing figure, not an incident: it does **not** affect
+  `status`, and it only ever grows until someone rebuilds those two columns from
+  `call_events`. Report it as a data-quality number, not as a fault.
+
 ### `GET /api/ai/flows/outcomes` — what the IVR did with callers *(scope: `read`)*
 
 | param | meaning |

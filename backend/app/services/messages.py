@@ -10,7 +10,7 @@ import logging
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import or_, select
+from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -18,6 +18,7 @@ from app.models import Caller, ContactThreadState, Message, Number, SmsOptOut
 from app.providers.base import NormalizedMessageEvent
 from app.services import sms
 from app.services.ingestion import _get_or_create_caller, _get_or_create_provider
+from app.services.number_match import owned_number_clause
 
 logger = logging.getLogger("ingestion")
 
@@ -61,11 +62,7 @@ async def ingest_message_event(
             await db.execute(
                 select(Number).where(
                     Number.phone_number == evt.to_number,
-                    or_(
-                        Number.provider_id == provider.id,
-                        Number.owner_provider == provider.name,
-                        Number.media_provider == provider.name,
-                    ),
+                    owned_number_clause(provider.id, provider.name),
                 )
             )
         ).scalars().first()

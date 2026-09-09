@@ -25,7 +25,7 @@ from app.api.ai.filters import REAL_CALL
 from app.core.apikeys import SCOPE_READ
 from app.core.config import settings
 from app.db import get_db
-from app.models import Call, InboundEmail, Job, Message, Recording
+from app.models import Call, Caller, InboundEmail, Job, Message, Recording
 from app.providers import asterisk_client
 from app.services.queue import MAX_ATTEMPTS
 
@@ -110,6 +110,33 @@ async def pipeline_health(
         select(func.min(Job.run_after)).where(Job.status == "pending")
     )).scalar_one()
 
+    # --- attribution ----------------------------------------------------------------------
+    # A call or SMS with no `number_id` reached OWEN on a DID that no `numbers` row matched,
+    # so it carries no campaign and is invisible to Campaign ROI. This was silent for seven
+    # weeks: the SMS number lookup matched on provider_id alone and missed every BulkVS DID
+    # adopted from a legacy Twilio row. Attribution ran at 100% on every day of the last two
+    # weeks except one, so a non-zero count here is a real signal rather than background.
+    unattributed_calls_24h = (await db.execute(
+        select(func.count()).select_from(Call)
+        .where(REAL_CALL, Call.number_id.is_(None), Call.started_at >= day_ago)
+    )).scalar_one()
+    unattributed_messages_24h = (await db.execute(
+        select(func.count()).select_from(Message)
+        .where(Message.number_id.is_(None), Message.received_at >= day_ago)
+    )).scalar_one()
+
+    # The standing damage the out-of-order detector used to shout about once per event.
+    # `_get_or_create_caller` writes last_seen_at unconditionally, and provider REST APIs
+    # return calls NEWEST-FIRST, so a replayed batch drags a caller's "last seen" backwards
+    # until it precedes first_seen_at. Reported as a number because that is what it is: a
+    # standing data-quality figure, not an incident. It does not move the verdict.
+    callers_out_of_order = (await db.execute(
+        select(func.count()).select_from(Caller)
+        .where(Caller.first_seen_at.is_not(None), Caller.last_seen_at.is_not(None),
+               Caller.first_seen_at > Caller.last_seen_at)
+    )).scalar_one()
+    callers_total = (await db.execute(select(func.count()).select_from(Caller))).scalar_one()
+
     # A recording downloaded but never transcribed CAN mean the pipeline stalled between
     # stages — but only for recordings that went through the live pipeline. The one-off
     # historical backfill deliberately passes skip_transcribe=True (a pure audio+metadata
@@ -183,6 +210,17 @@ async def pipeline_health(
             f"{email_parse_failures_24h} work-order email(s) in the last 24h could not be read "
             f"— those leads were not relayed"
         )
+    if unattributed_calls_24h or unattributed_messages_24h:
+        bits = []
+        if unattributed_calls_24h:
+            bits.append(f"{unattributed_calls_24h} call(s)")
+        if unattributed_messages_24h:
+            bits.append(f"{unattributed_messages_24h} message(s)")
+        needs_attention.append(
+            " and ".join(bits) + " in the last 24h reached a DID with no `numbers` row — "
+            "they carry no campaign and are missing from Campaign ROI. Register the number "
+            "at /numbers, or check that its DID is synced"
+        )
     if stuck_recordings:
         problems.append(f"{stuck_recordings} recent recording(s) downloaded >6h ago but never "
                         f"transcribed — the pipeline may be stalled between stages")
@@ -224,6 +262,16 @@ async def pipeline_health(
                 "last_email_at": last_email.isoformat() if last_email else None,
                 "minutes_since_last_email": mail_age,
                 "emails_last_24h": emails_24h,
+            },
+            "attribution": {
+                "unattributed_calls_24h": unattributed_calls_24h,
+                "unattributed_messages_24h": unattributed_messages_24h,
+            },
+            "data_quality": {
+                # Standing figure, not an incident — see the comment on the query. Was 685 of
+                # 4,000 when the out-of-order detector was demoted from a per-event WARNING.
+                "callers_first_seen_after_last_seen": callers_out_of_order,
+                "callers_total": callers_total,
             },
             "queue": {
                 "pending": job_counts.get("pending", 0),
