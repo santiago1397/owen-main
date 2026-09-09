@@ -756,23 +756,26 @@ class Conversation:
         u["tts_model"] = resolve(voice, model) if resolve else (model or settings.TTS_MODEL)
         u["tts_characters"] = u.get("tts_characters", 0) + len(text)
         frames = 0
-        # Collect the WHOLE sentence before queueing any of it. Enqueueing chunks as they
-        # arrive is what produced gaps inside words: the pump drains at a strict 20ms and a
-        # slow chunk empties the queue mid-syllable. A jitter buffer only narrows that window
-        # — 400ms of priming still underran twice in a two-turn call — whereas a complete
-        # sentence cannot underrun at all.
+        # Queue chunks AS THEY ARRIVE. `Playout` already refuses to start until PRIME_FRAMES
+        # (400ms) is buffered and re-primes after any underrun, so holding the whole sentence
+        # here as well was belt-and-braces on top of a guard that already exists -- and it was
+        # expensive: measured on the first real call, first-audio sat 1685ms behind the TTS
+        # response headers purely waiting for the last syllable of the sentence to synthesize.
         #
-        # The pipelining that actually pays is at the SENTENCE level, not the chunk level:
-        # sentence 2 is synthesized while sentence 1 is still playing, so this costs only the
-        # synthesis time of the FIRST sentence and nothing thereafter.
+        # The earlier note (that 400ms of priming "still underran twice in a two-turn call")
+        # was written against OpenAI TTS at 24kHz, which had to be resampled chunk by chunk in
+        # this process. Aura-2 returns 8kHz natively at RTF ~0.111 -- roughly nine times faster
+        # than playback -- so the queue refills far quicker than it drains. `session.underruns`
+        # is the number that decides whether that holds; watch it on the next call, and if it
+        # climbs, raise PRIME_FRAMES rather than going back to whole-sentence buffering.
+        #
+        # Sentence-level pipelining still applies on top: sentence 2 synthesizes while
+        # sentence 1 plays.
         stream = getattr(self.tts, "synthesize_stream", None)
         if stream is not None:
-            parts = []
             async for pcm in stream(text, voice, instructions=instructions, model=model):
                 if pcm:
-                    parts.append(pcm)
-            if parts:
-                frames = self.playout.enqueue(b"".join(parts))
+                    frames += self.playout.enqueue(pcm)
         if frames:
             self.playout.mark_complete()
             return frames
