@@ -5,7 +5,11 @@ set -euo pipefail
 
 SSH_ALIAS="${SSH_ALIAS:-owen-main}"
 VPS_REPO_PATH="${VPS_REPO_PATH:-/opt/santiagoproperties/owen-main}"
-HEALTHCHECK_URL="${HEALTHCHECK_URL:-http://localhost:8888/health}"
+# Probed from INSIDE the app container, because the app is `expose:`-only — nothing has
+# ever listened on the host's :8888, so the old host-side `curl localhost:8888` could not
+# succeed and every deploy ended with a false "did not become healthy" after 90 seconds of
+# waiting. A check that cannot pass is worse than no check: it trains you to ignore it.
+HEALTHCHECK_CMD="${HEALTHCHECK_CMD:-docker exec callmon_app curl -fsS http://localhost:8888/health}"
 COMPOSE="docker compose -f docker-compose.prod.yml --env-file .env.prod"
 
 # Extra ssh flags. Deploying from Git Bash on Windows needs SSH_OPTS='-o ControlPath=none':
@@ -42,14 +46,28 @@ ssh_ "${SSH_ALIAS}" "cd ${VPS_REPO_PATH} \
   && ${COMPOSE} up -d"
 
 echo "==> Waiting for healthcheck"
+healthy=0
 for i in $(seq 1 30); do
-  if ssh_ "${SSH_ALIAS}" "curl -fsS ${HEALTHCHECK_URL} >/dev/null 2>&1"; then
-    echo "==> Healthy. Deploy complete."
-    exit 0
+  if ssh_ "${SSH_ALIAS}" "${HEALTHCHECK_CMD} >/dev/null 2>&1"; then
+    healthy=1
+    break
   fi
   sleep 3
 done
 
-echo "ERROR: backend did not become healthy in time. Last logs:"
-ssh_ "${SSH_ALIAS}" "cd ${VPS_REPO_PATH} && ${COMPOSE} logs --tail=80 app"
-exit 1
+if [ "${healthy}" -ne 1 ]; then
+  echo "ERROR: backend did not become healthy in time. Last logs:"
+  ssh_ "${SSH_ALIAS}" "cd ${VPS_REPO_PATH} && ${COMPOSE} logs --tail=80 app"
+  exit 1
+fi
+echo "==> Healthy."
+
+# Post-deploy: actually REQUEST the surface the UI uses. /health only proves the process is
+# up and Postgres answers SELECT 1 — it says nothing about whether an endpoint 500s, which
+# is precisely how a broken /api/calls/{id} survived five days and two deploys.
+if [ "${SKIP_SMOKE:-0}" != "1" ]; then
+  echo "==> Route smoke (every JWT-authed GET)"
+  ssh_ "${SSH_ALIAS}" "cd ${VPS_REPO_PATH} && ${COMPOSE} exec -T app python -m tests.smoke_routes"     || { echo "ERROR: routes are answering 5xx on the freshly deployed build (see above)"; exit 1; }
+fi
+
+echo "==> Deploy complete."
