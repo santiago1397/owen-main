@@ -85,6 +85,7 @@ def build_convo(stt: FakeSTT):
     convo._stt_pump = None
 
     started: list = []
+    drafted_flags: list = []
 
     class FakePlayout:
         def __init__(self):
@@ -96,8 +97,12 @@ def build_convo(stt: FakeSTT):
 
     convo.playout = FakePlayout()
 
-    def _begin_turn(text: str):
+    def _begin_turn(text: str, drafted: bool = False):
+        # Signature must track Conversation._begin_turn: the pump passes drafted=True on the
+        # eager path, and a fake that cannot accept it raises inside the pump's broad except,
+        # which shows up as "the turn never started" rather than as a TypeError.
         started.append(text)
+        drafted_flags.append(drafted)
 
         async def _noop():
             await asyncio.sleep(3600)      # a turn that is "in flight" until cancelled
@@ -106,6 +111,7 @@ def build_convo(stt: FakeSTT):
         return convo._turn
 
     convo._begin_turn = _begin_turn
+    convo.drafted_flags = drafted_flags
     return convo, started
 
 
@@ -124,6 +130,7 @@ async def scenario_eager_then_commit() -> None:
     stt.emit("eager_end", "I need a quote for a roof leak")
     await drain()
     check(started == ["I need a quote for a roof leak"], "draft turn starts on eager_end")
+    check(convo.drafted_flags == [True], "the turn is marked as drafted, for the metrics")
     check(not convo._commit.is_set(), "playback gate is CLOSED while only predicted")
 
     stt.emit("end", "I need a quote for a roof leak")
