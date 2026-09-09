@@ -26,7 +26,30 @@ hdr() { printf "\n${c_hdr}%s${c_off}\n" "$1"; }
 
 # --- arrivals: did anything reach the box at all? -------------------------------------------
 if [ "${1:-}" = "--arrivals" ]; then
-  hdr "=== SIP INVITEs seen by Asterisk (today) ==="
+  # THE authoritative source, and the one I overlooked for an hour: cdr.conf sets
+  # `unanswered=yes`, so Asterisk writes a row for EVERY call attempt -- including one that
+  # rang and never connected. If a call is absent here, it did not reach the box. No log
+  # parsing, no verbosity settings, no guessing.
+  hdr "=== 0. ASTERISK CDR — every attempt, answered or not (authoritative) ==="
+  $COMPOSE exec -T app python - <<'PY' 2>/dev/null || echo "  (query failed)"
+import asyncio
+from sqlalchemy import text
+from app.db import SessionLocal
+async def main():
+    async with SessionLocal() as db:
+        r = await db.execute(text(
+            "select start, src, dst, dcontext, lastapp, disposition, duration, billsec, "
+            "uniqueid from cdr where start > now() - interval '24 hours' order by start desc"))
+        rows = r.fetchall()
+        if not rows:
+            print("  NO call attempts in 24h — nothing reached Asterisk at all")
+        for x in rows:
+            print(f"  {str(x[0])[:19]}  {str(x[1] or '?'):16} -> {str(x[2] or '?'):14} "
+                  f"{str(x[5]):10} dur={x[6]}s bill={x[7]}s  uid={x[8]}")
+asyncio.run(main())
+PY
+
+  hdr "=== 1. SIP-level events (rejections, auth failures) ==="
   if [ -r "$AST_LOG" ]; then
     sudo grep -aE "Call from|INVITE|Rejected|failed to authenticate|No matching endpoint" "$AST_LOG" 2>/dev/null | tail -40 \
       || echo "  (none)"
@@ -142,9 +165,16 @@ PY
 
 hdr "=== VERDICT HINTS ==="
 cat <<'EOF'
-  section 1 empty  -> the INVITE never reached Asterisk. Check --arrivals, then the carrier.
-  1 has a REJECT   -> we refused it (identify/auth). Check pjsip.conf match IPs vs the carrier's.
-  1 ok, 2 empty    -> Asterisk took it but Stasis never fired: ARI consumer down, or wrong app.
+  Start with `--arrivals`. Its CDR section is authoritative because cdr.conf sets
+  unanswered=yes: an attempt that rang and failed is still a row. No row = it never got here.
+
+  no CDR row       -> the INVITE never reached Asterisk. The fault is upstream: carrier
+                      routing, or the number is not actually being delivered to this trunk.
+                      Nothing on this box can fix it; take the TN to the carrier.
+  CDR + a REJECT   -> we refused it (identify/auth). Compare pjsip.conf match IPs against the
+                      source IP in section 1.
+  CDR, 2 empty     -> Asterisk took it but Stasis never fired: ARI consumer down, or the call
+                      landed in a context that does not Stasis() into ARI_APP.
   2 ok, 3 empty    -> the flow ran but never reached an ai_agent node (or owen-voice was down).
   3 ok, 4 empty    -> audio ran but nothing projected: ingestion problem, not a call problem.
 EOF
