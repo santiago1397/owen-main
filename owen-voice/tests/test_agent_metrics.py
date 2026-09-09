@@ -90,6 +90,35 @@ def test_recording_name_rides_along():
     check(sess().agent_metrics()["recording_name"] is None, "absent when nothing was recorded")
 
 
+def test_the_wait_is_split_into_the_terms_that_can_be_acted_on():
+    print("\ntest_the_wait_is_split_into_the_terms_that_can_be_acted_on")
+    # first_audio_ms alone says a call feels slow; it does not say which vendor to change.
+    # Measured on the first recorded call: stt 0ms (Flux hands back a final transcript), llm
+    # ~1738ms, tts ~666ms -- so the LLM was ~70% of the wait, which is the opposite of where
+    # the effort had been going.
+    s = sess(turn_metrics=[
+        {"first_audio_ms": 2404, "stt_ms": 0, "llm_ms": 1738, "tts_ms": 666},
+        {"first_audio_ms": 1746, "stt_ms": 0, "llm_ms": 1100, "tts_ms": 646},
+        {"first_audio_ms": 2489, "stt_ms": 0, "llm_ms": 1800, "tts_ms": 689},
+    ])
+    m = s.agent_metrics()
+    check(m["stt_ms_p50"] == 0,
+          "streaming STT contributes nothing — that zero is the evidence Flux works")
+    check(m["llm_ms_p50"] == 1738, f"llm median is surfaced ({m['llm_ms_p50']})")
+    check(m["tts_ms_p50"] == 666, f"tts median is surfaced ({m['tts_ms_p50']})")
+    check(m["llm_ms_p50"] > m["tts_ms_p50"],
+          "the split correctly identifies the LLM as the dominant term")
+
+
+def test_missing_terms_do_not_break_the_summary():
+    print("\ntest_missing_terms_do_not_break_the_summary")
+    # Turns recorded before the split existed carry no llm_ms/tts_ms. They must read as 0
+    # rather than raising and taking the whole metrics row with them.
+    m = sess(turn_metrics=[{"first_audio_ms": 900}]).agent_metrics()
+    check(m["llm_ms_p50"] == 0 and m["tts_ms_p50"] == 0, "absent terms report 0")
+    check(m["first_audio_ms_p50"] == 900, "what IS present is still reported")
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for t in tests:

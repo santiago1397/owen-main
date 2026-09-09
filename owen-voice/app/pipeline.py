@@ -567,6 +567,10 @@ class Conversation:
             # llm(570ms) + tts(1300ms) of dead air before the caller heard a syllable; here
             # the first sentence starts speaking while the rest is still being generated.
             reply, frames, t_first = "", 0, None
+            # When the LLM produced its first SPEAKABLE sentence. Splits the wait the caller
+            # experiences into the two halves we can actually act on -- the model thinking,
+            # and the voice being synthesized -- which a single first_audio_ms cannot.
+            t_sentence1 = None
             sentences: asyncio.Queue = asyncio.Queue()
 
             async def produce() -> None:
@@ -599,6 +603,8 @@ class Conversation:
                     sentence = await sentences.get()
                     if sentence is None:
                         break
+                    if t_sentence1 is None:
+                        t_sentence1 = time.monotonic()
                     reply = f"{reply} {sentence}".strip()
                     # THE PLAYBACK GATE (M2). Everything above this line -- the LLM stream,
                     # the sentence split -- may run on a merely PREDICTED turn end. Nothing
@@ -635,9 +641,12 @@ class Conversation:
             # silence. `total` is only when the last sentence finished synthesizing, which
             # they never notice because playback of the first one is already under way.
             first_ms = int(((t_first or t_done) - t0) * 1000)
+            _t_s1 = t_sentence1 or t_done
             logger.info(
-                "session %s: turn latency stt=%dms first_audio=%dms total=%dms (%d frames)",
+                "session %s: turn latency stt=%dms llm=%dms tts=%dms first_audio=%dms "
+                "total=%dms (%d frames)",
                 self.session.session_uuid, int((t_stt - t0) * 1000),
+                int((_t_s1 - t_stt) * 1000), int(((t_first or t_done) - _t_s1) * 1000),
                 first_ms, int((t_done - t0) * 1000), frames,
             )
             self.session.last_turn_ms = int((t_done - t0) * 1000)
@@ -645,9 +654,17 @@ class Conversation:
             # The full breakdown, kept per turn. `stt_ms` is 0 on the streaming path by
             # construction (the transcript is final when EndOfTurn fires) -- that zero IS the
             # evidence Flux is doing its job, so it is recorded rather than omitted.
+            # The decomposition. first_audio_ms is the number the caller feels; these are the
+            # three terms it is made of, and without them "make it faster" has no target.
+            # NOTE llm_ms and tts_ms OVERLAP with nothing: the stages are pipelined at the
+            # SENTENCE level, so llm_ms is time-to-first-sentence (not the whole generation)
+            # and tts_ms is that sentence's synthesis plus playout priming.
+            t_s1 = t_sentence1 or t_done
             self.session.turn_metrics.append({
                 "turn": len(self.session.turn_metrics) + 1,
                 "stt_ms": int((t_stt - t0) * 1000),
+                "llm_ms": int((t_s1 - t_stt) * 1000),
+                "tts_ms": int(((t_first or t_done) - t_s1) * 1000),
                 "first_audio_ms": first_ms,
                 "total_ms": int((t_done - t0) * 1000),
                 "frames": frames,

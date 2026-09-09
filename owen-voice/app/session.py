@@ -160,18 +160,29 @@ class MediaSession:
         handful of turns is coarse, but it is the shape of the distribution that matters here,
         not a precise quantile.
         """
-        firsts = sorted(m.get("first_audio_ms", 0) for m in self.turn_metrics)
-        def pct(p: float) -> int:
-            if not firsts:
+        def _p(key: str, p: float) -> int:
+            vals = sorted(int(m.get(key, 0) or 0) for m in self.turn_metrics)
+            if not vals:
                 return 0
-            i = min(len(firsts) - 1, int(round((len(firsts) - 1) * p)))
-            return int(firsts[i])
+            i = min(len(vals) - 1, int(round((len(vals) - 1) * p)))
+            return vals[i]
+
+        firsts = sorted(int(m.get("first_audio_ms", 0) or 0) for m in self.turn_metrics)
+
+        def pct(p: float) -> int:
+            return _p("first_audio_ms", p)
         rms_avg = (self.rms_sum / self.rms_n) if self.rms_n else 0.0
         return {
             "turns": len(self.turn_metrics),
             "first_audio_ms_p50": pct(0.5),
             "first_audio_ms_p95": pct(0.95),
             "first_audio_ms_max": int(firsts[-1]) if firsts else 0,
+            # WHERE the wait goes. first_audio is what the caller feels; these are its parts,
+            # and they are what says which vendor to change. Medians, because one slow turn
+            # should not redirect the next optimisation.
+            "stt_ms_p50": _p("stt_ms", 0.5),
+            "llm_ms_p50": _p("llm_ms", 0.5),
+            "tts_ms_p50": _p("tts_ms", 0.5),
             # Should be 0. Anything else was audible as a gap inside a word, and is the
             # number that decides whether streaming playout was the right call.
             "underruns": self.underruns,
