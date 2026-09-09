@@ -84,6 +84,35 @@ class LanguageModel(Protocol):
     async def reply(self, system: str, history: list[dict]) -> str: ...
 
 
+# Which output-cap parameter a model wants. OpenAI's GPT-5+ families REJECT `max_tokens`
+# outright -- "Unsupported parameter: 'max_tokens' is not supported with this model. Use
+# 'max_completion_tokens' instead." -- with a 400, which in this pipeline means the reply
+# stream yields nothing and the agent is SILENT for the whole call. The Model field in the
+# agent editor is free text, so simply typing a current model name would have produced a mute
+# agent with no clue why.
+#
+# Every OpenAI-COMPATIBLE third party (MiniMax, DeepSeek, Kimi, aggregators) still wants
+# `max_tokens`, so this cannot be a blanket switch. We guess from the model name, then LEARN
+# from a rejection: the 400 names the parameter, so one swap-and-retry fixes it permanently
+# for that model and the cost is a single wasted request per process, once.
+_MAX_TOKENS = "max_tokens"
+_MAX_COMPLETION = "max_completion_tokens"
+_NEW_PARAM_PREFIXES = ("gpt-5", "gpt-6", "o1", "o3", "o4")
+_token_param_cache: dict[str, str] = {}
+
+
+def _token_param_for(model: str) -> str:
+    m = (model or "").strip().lower()
+    if m in _token_param_cache:
+        return _token_param_cache[m]
+    return _MAX_COMPLETION if m.startswith(_NEW_PARAM_PREFIXES) else _MAX_TOKENS
+
+
+def _wrong_token_param(status: int, body: str) -> bool:
+    """Did the provider reject us specifically over the output-cap parameter?"""
+    return status == 400 and "max_tokens" in body and "max_completion_tokens" in body
+
+
 class OpenAICompatibleLLM:
     """Any OpenAI-compatible /chat/completions endpoint.
 
@@ -116,7 +145,7 @@ class OpenAICompatibleLLM:
             "temperature": settings.LLM_TEMPERATURE,
             # Capped hard: this is speech. A model that decides to produce five paragraphs
             # makes the caller listen to all of it, and pays for TTS on every word.
-            "max_tokens": settings.LLM_MAX_TOKENS,
+            _token_param_for(self.model): settings.LLM_MAX_TOKENS,
         }
         try:
             async with httpx.AsyncClient(timeout=_LLM_TIMEOUT) as c:
@@ -153,7 +182,7 @@ class OpenAICompatibleLLM:
             "model": self.model,
             "messages": messages,
             "temperature": settings.LLM_TEMPERATURE,
-            "max_tokens": settings.LLM_MAX_TOKENS,
+            _token_param_for(self.model): settings.LLM_MAX_TOKENS,
             "stream": True,
         }
         if tools:
@@ -166,8 +195,23 @@ class OpenAICompatibleLLM:
                     json=payload,
                 ) as r:
                     if r.status_code >= 400:
-                        body = (await r.aread())[:200]
-                        logger.warning("llm stream: %s %s", r.status_code, body)
+                        body = (await r.aread())[:300]
+                        text = body.decode("utf-8", "replace") if isinstance(body, bytes) else str(body)
+                        # LEARN the right output-cap parameter rather than going mute. The
+                        # provider's 400 names both spellings, so the correct one is knowable
+                        # from the rejection itself -- and once cached, no later call pays for
+                        # this. Without it, a model whose only sin is being current answers
+                        # every turn with silence.
+                        used = _token_param_for(self.model)
+                        if _wrong_token_param(r.status_code, text):
+                            other = _MAX_COMPLETION if used == _MAX_TOKENS else _MAX_TOKENS
+                            _token_param_cache[(self.model or "").strip().lower()] = other
+                            logger.warning("llm stream: %s wants %s, not %s — retrying and "
+                                           "remembering", self.model, other, used)
+                            async for piece in self.reply_stream(system, history, tools):
+                                yield piece
+                            return
+                        logger.warning("llm stream: %s %s", r.status_code, text[:200])
                         return
                     async for line in r.aiter_lines():
                         if not line or not line.startswith("data:"):
