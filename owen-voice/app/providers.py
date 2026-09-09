@@ -563,8 +563,20 @@ class DeepgramFluxSTT:
                 self._url(),
                 extra_headers={"Authorization": f"Token {settings.DEEPGRAM_API_KEY}"},
                 open_timeout=5,
-                # Our own frames are the liveness signal; Deepgram closes on its own timeout.
-                ping_interval=None,
+                # KEEPALIVE IS REQUIRED, and audio does not count. This was ping_interval=None
+                # on the theory that our own frames were the liveness signal. Deepgram
+                # disagreed, on a live call, 60 seconds in:
+                #
+                #   Error INACTIVE_CLIENT — "The client did not receive a websocket Ping
+                #   message in the last 60 seconds"
+                #
+                # which failed the session and sent the caller to voicemail mid-conversation.
+                # Audio flow is not liveness here: under half duplex we deliberately send
+                # NOTHING while the agent speaks, and a caller who goes quiet after that sends
+                # nothing either, so a perfectly healthy call can be silent for a minute.
+                # 20s gives three pings inside Deepgram's window.
+                ping_interval=20,
+                ping_timeout=20,
                 max_size=None,
             )
         except Exception as exc:  # noqa: BLE001
