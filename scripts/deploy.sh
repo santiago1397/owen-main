@@ -17,6 +17,16 @@ COMPOSE="docker compose -f docker-compose.prod.yml --env-file .env.prod"
 SSH_OPTS="${SSH_OPTS:-}"
 ssh_() { ssh ${SSH_OPTS} "$@"; }
 
+# Gate FIRST, before anything touches the server. Three bugs reached production in the agent
+# build because code was written and never executed once; scripts/check.sh finds that class
+# offline in seconds. SKIP_CHECKS=1 exists for an emergency rollback, not for convenience.
+if [ "${SKIP_CHECKS:-0}" != "1" ]; then
+  echo "==> Pre-deploy checks"
+  bash "$(dirname "$0")/check.sh" || { echo "ERROR: checks failed; refusing to deploy"; exit 1; }
+else
+  echo "==> Pre-deploy checks SKIPPED (SKIP_CHECKS=1)"
+fi
+
 echo "==> Checking SSH alias '${SSH_ALIAS}'"
 ssh_ -o BatchMode=yes "${SSH_ALIAS}" true
 

@@ -71,8 +71,28 @@ function TimelineEvent({ e }: { e: any }) {
 
 function CallDrawer({ id, onClose }: { id: string; onClose: () => void }) {
   const qc = useQueryClient();
-  const { data: c } = useQuery({ queryKey: ["call", id], queryFn: () => api.call(id) });
+  const { data: c, error, isLoading } = useQuery({ queryKey: ["call", id], queryFn: () => api.call(id) });
   const { data: settings } = useQuery({ queryKey: ["settings"], queryFn: api.settings });
+
+  // A failed fetch used to render exactly like a loading one — `if (!c) return null` — so
+  // when GET /api/calls/{id} started 500ing, clicking a call simply did nothing and stayed
+  // that way for five days. Say what happened instead: a broken endpoint should look broken.
+  if (error || isLoading) {
+    return (
+      <>
+        <div className="overlay" onClick={onClose} />
+        <div className="drawer">
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <h3 style={{ margin: 0 }}>Call detail</h3>
+            <button onClick={onClose}>✕</button>
+          </div>
+          {error
+            ? <p className="muted">Could not load this call: {(error as Error).message}</p>
+            : <p className="muted">Loading…</p>}
+        </div>
+      </>
+    );
+  }
   if (!c) return null;
 
   // Ticket 14: outbound "call back" from a caller / missed-call record — prefill the platform
