@@ -125,6 +125,19 @@ class Settings:
     # dsp.Downsampler24to8 from the hot path, and with it a whole class of resampler bug the
     # project has already paid for once (the 3-tap box filter heard as metallic).
     DG_TTS_MODEL: str = _s("VOICE_DG_TTS_MODEL", "aura-2-thalia-en")
+    # OUTPUT LEVEL. Measured on the first live call: the caller's inbound audio peaked at
+    # 32124 (full scale) while Aura-2 came back peaking ~10-12k, RMS about -29 dBFS against a
+    # telephony norm near -20 dBov. The agent was ~9 dB quiet, so the caller heard themselves
+    # loud and the agent thin and distant -- most of what "sounds like a walkie-talkie" is.
+    # 2.2 lifts it without pushing the loudest syllables into the limiter. Set 1.0 to disable.
+    DG_TTS_GAIN: float = float(_s("VOICE_DG_TTS_GAIN", "2.2") or 1.0)
+    # 8000 asks Deepgram to do the downsample; 24000 asks for full band and resamples here
+    # with dsp.Downsampler24to8 (63-tap FIR). Measured on the same sentence, Deepgram's own
+    # 8k left 3.5% of energy above 3.4kHz versus 0.7% through our filter -- suggestive of a
+    # harsher top end, though those were separate synthesis runs so it is not conclusive.
+    # 8000 stays the default because it keeps the resampler out of the hot path (M3); flip to
+    # 24000 to A/B it on a real call, at the cost of some CPU on a box shared with Asterisk.
+    DG_TTS_SAMPLE_RATE: int = _i("VOICE_DG_TTS_SAMPLE_RATE", 8000)
     DG_TTS_URL: str = _s("VOICE_DG_TTS_URL", "wss://api.deepgram.com/v1/speak")
     # REST fallback for the non-streaming synthesize() path (greetings, short fixed prompts).
     DG_TTS_REST_URL: str = _s("VOICE_DG_TTS_REST_URL", "https://api.deepgram.com/v1/speak")

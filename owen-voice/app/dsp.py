@@ -270,3 +270,31 @@ def looks_like_english(text: str, *, min_ratio: float = 0.6) -> bool:
         return False
     latin = sum(1 for c in letters if c.isascii())
     return (latin / len(letters)) >= min_ratio
+
+
+def apply_gain(pcm: bytes, gain: float) -> bytes:
+    """Scale 16-bit LE mono samples by `gain`, saturating rather than wrapping.
+
+    WHY THIS EXISTS. Measured on a live call: the caller's inbound audio peaked at 32124 —
+    essentially full scale — while Aura-2's output peaked around 10-12k with an RMS near
+    -29 dBFS. Telephony speech normally sits about -20 dBov, so the agent was roughly 9 dB
+    quiet. The caller hears themselves loud and the agent thin and far away, which is most of
+    what "sounds like a walkie-talkie" actually is. Loudness is perceived as presence.
+
+    Saturation matters more than it looks: numpy int16 arithmetic WRAPS on overflow, so a
+    sample pushed past 32767 becomes a large negative one — an audible click on every loud
+    syllable, which is worse than the quietness being fixed. Clip in a wider dtype first.
+
+    A flat gain, not a compressor: TTS output level is consistent within a voice, so per
+    utterance normalisation would only introduce pumping between sentences for no benefit.
+    """
+    if gain == 1.0 or not pcm:
+        return pcm
+    try:
+        import numpy as np
+
+        x = np.frombuffer(pcm, dtype="<i2").astype(np.int32)
+        x = np.clip(x * gain, -32768, 32767).astype("<i2")
+        return x.tobytes()
+    except Exception:  # noqa: BLE001 - audio must never raise into a live call
+        return pcm

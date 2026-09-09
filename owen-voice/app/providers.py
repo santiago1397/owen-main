@@ -25,7 +25,8 @@ import httpx
 
 from app.audiosocket import AUDIO_FRAME_BYTES
 from app.config import settings
-from app.dsp import Downsampler24to8, downsample_24k_to_8k, wav_unwrap, wav_wrap
+from app.dsp import (Downsampler24to8, apply_gain, downsample_24k_to_8k, wav_unwrap,
+                     wav_wrap)
 
 logger = logging.getLogger("voice.providers")
 
@@ -378,11 +379,30 @@ class DeepgramTTS:
             return settings.DG_TTS_MODEL
         return chosen or settings.DG_TTS_MODEL
 
+    def _downsampler(self):
+        """A resampler ONLY when we deliberately asked Deepgram for full band. At the default
+        8000 this returns None and the hot path is untouched (M3)."""
+        if int(settings.DG_TTS_SAMPLE_RATE or 8000) == 24000:
+            return Downsampler24to8()
+        return None
+
+    def _gain(self, pcm: bytes) -> bytes:
+        return apply_gain(pcm, float(settings.DG_TTS_GAIN or 1.0))
+
+    def _shape(self, pcm: bytes, whole: bool = False) -> bytes:
+        """Resample if asked for, then lift the level. Order matters: gain last, so the
+        limiter sees the final samples rather than pre-filter ones that the FIR could
+        then push back over full scale."""
+        down = self._downsampler()
+        if down is not None:
+            pcm = down.feed(pcm) + down.flush()
+        return self._gain(pcm)
+
     def _params(self, model: str = "") -> dict:
         return {
             "model": model or settings.DG_TTS_MODEL,
             "encoding": "linear16",
-            "sample_rate": "8000",
+            "sample_rate": str(int(settings.DG_TTS_SAMPLE_RATE or 8000)),
             # Without this Deepgram wraps linear16 in a WAV header, whose length field is only
             # correct once the whole utterance exists -- useless for streaming.
             "container": "none",
@@ -407,7 +427,7 @@ class DeepgramTTS:
             if r.status_code >= 400:
                 logger.warning("dg tts: %s %s", r.status_code, r.text[:200])
                 return b""
-            return r.content
+            return self._shape(r.content, whole=True)
         except Exception as exc:  # noqa: BLE001 - a failed reply must not kill the call
             logger.warning("dg tts: failed: %r", exc)
             return b""
@@ -429,9 +449,21 @@ class DeepgramTTS:
                         body = (await r.aread())[:200]
                         logger.warning("dg tts stream: %s %s", r.status_code, body)
                         return
+                    down = self._downsampler()
                     async for chunk in r.aiter_bytes():
-                        if chunk:
-                            yield chunk
+                        if not chunk:
+                            continue
+                        if down is not None:
+                            chunk = down.feed(chunk)
+                            if not chunk:
+                                continue
+                        out = self._gain(chunk)
+                        if out:
+                            yield out
+                    if down is not None:
+                        tail = self._gain(down.flush())
+                        if tail:
+                            yield tail
         except Exception as exc:  # noqa: BLE001
             logger.warning("dg tts stream: failed: %r", exc)
             return
