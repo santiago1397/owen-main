@@ -55,8 +55,27 @@ class PostgresLogHandler(logging.Handler):
     """Enqueue serious records for the writer thread. Does no I/O itself."""
 
     def __init__(self, service: str, level: int) -> None:
-        super().__init__(level=level)
+        # Attach at the LOWEST level we ever want, and decide per record in filter(). The
+        # handler's own level would otherwise drop call-trace lines before we ever see them.
+        super().__init__(level=logging.NOTSET)
         self.service = service
+        self._min_level = level
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        """WARNING+ as before, PLUS every `call.*` trace line whatever its level.
+
+        `clog()` writes the call lifecycle at INFO -- 59 call sites, each already carrying
+        `linkedid=`, which is the correlation key `app_logs.linkedid` exists to hold. Capturing
+        only WARNING+ meant that whole trace was written to stdout and then thrown away, so the
+        one question worth asking ("what happened on THIS call?") could only be answered by
+        reading container logs by hand, and only until they rotated.
+
+        The volume is bounded: these lines are per call step, not per frame or per packet.
+        """
+        if record.levelno >= self._min_level:
+            return True
+        msg = record.msg
+        return isinstance(msg, str) and msg.startswith("call.")
 
     def emit(self, record: logging.LogRecord) -> None:
         global _dropped
