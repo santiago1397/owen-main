@@ -38,7 +38,7 @@ COLLECTIONS = [
     "/api/campaigns",
     "/api/dashboard/summary?range=last_7d",
     "/api/emails?limit=5",
-    "/api/messages?limit=5",
+    "/api/messages/threads?limit=5",
     "/api/inbox/threads?limit=5",
     "/api/flows",
     "/api/agents",
@@ -48,7 +48,10 @@ COLLECTIONS = [
     "/health",
 ]
 
-OK_NON_200 = {401, 403, 404, 422, 503}
+# 503 only: the telephony surface answers that honestly when ASTERISK_ENABLED is off.
+# A 404 or 405 means THIS FILE has the path wrong, which makes the probe worthless — so it
+# is reported loudly rather than tolerated.
+OK_NON_200 = {503}
 
 
 async def _detail_targets(db) -> list[str]:
@@ -60,9 +63,11 @@ async def _detail_targets(db) -> list[str]:
     )).scalars().first()
     if call_id:
         out.append(f"/api/calls/{call_id}")
+    # No GET /api/numbers/{id} exists — the UI's NumberDetail page composes the list plus
+    # per-number calls, so the meaningful detail probe is the filtered calls query.
     number_id = (await db.execute(select(Number.id).limit(1))).scalars().first()
     if number_id:
-        out.append(f"/api/numbers/{number_id}")
+        out.append(f"/api/calls?number_id={number_id}&limit=5")
     email_id = (await db.execute(select(InboundEmail.id).limit(1))).scalars().first()
     if email_id:
         out.append(f"/api/emails/{email_id}")
@@ -99,7 +104,8 @@ async def main() -> int:
             elif code == 200 or code in OK_NON_200:
                 print(f"  {code}     {path}")
             else:
-                print(f"  {code}?    {path}")
+                print(f"  {code}     {path}   <- unexpected; is the path in this file right?")
+                failures.append(path)
 
     print()
     if failures:
