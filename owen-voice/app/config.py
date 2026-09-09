@@ -144,6 +144,12 @@ class Settings:
     # 8000 stays the default because it keeps the resampler out of the hot path (M3); flip to
     # 24000 to A/B it on a real call, at the cost of some CPU on a box shared with Asterisk.
     DG_TTS_SAMPLE_RATE: int = _i("VOICE_DG_TTS_SAMPLE_RATE", 8000)
+    # PACE. Aura-2 accepts 0.7-1.5 (1.0 = as trained). Pacing is the cheapest naturalness
+    # lever there is on a phone: a shade under 1.0 reads as calm and deliberate, which suits a
+    # receptionist taking details, while anything brisk reads as a recording being rushed
+    # through. It also interacts with latency -- slower speech means the FIRST sentence takes
+    # longer to finish, and time-to-first-audio is measured to its end. Judge it down a phone.
+    DG_TTS_SPEED: float = float(_s("VOICE_DG_TTS_SPEED", "1.0") or 1.0)
     DG_TTS_URL: str = _s("VOICE_DG_TTS_URL", "wss://api.deepgram.com/v1/speak")
     # REST fallback for the non-streaming synthesize() path (greetings, short fixed prompts).
     DG_TTS_REST_URL: str = _s("VOICE_DG_TTS_REST_URL", "https://api.deepgram.com/v1/speak")

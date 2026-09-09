@@ -406,6 +406,8 @@ class DeepgramTTS:
             # Without this Deepgram wraps linear16 in a WAV header, whose length field is only
             # correct once the whole utterance exists -- useless for streaming.
             "container": "none",
+            **({"speed": f"{settings.DG_TTS_SPEED:.2f}"}
+               if abs(float(settings.DG_TTS_SPEED or 1.0) - 1.0) > 1e-6 else {}),
         }
 
     @property
