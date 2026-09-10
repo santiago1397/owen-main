@@ -168,7 +168,11 @@ async def deliver_event(
     if not token:
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, crm_config.REFUSE_NO_TOKEN)
 
-    client = CrmClient(base_url, token, timeout_s=cfg.http_timeout_seconds)
+    # ONE budget for the whole delivery — the lookup AND the POST. See CrmClient: the
+    # worker posts here with a 20s client timeout, and a delivery that overruns it is
+    # retried after the CRM may already have inserted the event.
+    client = CrmClient(base_url, token, timeout_s=cfg.http_timeout_seconds,
+                       budget_s=cfg.http_budget_seconds)
     contact_id, reason = await client.resolve_contact_id(facts.caller_number)
     if contact_id is None:
         logger.warning("crm-link: dropping %s event for call %s — %s",
@@ -350,7 +354,8 @@ async def link_health(
         )
     ).all()
     probe = await CrmClient(cfg.base_url, cfg.token or "probe",
-                            timeout_s=cfg.http_timeout_seconds).probe()
+                            timeout_s=cfg.http_timeout_seconds,
+                            budget_s=cfg.http_budget_seconds).probe()
     return {
         "enabled": cfg.enabled,
         "sms_enabled": cfg.sms_enabled,

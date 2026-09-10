@@ -151,6 +151,27 @@ def test_an_unusable_caller_number_is_refused_immediately():
     check("with a reason", "empty" in reason or "unusable" in reason)
 
 
+def test_one_delivery_is_bounded_by_a_total_budget():
+    """`handle_crm_report` posts to the adapter with a 20s client timeout, and ONE delivery
+    can make five calls out (four lookup renderings plus the event POST). Without a total
+    budget a slow CRM overruns that, the job is retried, and — because POST /api/events
+    always INSERTs — the retry puts a DUPLICATE row on a customer's timeline."""
+    print("a whole delivery is bounded, not just each request:")
+    from app.integrations.crm.client import CrmClient
+
+    client = CrmClient("http://crm:8000", "ghl_pat_test", timeout_s=5.0, budget_s=15.0)
+    check("the per-request timeout sits inside the budget", client.timeout <= client.budget)
+    check("the budget sits inside the worker's 20s client timeout", client.budget < 20.0)
+
+    # Spend the budget, then prove the next request is refused rather than attempted.
+    client._deadline = client._deadline - client.budget - 1.0
+    result = asyncio.run(client._request("GET", "/api/contacts"))
+    check("a request past the deadline is not attempted", result.ok is False)
+    check("and says so", "budget" in result.reason)
+    check("and is RETRYABLE — nothing reached the CRM, so asking again is safe",
+          result.retryable is True)
+
+
 def test_candidate_renderings_are_ordered_narrowest_first():
     print("the narrowest query is tried first, so the usual case ends on one round trip:")
     from app.integrations.crm.client import phone_candidates
@@ -173,5 +194,6 @@ if __name__ == "__main__":
     test_a_rejected_token_and_an_unreachable_crm_are_distinguished()
     test_an_unknown_caller_is_a_normal_outcome()
     test_an_unusable_caller_number_is_refused_immediately()
+    test_one_delivery_is_bounded_by_a_total_budget()
     test_candidate_renderings_are_ordered_narrowest_first()
     print("\nALL CRM CONTACT-LOOKUP CHECKS PASSED")

@@ -273,9 +273,14 @@ class Settings(BaseSettings):
     # Default ring time for a bound DID before the call rolls to voicemail. A binding row may
     # override it per number.
     CRM_LINK_RING_TIMEOUT_SECONDS: int = 25
-    # Ceiling on one HTTP exchange with the CRM. The caller is not waiting on it (delivery is
-    # post-call, through the job queue), so this only bounds a worker job.
-    CRM_LINK_HTTP_TIMEOUT_SECONDS: float = 15.0
+    # Ceiling on ONE HTTP exchange with the CRM, and on a whole delivery. One delivery can
+    # make up to five calls out (four contact-lookup renderings plus the event POST), and
+    # workers/handlers.py::handle_crm_report posts to the adapter with a 20s client
+    # timeout — so the TOTAL budget has to sit inside that, or a slow CRM turns into a
+    # retried job and a duplicate row on a customer timeline (POST /api/events always
+    # INSERTs; it has no dedupe key).
+    CRM_LINK_HTTP_TIMEOUT_SECONDS: float = 5.0
+    CRM_LINK_HTTP_BUDGET_SECONDS: float = 15.0
 
     ANALYSIS_ENGINE: str = "dummy"  # dummy | claude | minimax
     ANTHROPIC_API_KEY: str = ""

@@ -108,7 +108,8 @@ class CrmLinkSettings:
     sms_enabled: bool = False
     max_pstn_legs: int = 2
     ring_timeout_seconds: int = 25
-    http_timeout_seconds: float = 15.0
+    http_timeout_seconds: float = 5.0
+    http_budget_seconds: float = 15.0
 
     # --- the guards -----------------------------------------------------------------------
 
@@ -190,7 +191,10 @@ def settings_view(settings) -> CrmLinkSettings:
         max_pstn_legs=int(getattr(settings, "CRM_LINK_MAX_PSTN_LEGS", 2) or 2),
         ring_timeout_seconds=int(getattr(settings, "CRM_LINK_RING_TIMEOUT_SECONDS", 25) or 25),
         http_timeout_seconds=float(
-            getattr(settings, "CRM_LINK_HTTP_TIMEOUT_SECONDS", 15.0) or 15.0
+            getattr(settings, "CRM_LINK_HTTP_TIMEOUT_SECONDS", 5.0) or 5.0
+        ),
+        http_budget_seconds=float(
+            getattr(settings, "CRM_LINK_HTTP_BUDGET_SECONDS", 15.0) or 15.0
         ),
     )
 

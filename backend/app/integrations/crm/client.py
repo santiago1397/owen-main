@@ -44,6 +44,7 @@ wrong person by name.
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass
 from typing import Any, Optional
 
@@ -110,12 +111,32 @@ def phone_candidates(number: str) -> list[str]:
 
 class CrmClient:
     """One CRM, one machine token. Construct per request — httpx clients are cheap and a
-    long-lived one would outlive a token rotation."""
+    long-lived one would outlive a token rotation.
 
-    def __init__(self, base_url: str, token: str, *, timeout_s: float = 15.0) -> None:
+    ## The total budget, and why it is not optional
+
+    `workers/handlers.py::handle_crm_report` posts to this module's adapter with
+    `httpx.AsyncClient(timeout=20)`. One delivery can make up to FIVE calls out to the CRM
+    (four contact-lookup renderings plus the event POST), so a per-request timeout alone is
+    not a bound: at 15s each, a slow CRM would blow through the worker's 20s and the job
+    would be retried — after the CRM may already have recorded the event. `POST /api/events`
+    always INSERTS (it has no dedupe on `provider_ref`), so that retry is a duplicate row on
+    a customer's timeline.
+
+    So the whole delivery gets ONE budget, and each request takes the smaller of its own
+    timeout and what is left of it. `budget_s` defaults comfortably inside the worker's 20s.
+    """
+
+    def __init__(self, base_url: str, token: str, *, timeout_s: float = 5.0,
+                 budget_s: float = 15.0) -> None:
         self.base = str(base_url or "").rstrip("/")
         self.token = str(token or "")
-        self.timeout = float(timeout_s or 15.0)
+        self.timeout = float(timeout_s or 5.0)
+        self.budget = float(budget_s or 15.0)
+        self._deadline = time.monotonic() + self.budget
+
+    def _remaining(self) -> float:
+        return self._deadline - time.monotonic()
 
     def _headers(self) -> dict[str, str]:
         # Bearer, per ghl-clone `auth.current_principal`: a header beginning `ghl_pat_` is
@@ -127,9 +148,17 @@ class CrmClient:
             return CrmResult(False, 0, "no CRM base URL configured")
         if not self.token:
             return CrmResult(False, 0, "no CRM token configured")
+        remaining = self._remaining()
+        if remaining <= 0:
+            # Reported as a transport failure (status 0), which `CrmResult.retryable` treats
+            # as retryable — the right answer: we never reached the CRM, so nothing was
+            # recorded and asking again is safe.
+            logger.warning("crm-link: %s %s skipped — the %.0fs delivery budget is spent",
+                           method, path, self.budget)
+            return CrmResult(False, 0, "delivery budget exhausted before the request")
         url = f"{self.base}{path}"
         try:
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
+            async with httpx.AsyncClient(timeout=min(self.timeout, remaining)) as client:
                 resp = await client.request(method, url, headers=self._headers(), **kwargs)
         except Exception as exc:  # noqa: BLE001 - transport failure is retryable, not fatal
             logger.warning("crm-link: %s %s failed: %r", method, url, exc)
