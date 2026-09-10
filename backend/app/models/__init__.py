@@ -31,6 +31,11 @@ from app.models.models import (
     User,
 )
 
+# Integration tables live with their integration, but Alembic only sees what is
+# registered on Base.metadata by `import app.models` (see alembic/env.py). Without this
+# line the next --autogenerate would emit `DROP TABLE crm_links`.
+from app.integrations.crm.models import CrmLink  # noqa: E402,F401
+
 __all__ = [
     "Agent",
     "ApiKey",
@@ -48,6 +53,7 @@ __all__ = [
     "CallEvent",
     "Campaign",
     "ContactNote",
+    "CrmLink",
     "ContactThreadState",
     "Flow",
     "FlowVersion",

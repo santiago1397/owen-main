@@ -275,10 +275,12 @@ def test_regressions():
           hasattr(deps, "usage_middleware"))
     src = pathlib.Path(deps.__file__).read_text(encoding="utf-8")
     # Widened to the agent-runtime write surface too (AI_AGENT_SPEC D13): auditing every read
-    # and none of the writes would be exactly backwards. Still scoped to the two API-key
-    # surfaces, so no other route pays for it.
+    # and none of the writes would be exactly backwards. Widened again to /api/crm-link
+    # (app/integrations/crm/), which can place a call and send a text from a real business
+    # line — if anything belongs in the audit trail, that does. Still scoped to the three
+    # API-key surfaces, so no other route pays for it.
     check("...scoped to the API-key surfaces so it never touches other routes",
-          'startswith(("/api/ai", "/api/agent-runtime"))' in src)
+          'startswith(("/api/ai", "/api/agent-runtime", "/api/crm-link"))' in src)
     check("...and skips requests a route already recorded (no double-count)",
           "ai_usage_recorded" in src)
     import app.main as main_mod

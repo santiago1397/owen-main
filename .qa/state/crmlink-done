@@ -1,0 +1,973 @@
+# CRM LINK — PHASE 1, VOICE — build report
+
+Branch: **feature/crm-link** (cut from origin/main @ 1ce828d)
+Built: 2026-09-10. Not deployed. Nothing was pushed, no ssh, no production contact.
+
+The whole module is **dark by default**. `CRM_LINK_ENABLED=false` is the shipped default and
+nothing in this branch does anything until it is flipped AND a number is explicitly bound.
+
+**Your amendment about the database is answered in §4.** Short version: the migration is
+`CREATE TABLE crm_links` + `CREATE INDEX` and nothing else — no ALTER, no DROP, no UPDATE, no
+backfill, no existing table touched in any way — and §4.2 proves it mechanically with a
+harness you can re-run yourself.
+
+---
+
+## 1. COMMITS
+
+| sha | subject |
+|---|---|
+| `26d9dc1` | CRM link: the config kernel, the bound-number table, and its migration |
+| `f80d6b4` | CRM link: the hybrid ring group, and the one line on the call path |
+| `a9d7551` | CRM link: deliver events to the CRM, and let the CRM call and text back |
+| `8af12e7` | CRM link: bind and unbind numbers from the shell, with no deploy |
+| `93c7c99` | CRM link: do not split the destination allowlist on whitespace |
+| `ceadb12` | CRM link: tests — isolation, the ring group, the guards, and the CRM contract |
+| `0deee92` | CRM link: bound the whole delivery, not just each request to the CRM |
+| `34f5be1` | CRM link: map the unwired agent seam's outcomes before it is wired |
+| `ac1c286` | CRM link: keep the Ticket-18 comment attached to the code it describes |
+| `ca58b5f` | CRM link: the build report |
+| `887623b` | CRM link: make the crm_links FK ON DELETE CASCADE, and prove the migration is additive |
+
+`93c7c99`, `0deee92` and `34f5be1` are bugs I found in my own code while testing it. They are
+separate commits so you can see what changed and why rather than finding it folded into a
+feature commit.
+
+`887623b` is the response to your amendment about the database. **§4 is the section to read
+for that**, and §4.0 answers the question directly in one word.
+
+---
+
+## 2. EVERY FILE OUTSIDE THE NEW MODULE THAT I TOUCHED, AND EXACTLY WHY
+
+The new module is `backend/app/integrations/crm/` (11 files) plus its Alembic revision and
+five test files. Everything else I touched is listed here. There are **six** source files,
+and one existing test.
+
+### 2.1 `backend/app/flows/runtime.py` — **the only call-path change. Review this one hardest.**
+
+Nine lines added inside the EXISTING `if not assigned:` branch of `run_flow_for_stasis` —
+the branch that already means "this DID has no flow, run the built-in default":
+
+```python
+    if not assigned:
+        from app.integrations.crm import hook as crm_hook
+
+        if await crm_hook.handle_bound_inbound(ari, channel_id, lid, str(dialed), caller_number):
+            return
+
+        clog(logger, "route", linkedid=lid, mode="default_handling", dialed=dialed)
+        await _handle_unassigned(ari, channel_id, lid, str(dialed), caller_number)
+        return
+```
+
+(the rest of the nine lines is the comment explaining it)
+
+**Why this is a no-op with the link disabled.** `hook.handle_bound_inbound` calls
+`config.link_enabled()` first, which reads one boolean. False → `return False` → the very
+next line is the unchanged `_handle_unassigned` call. No database session is opened, no
+import beyond the hook module, no log line. The disabled system does *strictly less* work
+than today's, not merely equivalent work.
+
+**Why nothing else can reach it.**
+* A DID with a flow assigned never enters this branch — `assigned` is True — so every
+  configured flow is untouched, byte for byte.
+* The Ticket-15.6 fallback-forward branch (`resolved is None`) is below and untouched.
+* An unbound DID gets `False` from the second check (`binding.resolve` → None).
+
+**Why the hook cannot strand a caller.** `hook.py` is total. Everything up to and including
+the binding lookup is inside a `try` whose `except` returns False — a bad import, a dead
+database, a malformed config value all mean "not mine, carry on". Past the point where the
+binding resolves it returns **True whatever happens**, deliberately: returning False after
+the handler had already answered the caller would run `_handle_unassigned` on the same
+channel and play a consent notice and a voicemail greeting over a call in progress.
+
+**Placement judgement:** the hook fires only for a DID with **no flow assigned**. See §5.1.
+
+### 2.2 `backend/app/main.py` — one import, one `include_router`
+
+```python
+from app.integrations.crm import api as crm_link_api
+...
+app.include_router(crm_link_api.router)
+```
+
+Four new paths, all under `/api/crm-link`, all API-key-authed, all answering **503 before
+reading anything** while `CRM_LINK_ENABLED` is false. Mounting the router changes no existing
+route and adds no middleware.
+
+### 2.3 `backend/app/models/__init__.py` — one import + one `__all__` entry
+
+`alembic/env.py` builds `target_metadata` from `import app.models`. My table is declared in
+the module (`integrations/crm/models.py`), so without this line **the next
+`alembic revision --autogenerate` would emit `DROP TABLE crm_links`**. Verified: with the
+import in place, autogenerate reports no `crm_links` diff at all (§4.4).
+
+### 2.4 `backend/app/core/config.py` — the `CRM_LINK_*` settings
+
+Nine new `Settings` fields, every one defaulting to off or empty (`CRM_LINK_ENABLED: bool =
+False`). No existing setting's name, type or default was changed. Full list in §6.
+
+### 2.5 `backend/app/core/apikeys.py` — one new scope, `crm_link`
+
+A constant and a one-line `SCOPES` entry. Additive: no existing scope's meaning changed, and
+no key gains anything (`DEFAULT_SCOPES` is untouched).
+
+**Why a new scope rather than reusing `agent_write`.** `agent_write` is documented in
+`SCOPES` — text a machine consumer reads to teach itself the API — as *"WRITE captures and
+notes via /api/agent-runtime/*"*. Authorising "place a telephone call from a real business
+line" with it would make that description false. This is the same objection
+`api/agent_runtime.py` raises, at length, about bolting writes onto the read-only `/api/ai`
+surface, so I followed the precedent rather than arguing with it.
+
+### 2.6 `backend/app/api/ai/deps.py` — one tuple entry in `usage_middleware`
+
+`/api/crm-link` added to the audited path prefixes. A surface that can place a call and send
+a text belongs in `api_key_usage` more than the read endpoints already there. It is a
+prefix test — every other route still short-circuits on the first line as before.
+
+### 2.7 `backend/tests/test_ai_api.py` — one assertion literal + its comment
+
+`test_regressions` asserts the audit middleware's path scope as a **source literal**:
+`'startswith(("/api/ai", "/api/agent-runtime"))' in src`. §2.6 legitimately widened that
+scope, so the literal had to be updated. The comment above it already recorded one earlier
+widening for the same reason; this is the second, and it says so.
+
+I also deliberately kept the tuple in `deps.py` on ONE line, so a future reformat cannot
+silently void that assertion by wrapping it.
+
+**This is the only pre-existing test I changed.** It was failing (and only failing) because
+of my change, and the fix is to the assertion's expected value, not to what it asserts.
+
+### 2.8 `.env.prod.example` — a new documented section (78 lines, appended)
+
+Every `CRM_LINK_*` variable with its default, plus the two things that fail confusingly if
+you get them wrong (§6, §7).
+
+### 2.9 `backend/alembic/versions/e1c7b4a90d63_crm_links.py` — new revision
+
+Down-revision `c3e6a9d1f725` (`call_charges`, the head at the time). `CREATE TABLE` +
+`CREATE INDEX` and nothing else — **no existing table is touched in any way**. Hand-written,
+not autogenerated. Proven mechanically; full text, proof output and the autogenerate
+rejection are in §4.
+
+### 2.10 Five new test files in `backend/tests/`
+
+`test_crm_link_isolation.py`, `test_crm_hybrid_ring.py`, `test_crm_link_guards.py`,
+`test_crm_event_payload.py`, `test_crm_contact_lookup.py`. Picked up automatically by
+`scripts/check.sh`'s `for t in backend/tests/test_*.py` loop.
+
+### 2.10b `.qa/proof/prove_additive.sh` — new, re-runnable proof harness
+
+Not application code and not on any import path. It exists so you can re-run the
+"is the migration additive?" proof yourself rather than take my word for it. See §4.2.
+
+### 2.11 What I deliberately did NOT touch
+
+* **`docker-compose.prod.yml`** — see §5.2. I found a real reachability problem and solved it
+  without a compose change.
+* **`workers/handlers.py`** — reused `handle_crm_report` exactly as it is. No new job type.
+* **`providers/asterisk_client.py`** — `ring_and_bridge`, `dial_operator`, `dial_number` and
+  `run_outbound_call` are all unmodified. The hybrid ring is a new function that *calls* the
+  same primitives.
+* **`flows/interpreter.py`**, `webhooks/`, `services/ingestion.py`, the frontend, `Makefile`,
+  `scripts/`.
+* **`frontend/src/pages/ApiKeys.tsx`** — its scope checkbox list (`SCOPE_HELP`) is hardcoded
+  and *already* omits the existing `agent_write` scope, so `crm_link` is mintable the same
+  way `agent_write` is: `make issue-key n=ghl-clone s='crm_link'`. Adding it to the UI would
+  be scope creep, and I could not run `tsc` to verify a frontend change (see §8.3).
+
+---
+
+## 3. TEST COMMANDS AND RESULTS
+
+### 3.1 The repo's own gate
+
+```
+$ bash scripts/check.sh
+```
+
+**Full output (exit 0):**
+
+```
+==> pyflakes (undefined names, unreachable imports)
+    clean
+
+==> backend tests
+    ok   test_agent_config_limits      ok   test_flow_versioning
+    ok   test_ai_agent_node            ok   test_health_telephony
+    ok   test_ai_api                   ok   test_inbox_threads
+    ok   test_ai_cost                  ok   test_job_detection
+    ok   test_asterisk_ingestion       ok   test_menu_prompt_timing
+    ok   test_asterisk_recordings      ok   test_merge_channels
+    ok   test_billing                  ok   test_number_flow_assignment
+    ok   test_bulkvs_messages          ok   test_number_match
+    ok   test_bulkvs_outbound          ok   test_number_sync
+    ok   test_caller_context           ok   test_openai_realtime_agent
+    ok   test_consent_playback_race    ok   test_outbound_call
+    ok   test_crm_contact_lookup       ok   test_ownership
+    ok   test_crm_event_payload        ok   test_play_node_consent
+    ok   test_crm_hybrid_ring          ok   test_transfer_allowlist
+    ok   test_crm_link_guards          ok   test_tts_prompts
+    ok   test_crm_link_isolation       ok   test_voice_agent_seam
+    ok   test_dial_hangup_forensics    ok   test_webrtc_credentials
+    ok   test_dial_record_bridge
+    ok   test_dispatch_email
+    ok   test_flow_dtmf
+    ok   test_flow_interpreter
+    ok   test_flow_library
+    ok   test_flow_validator
+    ok   test_flow_variables
+
+==> owen-voice tests
+    ok   test_agent_metrics    ok   test_dsp
+    ok   test_audiosocket      ok   test_flux_turns
+    ok   test_custom_tool_headers
+
+==> frontend typecheck
+    node_modules absent — skipped (run npm ci in frontend/ to enable)
+
+All checks passed.
+```
+
+(the two columns above are wrapped for width; the real run prints one per line)
+
+**A baseline was established first.** I stashed my changes and ran the same command on clean
+`origin/main` — 41 backend + 5 owen-voice tests, all green — so "all checks passed" here
+means *no regression*, not "the suite happens to pass". The frontend typecheck is skipped in
+both runs for the same reason (see §8.3).
+
+### 3.2 The individual new suites
+
+```
+$ cd backend && python -m tests.test_crm_link_isolation     # 14 assertions, PASSED
+$ cd backend && python -m tests.test_crm_hybrid_ring        # 36 assertions, PASSED
+$ cd backend && python -m tests.test_crm_link_guards        # 43 assertions, PASSED
+$ cd backend && python -m tests.test_crm_event_payload      # 65 assertions, PASSED
+$ cd backend && python -m tests.test_crm_contact_lookup     # 34 assertions, PASSED
+```
+
+192 assertions. What each covers, mapped to what you asked for:
+
+| you asked for | where |
+|---|---|
+| an UNBOUND number's path is unchanged, enabled AND disabled | `test_crm_link_isolation::test_unbound_path_identical_enabled_and_disabled` |
+| with `CRM_LINK_ENABLED=false`, none of my code runs | `test_crm_link_isolation::test_kill_switch_short_circuits_before_the_database` |
+| the ring group originates all legs, first answer bridged, rest torn down | `test_crm_hybrid_ring::test_all_legs_are_originated_together`, `::test_first_to_answer_is_bridged_and_the_rest_are_torn_down` |
+| no answer on any leg falls through to voicemail | `test_crm_link_guards::test_no_answer_falls_through_to_voicemail`, `::test_a_failed_ring_also_reaches_voicemail` |
+| a destination not on the allowlist is refused, nothing dialled or sent | `test_crm_link_guards::test_allowlist_refuses_anything_not_on_it`, `::test_pstn_ring_legs_are_filtered_and_capped` |
+| the CRM payload contains what `/api/events` actually expects | `test_crm_event_payload` (all of it) |
+| outbound call and SMS refuse when the kill switch is off | `test_crm_link_guards::test_outbound_call_and_sms_refuse_while_the_kill_switch_is_off` |
+
+**How the isolation test works, because it is the one that matters.** It drives the REAL
+`flows/runtime.py::run_flow_for_stasis` — the function the ARI consumer calls on every
+inbound call — against a fake ARI that records the operation sequence, in three worlds:
+module off, module on with the DID unbound, module on with the DID **bound**. It asserts the
+first two produce a **byte-for-byte identical operation sequence** and that the third
+differs. The third is a negative control: without it every other assertion would pass while
+the module did nothing at all.
+
+The kill-switch assertion **counts calls to `SessionLocal`** — zero with the switch off, at
+least one with it on — rather than asserting the hook returned False. "It returned False"
+proves nothing, because the hook's blanket `except` returns False for any reason whatsoever.
+
+`test_crm_event_payload` additionally re-derives the CRM contract from **the CRM's own
+source**: it parses `ghl-clone/backend/app/main.py` with `ast` (stdlib — the CRM has its own
+virtualenv and is not importable from OWEN) and cross-checks `EventIngest`'s fields,
+`CALL_STATUSES` and the accepted event types against this module's constants, failing if we
+send any key the CRM does not declare. It ran and passed against the real source at
+`/home/qa/ghl-clone`. It skips loudly if that source is absent; `$GHL_CLONE_PATH` overrides
+where it looks.
+
+### 3.3 Environment note about `scripts/check.sh` (not a repo bug, but you will hit it)
+
+The script resolves its interpreter as `PY="${PY:-python}"` and then invokes `"../$PY"` from
+`backend/`, so it expects a **relative** venv path — it is written for `backend/.venv/bin/python`.
+This sandbox had no `python` on `$PATH` (only `python3`) and no venv, so every test "failed"
+with `../python: No such file or directory` before I had run anything.
+
+I created `backend/.venv` (gitignored) and `pip install -r backend/requirements.txt
+-r backend/requirements-dev.txt` into it. **Nothing about the script or the repo was
+changed.** On your machine, where that venv presumably already exists, `make check` works as
+it always has. I mention it only so the command in §3.1 reproduces.
+
+---
+
+## 4. THE MIGRATION — STRICTLY ADDITIVE, AND PROVEN
+
+> **Owner amendment, 2026-09-10:** *"just make sure we do not override the database, i just
+> want to add this new functionalities for the integration, nothing more."*
+>
+> owen-main applies migrations **automatically at app startup** (`backend/app/migrate.py`,
+> behind a `pg_advisory_lock`). There is no human gate. So this revision **will run against
+> the live phone-system database** the next time the app is deployed and restarted, and it is
+> written and tested as though that has already happened.
+
+### 4.0 THE PLAIN ANSWER: is any existing table touched in any way?
+
+**No.**
+
+* No `ALTER` on any existing table. Not a column added, renamed, retyped or dropped.
+* No `DROP` of anything — no table, column, index or constraint.
+* No `UPDATE`, no `DELETE`, no backfill, no data migration. Existing rows are byte-for-byte
+  untouched, and that is asserted by checksum, not by inspection.
+* No constraint is added to any existing table. The one foreign key points **FROM** the new
+  `crm_links` **TO** `numbers`, so it lives on the new table.
+* `downgrade()` drops only `crm_links` and its index.
+
+The revision is `CREATE TABLE` + `CREATE INDEX`, and nothing else. It is **hand-written**,
+not autogenerated — see §4.4 for what autogenerate wanted to do and why I refused it.
+
+### 4.1 The full text of the migration
+
+`backend/alembic/versions/e1c7b4a90d63_crm_links.py`, quoted whole so you can read it without
+checking out the branch:
+
+```python
+"""crm_links — which DID is bound to the CRM, and what its hybrid ring group rings
+
+Purely additive. It creates ONE new table and touches no existing table's schema or data,
+so applying it changes the behaviour of nothing: with no rows in `crm_links`, every number
+resolves to "not bound" and every call path runs exactly as it did before.
+
+Every non-nullable column carries a `server_default`, so the migration is safe to apply to a
+live database with the old code still running (the old code does not know these columns
+exist and will never supply them).
+
+`enabled` defaults to FALSE deliberately. Creating a binding and switching it on are two
+separate, deliberate acts — the numbers involved ring in a real business.
+
+`number_id` is UNIQUE, so a DID can never have two bindings and "which CRM link owns this
+number?" cannot have two answers at call time.
+
+Revision ID: e1c7b4a90d63
+Revises: c3e6a9d1f725
+Create Date: 2026-09-10 00:00:00.000000
+"""
+from alembic import op
+import sqlalchemy as sa
+from sqlalchemy.dialects import postgresql
+
+revision = 'e1c7b4a90d63'
+down_revision = 'c3e6a9d1f725'
+branch_labels = None
+depends_on = None
+
+
+def upgrade() -> None:
+    op.create_table(
+        'crm_links',
+        sa.Column('id', sa.UUID(), nullable=False),
+        sa.Column('number_id', sa.UUID(), nullable=False),
+        # The per-number opt-in, under the global CRM_LINK_ENABLED kill switch.
+        sa.Column('enabled', sa.Boolean(), nullable=False, server_default=sa.false()),
+        # --- the hybrid ring group ---
+        sa.Column('ring_operators', sa.Boolean(), nullable=False, server_default=sa.true()),
+        # '[]' = every operator whose softphone is currently REGISTERED.
+        sa.Column('operator_ids', postgresql.JSONB(astext_type=sa.Text()), nullable=False,
+                  server_default=sa.text("'[]'::jsonb")),
+        # Up to CRM_LINK_MAX_PSTN_LEGS E.164 numbers, re-checked against the allowlist at
+        # call time — a row here is routing intent, never a permission.
+        sa.Column('pstn_numbers', postgresql.JSONB(astext_type=sa.Text()), nullable=False,
+                  server_default=sa.text("'[]'::jsonb")),
+        sa.Column('ring_timeout_seconds', sa.Integer(), nullable=True),
+        # --- the CRM this number reports to ---
+        sa.Column('crm_base_url', sa.String(), nullable=True),
+        # The NAME of an environment variable, never a token. A `ghl_pat_...` in a column
+        # would be readable by the `owen_ro` role behind /api/ai/query and would ride into
+        # every pg_dump.
+        sa.Column('crm_token_env', sa.String(), nullable=True),
+        sa.Column('outbound_operator', sa.String(), nullable=True),
+        sa.Column('note', sa.String(), nullable=True),
+        sa.Column('created_at', sa.DateTime(timezone=True),
+                  server_default=sa.text('now()'), nullable=False),
+        sa.Column('updated_at', sa.DateTime(timezone=True),
+                  server_default=sa.text('now()'), nullable=False),
+        # ON DELETE CASCADE so a DELETE on `numbers` that works today cannot newly FAIL
+        # because of a row in THIS table. The constraint lives on crm_links; nothing is
+        # added to `numbers`.
+        sa.ForeignKeyConstraint(['number_id'], ['numbers.id'], ondelete='CASCADE'),
+        sa.PrimaryKeyConstraint('id'),
+        sa.UniqueConstraint('number_id', name='uq_crm_link_number'),
+    )
+    op.create_index(op.f('ix_crm_links_number_id'), 'crm_links', ['number_id'], unique=False)
+
+
+def downgrade() -> None:
+    op.drop_index(op.f('ix_crm_links_number_id'), table_name='crm_links')
+    op.drop_table('crm_links')
+```
+
+That is the entire file. Two statements in `upgrade()`, two in `downgrade()`.
+
+### 4.2 THE PROOF — mechanical, and re-runnable by you
+
+Committed as **`.qa/proof/prove_additive.sh`**. Run it yourself:
+
+```
+$ bash .qa/proof/prove_additive.sh
+```
+
+It stands up a **throwaway PostgreSQL 18 cluster on port 55432** (never the live cluster on
+5432 — I have no credentials for that and did not look for any), migrates to
+`c3e6a9d1f725` (the revision immediately *before* mine), seeds real rows into `providers`,
+`campaigns`, `numbers`, `callers` and `calls`, snapshots the schema, applies **only**
+`e1c7b4a90d63`, snapshots again, and asserts the difference mechanically.
+
+**Full output:**
+
+```
+=== 1. throwaway cluster (port 55432 — NOT the live cluster on 5432) ===
+  [PASS] cluster up on 55432
+
+=== 2. upgrade to c3e6a9d1f725 (the revision immediately before crm_links) ===
+  [PASS] at c3e6a9d1f725
+  [PASS] crm_links does not exist yet
+
+=== 3. seed existing tables, so 'existing rows untouched' can be proven too ===
+  [PASS] seeded providers/campaigns/numbers/callers/calls
+  [PASS] row checksum before: 78c34756f18e3a4630fd9d23d83305b5
+
+=== 4. snapshot BEFORE ===
+  [PASS] catalogue: 610 objects   pg_dump: 1553 lines
+
+=== 5. alembic upgrade head (applies ONLY e1c7b4a90d63) ===
+  Running upgrade c3e6a9d1f725 -> e1c7b4a90d63, crm_links
+  [PASS] at e1c7b4a90d63 (head)
+
+=== 6. snapshot AFTER ===
+  [PASS] catalogue: 638 objects   pg_dump: 1605 lines
+
+=== 7. catalogue diff, asserted mechanically ===
+  [PASS] ZERO catalogue objects removed or changed
+  [PASS] all 28 added objects belong to crm_links and nothing else
+  [PASS] no constraint added to public.numbers (the FK lives on crm_links)
+  [PASS] pg_dump agrees: zero lines removed
+  [PASS] no ALTER or DROP against any pre-existing object
+
+=== 8. existing ROWS untouched ===
+  [PASS] row checksum identical: 78c34756f18e3a4630fd9d23d83305b5
+  [PASS] crm_links created EMPTY (no backfill, no data migration)
+
+=== 9. downgrade drops ONLY crm_links ===
+  [PASS] post-downgrade catalogue is IDENTICAL to before
+  [PASS] post-downgrade pg_dump is BYTE-IDENTICAL to before
+  [PASS] rows still identical after downgrade
+
+PROOF PASSED — revision e1c7b4a90d63 is strictly additive.
+```
+
+**Objects removed or changed: ZERO.** **Objects added: 28, every one of them `crm_links`:**
+
+```
+TABLE       crm_links
+COLUMN      crm_links.id                   :: uuid                     null=NO  default=-
+COLUMN      crm_links.number_id            :: uuid                     null=NO  default=-
+COLUMN      crm_links.enabled              :: boolean                  null=NO  default=false
+COLUMN      crm_links.ring_operators       :: boolean                  null=NO  default=true
+COLUMN      crm_links.operator_ids         :: jsonb                    null=NO  default='[]'::jsonb
+COLUMN      crm_links.pstn_numbers         :: jsonb                    null=NO  default='[]'::jsonb
+COLUMN      crm_links.ring_timeout_seconds :: integer                  null=YES default=-
+COLUMN      crm_links.crm_base_url         :: character varying        null=YES default=-
+COLUMN      crm_links.crm_token_env        :: character varying        null=YES default=-
+COLUMN      crm_links.outbound_operator    :: character varying        null=YES default=-
+COLUMN      crm_links.note                 :: character varying        null=YES default=-
+COLUMN      crm_links.created_at           :: timestamp with time zone null=NO  default=now()
+COLUMN      crm_links.updated_at           :: timestamp with time zone null=NO  default=now()
+CONSTRAINT  crm_links :: crm_links_pkey                     :: PRIMARY KEY (id)
+CONSTRAINT  crm_links :: uq_crm_link_number                 :: UNIQUE (number_id)
+CONSTRAINT  crm_links :: crm_links_number_id_fkey           :: FOREIGN KEY (number_id)
+                                                               REFERENCES numbers(id) ON DELETE CASCADE
+CONSTRAINT  crm_links :: crm_links_id_not_null              :: NOT NULL id
+CONSTRAINT  crm_links :: crm_links_number_id_not_null       :: NOT NULL number_id
+CONSTRAINT  crm_links :: crm_links_enabled_not_null         :: NOT NULL enabled
+CONSTRAINT  crm_links :: crm_links_ring_operators_not_null  :: NOT NULL ring_operators
+CONSTRAINT  crm_links :: crm_links_operator_ids_not_null    :: NOT NULL operator_ids
+CONSTRAINT  crm_links :: crm_links_pstn_numbers_not_null    :: NOT NULL pstn_numbers
+CONSTRAINT  crm_links :: crm_links_created_at_not_null      :: NOT NULL created_at
+CONSTRAINT  crm_links :: crm_links_updated_at_not_null      :: NOT NULL updated_at
+INDEX       crm_links :: crm_links_pkey        :: CREATE UNIQUE INDEX ... USING btree (id)
+INDEX       crm_links :: uq_crm_link_number    :: CREATE UNIQUE INDEX ... USING btree (number_id)
+INDEX       crm_links :: ix_crm_links_number_id:: CREATE INDEX ... USING btree (number_id)
+```
+
+Every non-nullable column has a `server_default`, which is what makes it safe to apply while
+the *old* code is still running: the old code does not know these columns exist and will
+never supply them. Proven directly by inserting a row that supplies only `id` and
+`number_id`:
+
+```
+ enabled | ring_operators | operator_ids | pstn_numbers | has_created
+---------+----------------+--------------+--------------+-------------
+ f       | t              | []           | []           | t
+```
+
+**Why the proof compares the catalogue rather than grepping `pg_dump` text.** PostgreSQL 18
+emits a random `\restrict <nonce>` header on every dump, so two dumps of an *identical*
+database never match textually; and a line-by-line grep cannot tell that `    id uuid NOT
+NULL,` belongs to `crm_links` rather than to something that already existed. Comparing the
+catalogue compares the actual objects, each already labelled with the table it belongs to.
+My first harness got both of those wrong and reported false failures; §4.2 is the corrected
+version, and the false failures are why I am telling you how it works rather than just
+showing you a row of PASSes.
+
+### 4.3 The one foreign key, and why it is `ON DELETE CASCADE`
+
+The FK points **from** `crm_links` **to** `numbers`. The constraint object lives on
+`crm_links` — the proof asserts specifically that nothing was added to `public.numbers`.
+
+But a foreign key still has an *effect* on the referenced table: with the default
+`NO ACTION`, a `DELETE FROM numbers` that works today would newly **fail** because of a row
+in my table. That is an integration making an existing operation start erroring, which is
+exactly what this branch is not allowed to do. So the FK is `ON DELETE CASCADE`: deleting a
+number simply drops its now-meaningless binding.
+
+Not theoretical — measured both ways on the throwaway database:
+
+```
+with NO ACTION (the counterfactual):
+  ERROR:  update or delete on table "numbers" violates foreign key constraint
+          "crm_links_number_id_fkey" on table "crm_links"
+
+with ON DELETE CASCADE (what shipped):
+  DELETE SUCCEEDED — the number was deleted and its binding cascaded away
+```
+
+Context that makes this mostly moot but worth knowing: a number with **any** call history is
+already undeletable, because the pre-existing `calls_number_id_fkey` blocks it first. So this
+only ever mattered for a number with no calls at all. CASCADE costs nothing and closes the
+case completely.
+
+Nothing hard-deletes a `numbers` row today in any case — the BulkVS sync is add-only +
+soft-release (`released_at` set, row never deleted), and `grep` finds no `delete(Number)`
+anywhere in `backend/app`.
+
+### 4.4 WHAT AUTOGENERATE WANTED TO DO, AND WHY I REFUSED IT
+
+This is the case the amendment warned about, and it is real here. Run against a
+fully-migrated database, `alembic revision --autogenerate` proposes:
+
+```python
+op.alter_column('billing_adjustments', 'created_at', nullable=False, ...)
+op.alter_column('billing_rates', 'updated_at', nullable=False, ...)
+op.alter_column('call_charges', 'created_at', nullable=False, ...)
+op.drop_index('ix_call_charges_agent_version', table_name='call_charges')
+op.drop_index('ix_call_charges_provenance', table_name='call_charges')
+```
+
+Three `ALTER`s on existing tables and two dropped indexes. **None of it is mine** — it is
+pre-existing drift between the billing / `call_charges` models and their own migrations, from
+before this branch. Notably, autogenerate reports **no `crm_links` diff at all**, which
+independently confirms my hand-written revision and my model agree exactly.
+
+I refused it, wrote the revision by hand, and did **not** "fix" the drift. Two reasons:
+
+1. It is not mine, and quietly folding an unrelated schema repair into a CRM branch is how a
+   reviewer stops being able to tell what a branch actually does.
+2. On *this* deployment it is genuinely dangerous. `SET NOT NULL` takes an `ACCESS EXCLUSIVE`
+   lock and does a full table scan, and it **fails outright if any existing row holds a
+   NULL** in that column. That failure would happen inside `run_migrations()` at app startup,
+   behind the advisory lock, **before the app serves a single call** — i.e. the phone system
+   does not come back up after a deploy. The dropped indexes would silently remove indexes
+   the billing queries rely on.
+
+**Flagging it because it is a live landmine, not because I want to defuse it here.** Anyone
+who runs `--autogenerate` on this repo and accepts the output will ship those five statements
+into the startup path. It deserves its own branch, its own NULL audit
+(`SELECT count(*) ... WHERE created_at IS NULL`), and its own deploy window.
+
+### 4.5 Where the migration was run
+
+**Never against the live database, and never against the host cluster at all.** Every run was
+against a throwaway PostgreSQL 18 cluster created by `initdb` on **port 55432**, in the
+session scratchpad, with its own data directory, torn down and deleted afterwards. The live
+cluster on 5432 was never connected to.
+
+Verified there, beyond the additivity proof above:
+
+```
+alembic upgrade head       # all 26 revisions from scratch, incl. e1c7b4a90d63 — OK
+alembic downgrade -1       # crm_links dropped; to_regclass() is NULL
+alembic upgrade head       # re-applied; `alembic current` = e1c7b4a90d63 (head)
+```
+
+plus the whole data path end to end: `manage bind` -> `list` -> `enable` ->
+`binding.resolve()` returning the right destinations -> `disable` -> `unbind`.
+
+## 5. PRODUCT JUDGEMENT CALLS
+
+Every one of these is a decision I made that you might reasonably make differently. None of
+them is hidden in the code.
+
+### 5.1 An assigned flow still beats a CRM binding
+
+The hook fires only for a DID with **no flow assigned**. If you bind a number that also has
+a flow, the flow runs and the CRM link does nothing for that call.
+
+`docs/DEFAULT_CALL_HANDLING_SPEC.md` already establishes that an assigned flow overrides the
+built-in default handling, and a CRM binding is a *different default*, not a higher
+authority. Putting the hook above the flow resolution would have meant a CRM binding silently
+overriding a call flow somebody had deliberately built — exactly the class of surprise the
+"do not change what works" constraint is about.
+
+**Consequence:** a bound DID that also has a flow gets no CRM events. If you want the ring
+group on a flow-assigned number, unassign the flow (or tell me and I will add an explicit
+`crm_links.overrides_flow` column, which is the honest way to express "yes, I mean it").
+
+### 5.2 The report job posts to OWEN, which posts to the CRM
+
+This is the least obvious design decision in the module, and it is driven by a fact I found
+in the compose files rather than by taste.
+
+`handle_crm_report` runs in the **worker** container. `docker-compose.prod.yml` puts `worker`
+on `callmon-net` **only** — not on `traefik-public`, which is the network `callmon_app` and
+`ghl_clone_api` share. **The worker cannot resolve `ghl_clone_api` at all.**
+
+The two ways out were (a) add `traefik-public` to the worker's networks, or (b) hop through
+the app container, which is on both. I chose (b), for two reasons:
+
+1. It needs **no change to `docker-compose.prod.yml`**, which is deployment topology on a
+   live system.
+2. A job payload is a row in the `jobs` table. Putting a `ghl_pat_...` bearer in its
+   `headers` would persist a live CRM credential in Postgres, where `pg_dump` and the
+   `owen_ro` role behind `/api/ai/query` can both read it. Resolving the token at the
+   app-side adapter keeps it in the app container's environment.
+
+This is also exactly the hop `flows/runtime.py::_enqueue_crm_report` already uses for the
+built-in `kind: ghl` adapter (`OWEN_INTERNAL_URL` + `X-OWEN-Key`), so it is an established
+seam rather than one I invented.
+
+### 5.3 Three lifecycle events, but only ONE of them is a `CALL`
+
+You asked for call started / answered / ended. All three are sent. But:
+
+* `started` and `answered` are `type: INTERNAL_COMMENT`, `direction: OUTBOUND`
+* `ended` is `type: CALL` with the real duration, direction and `call_status`
+
+**Why.** The CRM's `automations.on_inbound_call` fires the **missed-call auto-text-back** for
+any INBOUND `CALL` row whose `duration_seconds` is ≤ 15 or absent. Sending "call started" as
+a `CALL` row would tell the CRM every single call was missed and queue a text to the customer
+**while they were still on the phone**. `INTERNAL_COMMENT` is in the CRM's `INTERNAL_TYPES`
+set: recorded on the thread, never transmitted, no automation. `OUTBOUND` so a machine note
+does not bump the thread's unread badge.
+
+Everything the CRM's schema has no field for — which of the three phones answered, the
+recording id, the transcript id, the `owen_call_id` — is in the event's `body` text, because
+`ConversationEvent` has exactly four typed slots and none of them is "winning destination".
+
+(In the CRM's v1 the outbound transport is `LoggingTransport`, so that text-back is currently
+recorded as intent and nothing is transmitted. That is the CRM's decision to reverse, not
+ours, so I built this as though the text were real.)
+
+### 5.4 PSTN legs present the BOUND DID, not the caller's number
+
+**This is the reason the hybrid ring is a new function and not a call into `ring_and_bridge`.**
+
+`ring_and_bridge` applies ONE `callerId` to every leg. The two leg kinds need different ones:
+
+* An **operator** leg wants `"<dialed DID>" <caller number>`, because the browser popup parses
+  that string — display name is the number that was dialled, URI user is who is calling
+  (`DEFAULT_CALL_HANDLING_SPEC`, "How the popup learns to what number"). My module builds that
+  string byte-identically, so the popup keeps working.
+* A **PSTN** leg must NOT present the inbound caller's number. Sending a number we do not own
+  out over the BulkVS trunk is caller-ID spoofing: the carrier may reject the INVITE, and
+  where it does not, a callback from the mobile that rang goes to the *customer* instead of to
+  the business.
+
+So a PSTN leg presents `"<caller number>" <bound DID>` — the bound DID as the number, the
+caller's number as the display name. The display name is a free bet (most PSTN carriers drop
+it); where it survives, the mobile shows both who is calling and a working callback number.
+
+**The trade-off you should know about:** if the display name is dropped, whoever answers their
+cell sees the business's own number and cannot tell who is calling until they pick up. If you
+would rather have caller-ID passthrough on PSTN legs and accept the spoofing risk, it is one
+function — `ring.pstn_caller_id` — and one test.
+
+### 5.5 Contacts are never auto-created in the CRM
+
+`POST /api/events` requires a `contact_id` and 404s on anything else. A caller who is not
+already in the CRM has nowhere to land, and I do **not** create them. The event is dropped
+with a logged reason and the job **completes** (not retried — an unknown caller will not
+become known on the sixth attempt).
+
+`docs/CRM_CONTEXT_SPEC.md` C10 records the "hundreds of junk contacts" failure and
+`WORKIZ_IMPORT.md` records how painful GHL cleanup is. Auto-creating a contact per inbound
+call, from a week-old integration, is how you get there. If you want it, it should be its own
+decision with its own rules (spam filtering, minimum duration), not a side effect of logging.
+
+**Consequence:** until a caller exists in the CRM, their calls are not reported. You will see
+`crm-link: dropping ended event for call <id> — no CRM contact matches +1...` at WARNING,
+which surfaces in `GET /api/ai/errors`.
+
+### 5.6 Contact matching is EXACT on the last ten digits, never fuzzy
+
+The CRM's contact search is a substring ILIKE and will happily return a different customer
+whose number contains the same seven digits. Every candidate is confirmed by comparing the
+last ten digits. Filing a call on the wrong customer's timeline is worse than filing it
+nowhere — the judgement C3 already made about greeting the wrong person by name.
+
+### 5.7 `bind` creates the row DISABLED
+
+`manage bind` writes `enabled=false` and tells you the command to turn it on. Binding a
+number that rings in a real business should take two deliberate acts, with a `manage list` in
+between.
+
+### 5.8 The allowlist is a permission, the binding is an intent
+
+`crm_links.pstn_numbers` says what a DID *should* ring. `CRM_LINK_ALLOWLIST` says what may
+*actually* be dialled. They are checked separately, at call time, every call. So a number
+configured on a binding but missing from the allowlist is stored, shown in `manage list` as
+`REFUSED`, warned about at bind time — and never rung.
+
+An **empty allowlist allows nothing**, including numbers on a binding. That is deliberate:
+while this is new, the failure mode of a forgotten or mis-typed allowlist has to be "no call
+went out".
+
+### 5.9 The `crm_links` table, not columns on `numbers`
+
+`numbers` is written by the BulkVS sync and read by ingestion, billing, the Inbox and the flow
+runtime. Integration-specific columns there would put this module inside the blast radius of
+all of them and make "turn the integration off" a schema question. A separate table with an FK
+is removable in one migration and invisible to anything that does not join to it.
+
+Your amendment reinforces this: *"if you believe you need a column on an existing table, DO
+NOT add it — put the data in your own new table keyed by the existing row's id."* That is
+exactly what `crm_links.number_id` is. **The tradeoff:** every read costs a join
+(`binding.resolve` does one `crm_links ⋈ numbers` per inbound call on a bound DID, on an
+indexed uuid FK — negligible), and the binding is not visible in `SELECT * FROM numbers`, so
+the Numbers UI and `make manage list` do not show it. `python -m app.integrations.crm.manage
+list` is what shows it. I consider that a fair price for a table you can drop in one
+migration without touching `numbers` at all.
+
+### 5.10 Secrets are named, not stored
+
+`crm_links.crm_token_env` holds the **name** of an environment variable. A `ghl_pat_...` in a
+column would be readable by the `owen_ro` role behind `/api/ai/query` and would ride into
+every `pg_dump`.
+
+---
+
+## 6. CONFIGURATION AND ENVIRONMENT VARIABLES ADDED
+
+All in `backend/app/core/config.py` and documented in `.env.prod.example`. Every default is
+off or empty.
+
+| variable | default | what it does |
+|---|---|---|
+| `CRM_LINK_ENABLED` | `false` | **THE KILL SWITCH.** False → the hook returns before touching the DB, every `/api/crm-link` route 503s, nothing is queued. |
+| `CRM_LINK_BASE_URL` | `http://ghl_clone_api:8000` | The CRM on the internal docker network. Never a public URL. |
+| `CRM_LINK_TOKEN` | `` | The CRM machine token. **Needs `events:write` AND `read`** — see §7.1. |
+| `CRM_LINK_ALLOWLIST` | `` | The hard destination allowlist. Comma-separated. **Empty allows nothing.** |
+| `CRM_LINK_SMS_ENABLED` | `false` | The SMS dark switch, on top of the platform's own 10DLC gate. |
+| `CRM_LINK_MAX_PSTN_LEGS` | `2` | Most PSTN numbers a ring group may ring. |
+| `CRM_LINK_RING_TIMEOUT_SECONDS` | `25` | Default ring time; a binding row may override per number. |
+| `CRM_LINK_HTTP_TIMEOUT_SECONDS` | `5` | Ceiling on ONE HTTP exchange with the CRM. |
+| `CRM_LINK_HTTP_BUDGET_SECONDS` | `15` | Ceiling on a WHOLE delivery — see §8.2. |
+
+**Two existing variables are now also required** when the link is on:
+
+* `AGENT_RUNTIME_KEY` — the worker authenticates to OWEN's own `/api/crm-link/events` adapter
+  with it. It must be a live OWEN API key holding **`agent_write`**. Without it, events are
+  not queued at all and you get a WARNING saying so (rather than five failed deliveries).
+* `OWEN_INTERNAL_URL` — already defaults to `http://app:8888`, which is correct.
+
+**Per-number configuration is DATA, in `crm_links`** — no deploy to change it:
+
+```
+python -m app.integrations.crm.manage list
+python -m app.integrations.crm.manage bind --phone +1XXXXXXXXXX \
+    --pstn +1YYYYYYYYYY --pstn +1ZZZZZZZZZZ \
+    --operator you@dreamteamroofingfl.com --outbound-operator you@dreamteamroofingfl.com
+python -m app.integrations.crm.manage enable  --phone +1XXXXXXXXXX
+python -m app.integrations.crm.manage disable --phone +1XXXXXXXXXX
+python -m app.integrations.crm.manage unbind  --phone +1XXXXXXXXXX
+```
+
+`--operator` may be repeated, or omitted entirely to ring **every operator whose softphone is
+currently registered** (the presence rule the platform already uses).
+
+---
+
+## 7. HOW TO TURN IT ON
+
+In this order. Each step is independently reversible.
+
+1. **Mint the CRM token**, in the CRM, with **both** scopes, from a user who is ADMIN or
+   DISPATCHER:
+   ```
+   ghl auth token create owen-ingest --scopes "events:write read"
+   ```
+   Put it in `CRM_LINK_TOKEN`.
+2. **Mint the OWEN key the CRM will use** to call back in:
+   ```
+   make issue-key n=ghl-clone s='crm_link'
+   ```
+   Give that to the CRM. Confirm `AGENT_RUNTIME_KEY` is set and holds `agent_write`.
+3. **Set `CRM_LINK_ALLOWLIST`** to the numbers that may be rung or texted. Start with your own
+   mobile. Nothing else can be dialled.
+4. **Deploy** (migration self-applies at startup behind the advisory lock, as usual).
+   `CRM_LINK_ENABLED` is still false — nothing has changed for any caller.
+5. **Bind a number** with `manage bind`, review it with `manage list`, then `manage enable`.
+   Still nothing happens: the global switch is off.
+6. **Flip `CRM_LINK_ENABLED=true`** and restart. Now check reachability, which is the one thing
+   I could not verify (§8.1):
+   ```
+   curl -H "X-OWEN-Key: <the crm_link key>" http://localhost:8888/api/crm-link/health
+   ```
+   Look for `"crm_reachable": true`. If it is false, the CRM link is not talking to the CRM
+   and nothing else in this list matters yet.
+7. **Call the bound number.** Expect: consent notice → your softphone AND your mobile ring
+   together → first to answer is bridged → the other stops → the call is recorded → three
+   events on the contact's CRM timeline.
+
+### 7.1 The two things that will fail confusingly if you get them wrong
+
+* **A token scoped `events:write` alone will not work.** It can POST `/api/events` and nothing
+  else — the CRM's `auth._scope_allows` gates GET on `{read, write, admin}`. Since
+  `/api/events` takes a `contact_id` and has no phone lookup, OWEN must search contacts first,
+  and that search 403s. Symptom: every call dropped with *"the CRM token cannot read
+  contacts"*. It says exactly that, at WARNING.
+* **The token's owning CRM user must be ADMIN or DISPATCHER.** `require_events_ingest` checks
+  ROLE first and unconditionally, because a scope can only narrow a role, never widen it. A
+  TECH's token gets 403 no matter what scopes it carries.
+
+### 7.2 What I left DARK, and how to light it
+
+**SMS** — built end to end, refused today. Three deliberate flips, all currently refusing:
+
+1. `CRM_LINK_SMS_ENABLED=true`
+2. `numbers.sms_enabled = true` AND `numbers.sms_campaign_id = '<the 10DLC id>'` on the bound
+   DID — the platform's own gate (`services/sms.py::outbound_block_reason`), never bypassed
+3. the destination on `CRM_LINK_ALLOWLIST`
+
+Plus the per-contact opt-out and the Inbox block, which are checked at send AND re-checked at
+drain by the existing `message_send` handler.
+
+**The AI agent** — `handler._ai_agent_seam` is a marked, unwired seam between "nobody
+answered" and "take a voicemail". It returns `False`. Its docstring names exactly what wiring
+it means (resolve the agent directly or via an `AgentSlot`, pin the version, run a
+`VoiceAgentSession` with an `AgentCallContext`, persist captures and transcript, map the exit
+port) and takes the arguments it needs now, so wiring it is an edit to that one function. Its
+outcomes (`agent`, `transferred`) are already mapped to CRM statuses (§9, commit `34f5be1`).
+
+---
+
+## 8. KNOWN UNKNOWNS — things I could not prove
+
+### 8.1 Container-to-container reachability was read, not tested
+
+`callmon_app` is on `[callmon-net, traefik-public]`; `ghl_clone_api` is on
+`[ghl-net, traefik-public]`; `traefik-public` is `external: true` in both stacks. So
+`http://ghl_clone_api:8000` should resolve by container name over the shared network,
+internally, with nothing new exposed publicly.
+
+**I read that out of both `docker-compose.prod.yml` files. I did not confirm it with a request
+from inside a running container** — the sandbox I built in has no docker access (`docker ps`
+is denied). `GET /api/crm-link/health` returns `crm_reachable` and exists precisely to settle
+this in one command (§7 step 6). It is the first thing to check after enabling.
+
+The related fact — that `callmon_worker` is on `callmon-net` only and therefore *cannot*
+reach the CRM — is read from the same file, and is why the report hops through the app (§5.2).
+That one is load-bearing: if I have it wrong, the hop is merely unnecessary, not broken.
+
+### 8.2 A duplicate CRM row is possible, and I cannot fully close it
+
+`POST /api/events` always INSERTs. It has no idempotency key and no dedupe on `provider_ref`.
+So if the delivery POST succeeds but the response never reaches us (a timeout at exactly the
+wrong moment), the job retries and the CRM gets a second row for the same call.
+
+**What I did:** gave the whole delivery ONE budget (`CRM_LINK_HTTP_BUDGET_SECONDS=15`) that
+sits inside the 20s client timeout `handle_crm_report` uses, so a slow CRM produces a clean
+"budget exhausted" refusal rather than a worker-side timeout after the CRM has acted. Commit
+`0deee92`; that bug was real and I introduced it — the original per-request timeout of 15s
+across up to five calls could reach 75s.
+
+**What I could not do:** make it idempotent. That needs a change on the CRM side (a unique
+constraint on `provider_ref`, or an upsert), which is not mine to make. Every event carries
+`calls.id` in `provider_ref`, so a duplicate is at least *identifiable* and de-duplicable.
+
+### 8.3 The frontend typecheck did not run
+
+`frontend/node_modules` is absent in this environment, so `scripts/check.sh` skipped `tsc`
+— in my run **and in the clean-`origin/main` baseline**. I changed no frontend file, so there
+is nothing for it to catch, but I did not run it and will not claim I did. `npm ci` in
+`frontend/` re-enables it.
+
+### 8.4 `bulkvs_client.send_message` has never been run against the live API
+
+Flagging this as asked. `backend/app/providers/bulkvs_client.py:229` records, in the function
+I reuse, that its `/messageSend` request shape **has never been exercised against the live
+BulkVS API**. It follows the published docs (`From` = the DID, `To` = an array, `Message` =
+the body). **It is not proven.** I did not change it, I did not test it against BulkVS, and
+this module's SMS path inherits that uncertainty whole. When 10DLC is approved, the first send
+is a test to a number you control, not a rollout.
+
+### 8.5 No call has been placed
+
+Nothing here has been exercised against a real Asterisk, a real ARI WebSocket, a real BulkVS
+trunk, a real softphone or the running CRM. The ring group is tested against a fake ARI that
+models the constraints I know about — including the ones that caused the live 2026-08-05
+bridge failure — but a fake is a model of what I understood, and the standing lesson in
+`tests/test_dial_record_bridge.py` is that a fake more permissive than reality hides exactly
+the bug you care about. The verification checklist in `DEFAULT_CALL_HANDLING_SPEC.md` is the
+right shape for a real-call test of this too.
+
+### 8.6 `ring.py` calls two private methods on `AsteriskAriClient`
+
+`_await_first_answer`, `_await_bridge_end`, `_post_json` and `_delete`. Deliberate:
+`_await_first_answer` in particular carries hard-won live-call fixes (StasisStart vs
+`ChannelStateChange`→Up, caller-hangup-while-ringing, per-leg `ChannelDestroyed` pruning), and
+forking it would freeze that knowledge at today's date and silently miss the next fix. The
+cost is that renaming or changing those methods breaks this module — and `test_crm_hybrid_ring`
+is what would tell you, because its fake implements them by name.
+
+### 8.7 Things I did not build, because you scoped them out
+
+Inbound SMS from the CRM's side, contact sync, opportunity creation, the `Opportunity`
+`custom_fields.owen_call_id` write itself (OWEN *sends* `calls.id`; storing it as
+`owen_call_id` is the CRM's half), and the AI agent (§7.2). Phase 1 is voice.
+
+---
+
+## 9. BUGS I FOUND IN MY OWN CODE WHILE TESTING IT
+
+Listed separately because they are the most useful part of a report like this.
+
+1. **`93c7c99` — the allowlist split on whitespace.** `+1 561-555-0111` — the most ordinary way
+   a person writes a phone number — became the two useless keys `"1"` and `"5615550111"`. The
+   destination you meant to allow would have been silently absent and a call you expected to go
+   out would not have. That is the exact failure the guard exists to prevent, arriving through
+   the guard itself. Commas, semicolons and newlines separate now; a space is part of a number.
+
+2. **`0deee92` — one delivery could exceed the worker's HTTP timeout.** Up to five calls out at
+   15s each against a 20s client timeout. See §8.2.
+
+3. **`34f5be1` — the unwired agent seam would have reported every agent call as `failed`.**
+   `handler` sets `outcome="agent"`, `crm_call_status` had no entry for it, and the
+   unknown-outcome default is `"failed"`. The day somebody wires the agent, the CRM's call
+   report would have said the phone system was broken. Two lines to name it now.
+
+4. **`887623b` — the foreign key would have made a `DELETE FROM numbers` newly fail.** With
+   the default `NO ACTION`, a row in my table would block a delete on an existing table.
+   `ON DELETE CASCADE` fixes it. Measured both ways rather than reasoned about (§4.3).
+
+And one that is **NOT mine, and which I did not touch** — flagging it because it is a live
+landmine in the startup path: `alembic revision --autogenerate` on this repo proposes three
+`SET NOT NULL` ALTERs and two `DROP INDEX`es against `billing_adjustments`, `billing_rates`
+and `call_charges`. Since migrations run automatically at app startup, accepting that output
+would ship them into the boot path, where a `SET NOT NULL` that hits an existing NULL fails
+and the app does not come back up. Full detail and my reasoning for refusing it: **§4.4**.
+
+---
+
+## 10. WHAT TO REVIEW FIRST
+
+1. **§4** — the database. §4.0 answers your amendment in one word, §4.1 quotes the whole
+   migration, §4.2 is the mechanical proof (re-run it: `bash .qa/proof/prove_additive.sh`),
+   and §4.4 is the pre-existing autogenerate landmine you should know about regardless of
+   this branch.
+2. `backend/app/flows/runtime.py` — the nine-line diff. It is the only change to the call path.
+3. `backend/tests/test_crm_link_isolation.py` — decide whether you believe the isolation claim.
+4. `backend/app/integrations/crm/ring.py` — the new call logic, and §5.4's caller-ID trade-off.
+5. §5.1 (flow beats binding), §5.3 (one CALL row, not three) and §5.5 (no auto-created
+   contacts) — the three product decisions most likely to differ from what you had in mind.

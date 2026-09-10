@@ -33,6 +33,12 @@ SCOPE_LOGS = "logs"
 # that nothing there can mutate platform data, and machine consumers read that to
 # teach themselves the API. Writes get their own surface rather than falsifying it.
 SCOPE_AGENT_WRITE = "agent_write"
+# The CRM link's own scope (backend/app/integrations/crm/). Separate from
+# `agent_write` on purpose: that scope is documented as "WRITE captures and notes via
+# /api/agent-runtime/*", and authorising "place a telephone call" with it would
+# falsify the description a machine consumer reads to teach itself the API -- the same
+# objection api/agent_runtime.py raises about bolting writes onto read-only /api/ai.
+SCOPE_CRM_LINK = "crm_link"
 
 SCOPES: dict[str, str] = {
     SCOPE_READ: "Curated metrics: call/lead/message counts, durations, series, pipeline health.",
@@ -40,6 +46,7 @@ SCOPES: dict[str, str] = {
     SCOPE_SQL: "Run read-only SQL via /api/ai/query.",
     SCOPE_LOGS: "Read captured warnings/errors, failed jobs and failed relays via /api/ai/errors.",
     SCOPE_AGENT_WRITE: "WRITE captures and notes via /api/agent-runtime/*. The only scope that can change platform data.",
+    SCOPE_CRM_LINK: "Let the CRM place calls and send SMS from a CRM-bound DID via /api/crm-link/*. Refused entirely while CRM_LINK_ENABLED is false.",
 }
 
 # Every key issued through the UI/CLI without an explicit scope list gets this.
