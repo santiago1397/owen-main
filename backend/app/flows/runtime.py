@@ -524,19 +524,21 @@ async def run_flow_for_stasis(event: dict, ari: AriControl) -> None:
         assigned, resolved = True, None
 
     if not assigned:
-        # Ticket 18: the DID has NO flow assigned -> the built-in default call handling
-        # (consent notice -> ring every AVAILABLE operator -> first-answer bridge -> else
-        # voicemail). Run with NO DB session held (it can bridge/record for minutes). A real
-        # assigned flow OVERRIDES this; this is what happens before anything is configured.
-        # CRM link (app/integrations/crm/), additive and opt-in. Returns False — before it
-        # touches the database — unless CRM_LINK_ENABLED is true AND this DID has an enabled
-        # `crm_links` row, in which case the very next line runs the unchanged default
-        # handler. Every failure inside it also returns False, so there is no state in which
-        # this line can leave a caller unhandled.
+        # CRM link (app/integrations/crm/) — additive, opt-in, and the ONLY change this module
+        # makes to the call path. Returns False, BEFORE it touches the database, unless
+        # CRM_LINK_ENABLED is true AND this DID has an enabled `crm_links` row; every failure
+        # inside it also returns False. So an unbound DID falls straight through to the
+        # unchanged default handler below, and there is no state in which this line can leave
+        # a caller unhandled.
         from app.integrations.crm import hook as crm_hook
 
         if await crm_hook.handle_bound_inbound(ari, channel_id, lid, str(dialed), caller_number):
             return
+
+        # Ticket 18: the DID has NO flow assigned -> the built-in default call handling
+        # (consent notice -> ring every AVAILABLE operator -> first-answer bridge -> else
+        # voicemail). Run with NO DB session held (it can bridge/record for minutes). A real
+        # assigned flow OVERRIDES this; this is what happens before anything is configured.
         clog(logger, "route", linkedid=lid, mode="default_handling", dialed=dialed)
         await _handle_unassigned(ari, channel_id, lid, str(dialed), caller_number)
         return
