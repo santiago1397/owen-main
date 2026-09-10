@@ -257,7 +257,8 @@ class Settings(BaseSettings):
     # The token's owning CRM user must be ADMIN or DISPATCHER (ghl-clone
     # auth.require_events_ingest checks role FIRST, and a scope can only narrow a role).
     CRM_LINK_TOKEN: str = ""
-    # THE HARD DESTINATION ALLOWLIST. Comma/space-separated. A real call or text may only go
+    # THE HARD DESTINATION ALLOWLIST. Comma-separated (NOT space — a phone number may
+    # contain spaces). A real call or text may only go
     # to a number on this list; everything else is refused and logged. Compared on the last
     # ten digits, so formatting does not matter. EMPTY ALLOWS NOTHING — while this module is
     # new, the failure mode of an unset or mis-parsed allowlist must be "no call went out".

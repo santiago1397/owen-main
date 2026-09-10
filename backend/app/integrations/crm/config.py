@@ -64,13 +64,19 @@ def to_e164(value: str | None) -> str:
 
 
 def parse_allowlist(raw: str | None) -> frozenset[str]:
-    """Comma/space/newline-separated destinations -> a set of match keys.
+    """Comma / semicolon / newline-separated destinations -> a set of match keys.
+
+    NOT space-separated, deliberately. People write phone numbers with spaces in them —
+    `+1 561-555-0111` is the most ordinary rendering there is — and splitting on whitespace
+    turns that single destination into the two useless keys "1" and "5615550111". The
+    entry the operator meant to allow would then be silently absent, and a call they
+    expected to go out would not. Commas separate; spaces are part of a number.
 
     An EMPTY allowlist allows NOTHING. That is the whole point of the guard: while this
     module is new, the failure mode of a mis-parsed or unset allowlist must be "no call
     went out", never "a call went out to an arbitrary number".
     """
-    parts = re.split(r"[,\s;]+", str(raw or ""))
+    parts = re.split(r"[,;\n\r]+", str(raw or ""))
     return frozenset(k for k in (match_key(p) for p in parts) if k)
 
 
