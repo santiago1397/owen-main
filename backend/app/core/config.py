@@ -238,6 +238,44 @@ class Settings(BaseSettings):
     VOICEMAIL_MAX_DURATION_SECONDS: int = 120
     VOICEMAIL_MAX_SILENCE_SECONDS: int = 5
 
+    # --- CRM link (backend/app/integrations/crm/) — additive, DARK by default -----------
+    # An opt-in link to the ghl-clone CRM running as `ghl_clone_api` on this host. Both
+    # containers attach to the external `traefik-public` network, so the app reaches the CRM
+    # by container name with no public round trip and nothing new exposed.
+    #
+    # THE KILL SWITCH. False = the module is inert: the inbound hook returns before touching
+    # the database, every /api/crm-link route answers 503, and no event is queued. The system
+    # is then indistinguishable from one built before the module existed.
+    CRM_LINK_ENABLED: bool = False
+    # The CRM, on the internal docker network. Never a public URL.
+    CRM_LINK_BASE_URL: str = "http://ghl_clone_api:8000"
+    # The CRM machine token (`ghl_pat_...`). It needs BOTH scopes:
+    #   events:write  — POST /api/events, the telephony ingest;
+    #   read          — GET /api/contacts, because /api/events takes a contact_id and has no
+    #                   phone lookup, so a call can only be filed against a contact OWEN can
+    #                   find first. A token scoped events:write alone 403s on the lookup.
+    # The token's owning CRM user must be ADMIN or DISPATCHER (ghl-clone
+    # auth.require_events_ingest checks role FIRST, and a scope can only narrow a role).
+    CRM_LINK_TOKEN: str = ""
+    # THE HARD DESTINATION ALLOWLIST. Comma/space-separated. A real call or text may only go
+    # to a number on this list; everything else is refused and logged. Compared on the last
+    # ten digits, so formatting does not matter. EMPTY ALLOWS NOTHING — while this module is
+    # new, the failure mode of an unset or mis-parsed allowlist must be "no call went out".
+    CRM_LINK_ALLOWLIST: str = ""
+    # SMS is BUILT AND DARK. The bound DID's 10DLC campaign is submitted and not approved, so
+    # carriers would filter the message whatever this code did. This is the module's own gate,
+    # ON TOP OF the platform's per-number `numbers.sms_enabled` + `sms_campaign_id` check and
+    # the per-contact opt-out — it never replaces either.
+    CRM_LINK_SMS_ENABLED: bool = False
+    # Most PSTN numbers a hybrid ring group may ring alongside the softphones.
+    CRM_LINK_MAX_PSTN_LEGS: int = 2
+    # Default ring time for a bound DID before the call rolls to voicemail. A binding row may
+    # override it per number.
+    CRM_LINK_RING_TIMEOUT_SECONDS: int = 25
+    # Ceiling on one HTTP exchange with the CRM. The caller is not waiting on it (delivery is
+    # post-call, through the job queue), so this only bounds a worker job.
+    CRM_LINK_HTTP_TIMEOUT_SECONDS: float = 15.0
+
     ANALYSIS_ENGINE: str = "dummy"  # dummy | claude | minimax
     ANTHROPIC_API_KEY: str = ""
     ANALYSIS_MODEL: str = "claude-haiku-4-5-20251001"
