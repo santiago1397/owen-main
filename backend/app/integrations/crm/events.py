@@ -76,6 +76,12 @@ _OUTCOME_TO_CRM_STATUS = {
     "noanswer": "no-answer",
     "busy": "busy",
     "failed": "failed",
+    # Mapped now, for the AI-agent seam in `handler.py` that is deliberately not wired yet.
+    # Without these, the day somebody connects the agent, every call it handled would report
+    # as `failed` (the unknown-outcome default below) and the CRM's call report would say the
+    # phone system was broken. Cheaper to name here than to debug there.
+    "agent": "completed",
+    "transferred": "completed",
 }
 
 

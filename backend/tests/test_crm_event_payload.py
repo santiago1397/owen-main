@@ -85,6 +85,13 @@ def test_outcomes_map_onto_the_five_statuses_the_CRM_accepts():
         body = to_crm_event(_facts(outcome=outcome), contact_id=1)
         check(f"  and {expected} passes validation", validate_crm_event(body) == [])
 
+    # The AI-agent seam in handler.py is not wired, but its outcomes are mapped now: without
+    # them, the day it IS wired every agent-handled call would report as `failed` and the
+    # CRM's call report would say the phone system was broken.
+    for outcome in ("agent", "transferred"):
+        check(f"the unwired agent seam's {outcome!r} outcome is already mapped",
+              crm_call_status(outcome) == "completed")
+
     check("every mapped status is in the accepted set",
           all(crm_call_status(o) in CRM_CALL_STATUSES
               for o in ("answered", "voicemail", "noanswer", "busy", "failed", "")))
