@@ -57,7 +57,10 @@ def upgrade() -> None:
                   server_default=sa.text('now()'), nullable=False),
         sa.Column('updated_at', sa.DateTime(timezone=True),
                   server_default=sa.text('now()'), nullable=False),
-        sa.ForeignKeyConstraint(['number_id'], ['numbers.id'], ),
+        # ON DELETE CASCADE so a DELETE on `numbers` that works today cannot newly FAIL
+        # because of a row in THIS table. The constraint lives on crm_links; nothing is
+        # added to `numbers`.
+        sa.ForeignKeyConstraint(['number_id'], ['numbers.id'], ondelete='CASCADE'),
         sa.PrimaryKeyConstraint('id'),
         sa.UniqueConstraint('number_id', name='uq_crm_link_number'),
     )

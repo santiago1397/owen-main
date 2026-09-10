@@ -47,8 +47,14 @@ class CrmLink(Base):
 
     # One binding per number. UNIQUE, so "which CRM link owns this DID?" can never have two
     # answers and a double-bind is a database error rather than a coin flip at call time.
+    # ON DELETE CASCADE, and that is a safety decision rather than a convenience one. The FK
+    # points FROM this table TO `numbers`, so it constrains this table — but with the default
+    # NO ACTION, a `DELETE FROM numbers` that works today would newly FAIL because of a row
+    # here. Nothing hard-deletes a number at present (the BulkVS sync is add-only +
+    # soft-release), but an integration must not be able to make an existing operation start
+    # erroring. CASCADE means deleting a number simply drops its now-meaningless binding.
     number_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("numbers.id"), index=True
+        UUID(as_uuid=True), ForeignKey("numbers.id", ondelete="CASCADE"), index=True
     )
 
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=false())
