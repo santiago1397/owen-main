@@ -1,0 +1,206 @@
+"""HTTP client for the CRM (`ghl-clone`). Runs in the APP container only.
+
+## Reachability, from the compose files rather than from hope
+
+`callmon_app` is on `[callmon-net, traefik-public]`; `ghl_clone_api` is on
+`[ghl-net, traefik-public]`. `traefik-public` is declared `external: true` in both stacks,
+so it is the SAME docker network and `http://ghl_clone_api:8000` resolves over it by
+container name — internal, no DNS round trip to the internet, and nothing new exposed
+publicly. (`callmon_worker` is on `callmon-net` ONLY, which is why the report job hops
+through the app; see `push.py`.)
+
+This was read out of `docker-compose.prod.yml` on both sides. It has NOT been confirmed by
+an actual request from inside a running container — the sandbox this was built in has no
+docker access. Recorded as a known unknown in `.qa/state/crmlink-done`; `probe()` below is
+the one command that settles it.
+
+## Contact resolution, and why it is fiddly
+
+`POST /api/events` takes a `contact_id` and 404s on anything else. It has no phone lookup
+and no create-on-ingest. So a call can only be filed against a contact that already exists,
+and OWEN has to find it.
+
+Two verified obstacles:
+
+  1. **Phone format.** `Contact.phone` is a display string — the CRM's own seed writes
+     `"(941) 555-1234"`. OWEN holds E.164. `GET /api/contacts?q=+19415551234` ILIKEs the raw
+     string and matches nothing, ever. So several renderings are tried, and every candidate
+     is then confirmed by comparing the LAST TEN DIGITS.
+  2. **Scope.** A token scoped `events:write` alone can POST /api/events and nothing else —
+     `auth._scope_allows` gates GET on `{read, write, admin}`. Contact lookup therefore
+     needs a token carrying **`events:write read`**. With a write-only token, lookup 403s
+     and this module reports that clearly instead of guessing an id.
+
+A caller with no matching contact is NOT created here. Creating a contact per inbound call
+is precisely the "hundreds of junk contacts" failure `docs/CRM_CONTEXT_SPEC.md` C10 records,
+and this integration is one week old. The event is dropped with a reason, and the job
+completes rather than retrying against a 404 forever.
+
+Match is EXACT on the last ten digits, never fuzzy. Filing a call on the wrong customer's
+timeline is worse than filing it nowhere — the same judgement C3 made about greeting the
+wrong person by name.
+"""
+
+from __future__ import annotations
+
+import logging
+from dataclasses import dataclass
+from typing import Any, Optional
+
+import httpx
+
+from app.integrations.crm.config import digits, match_key
+
+logger = logging.getLogger("integrations.crm.client")
+
+EVENTS_PATH = "/api/events"
+CONTACTS_PATH = "/api/contacts"
+HEALTH_PATH = "/api/health"
+
+# How many contacts a lookup will look at per candidate rendering before giving up. The
+# search is a substring ILIKE, so a short candidate can match broadly; the last-ten-digits
+# confirmation below is what makes a wide net safe.
+_LOOKUP_PAGE_SIZE = 50
+
+
+@dataclass(frozen=True)
+class CrmResult:
+    ok: bool
+    status: int = 0
+    reason: str = ""
+    data: Optional[dict] = None
+
+    @property
+    def retryable(self) -> bool:
+        """Whether the caller should raise so the job queue retries.
+
+        A 5xx, a timeout or a transport error is worth retrying: the CRM may simply be
+        restarting. A 4xx is not — a 401 means the token is wrong, a 404 means the contact
+        does not exist, and neither improves by being asked again five times.
+        """
+        return self.status == 0 or self.status >= 500
+
+
+def phone_candidates(number: str) -> list[str]:
+    """Search strings to try for one phone number, most specific first.
+
+    Ordered so the narrowest query runs first and usually terminates the search on its first
+    page. The 7-digit `NNN-NNNN` form is the one that actually matches this CRM's stored
+    `"(941) 555-1234"`; the rest are there because the CRM's storage format is a convention,
+    not a constraint, and a contact typed in by hand may hold anything.
+    """
+    d = digits(number)
+    if len(d) == 11 and d.startswith("1"):
+        d = d[1:]
+    out: list[str] = []
+    if len(d) == 10:
+        area, exch, last = d[:3], d[3:6], d[6:]
+        out.extend([
+            f"{exch}-{last}",             # matches "(941) 555-1234" and "941-555-1234"
+            f"({area}) {exch}-{last}",
+            f"{area}{exch}{last}",        # matches an unformatted 10-digit store
+            f"+1{d}",                     # matches an E.164 store
+        ])
+    elif d:
+        out.append(d)
+    # De-duplicate, keep order.
+    seen: set[str] = set()
+    return [c for c in out if not (c in seen or seen.add(c))]
+
+
+class CrmClient:
+    """One CRM, one machine token. Construct per request — httpx clients are cheap and a
+    long-lived one would outlive a token rotation."""
+
+    def __init__(self, base_url: str, token: str, *, timeout_s: float = 15.0) -> None:
+        self.base = str(base_url or "").rstrip("/")
+        self.token = str(token or "")
+        self.timeout = float(timeout_s or 15.0)
+
+    def _headers(self) -> dict[str, str]:
+        # Bearer, per ghl-clone `auth.current_principal`: a header beginning `ghl_pat_` is
+        # resolved as a machine token. A cookie session is not an option for a service.
+        return {"Authorization": f"Bearer {self.token}", "Accept": "application/json"}
+
+    async def _request(self, method: str, path: str, **kwargs) -> CrmResult:
+        if not self.base:
+            return CrmResult(False, 0, "no CRM base URL configured")
+        if not self.token:
+            return CrmResult(False, 0, "no CRM token configured")
+        url = f"{self.base}{path}"
+        try:
+            async with httpx.AsyncClient(timeout=self.timeout) as client:
+                resp = await client.request(method, url, headers=self._headers(), **kwargs)
+        except Exception as exc:  # noqa: BLE001 - transport failure is retryable, not fatal
+            logger.warning("crm-link: %s %s failed: %r", method, url, exc)
+            return CrmResult(False, 0, f"transport error: {exc!r}")
+        body: Any
+        try:
+            body = resp.json()
+        except ValueError:
+            body = resp.text
+        if resp.status_code >= 400:
+            snippet = (str(body) or "").replace("\n", " ")[:300]
+            return CrmResult(False, resp.status_code, snippet,
+                             body if isinstance(body, dict) else None)
+        return CrmResult(True, resp.status_code, "",
+                         body if isinstance(body, dict) else {"data": body})
+
+    async def probe(self) -> CrmResult:
+        """`GET /api/health` — the one call that proves container-name reachability, auth
+        aside (health is in the CRM's `auth.EXEMPT` set, so it answers unauthenticated)."""
+        return await self._request("GET", HEALTH_PATH)
+
+    async def resolve_contact_id(self, phone: str) -> tuple[Optional[int], str]:
+        """`(contact_id, reason)`. `contact_id` is None when nothing matched exactly.
+
+        `reason` always says WHY — "no contact matches +1...", "token lacks the 'read'
+        scope", "CRM unreachable" — because the caller writes it into a log line that is
+        the only trace of a call that did not reach the CRM.
+        """
+        target = match_key(phone)
+        if not target:
+            return None, "caller number is empty or unusable"
+
+        for candidate in phone_candidates(phone):
+            result = await self._request(
+                "GET", CONTACTS_PATH,
+                params={"q": candidate, "page_size": _LOOKUP_PAGE_SIZE, "page": 1},
+            )
+            if not result.ok:
+                if result.status == 403:
+                    return None, (
+                        "the CRM token cannot read contacts — POST /api/events needs a "
+                        "contact_id, so this token needs the 'read' scope as well as "
+                        "'events:write'"
+                    )
+                if result.status == 401:
+                    return None, "the CRM rejected the token (401)"
+                # A transport error or 5xx: stop trying renderings and let the caller retry
+                # the whole job rather than hammering the CRM with four more queries.
+                return None, f"contact lookup failed: {result.reason}"
+            items = (result.data or {}).get("items")
+            for item in items if isinstance(items, list) else []:
+                if not isinstance(item, dict):
+                    continue
+                # EXACT last-ten confirmation. The ILIKE that found this row is a substring
+                # match and will happily return a different customer whose number contains
+                # the same seven digits.
+                if match_key(item.get("phone")) == target and item.get("id") is not None:
+                    try:
+                        return int(item["id"]), "matched"
+                    except (TypeError, ValueError):
+                        continue
+        return None, f"no CRM contact matches {phone}"
+
+    async def post_event(self, body: dict) -> CrmResult:
+        """`POST /api/events`. The body must already be in the CRM's shape — build it with
+        `events.to_crm_event` and check it with `events.validate_crm_event`."""
+        result = await self._request("POST", EVENTS_PATH, json=body)
+        if result.ok:
+            logger.info("crm-link: event delivered (contact=%s type=%s status=%s)",
+                        body.get("contact_id"), body.get("type"), result.status)
+        else:
+            logger.warning("crm-link: event REFUSED by the CRM (%s): %s",
+                           result.status, result.reason)
+        return result
