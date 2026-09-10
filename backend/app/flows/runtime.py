@@ -528,6 +528,15 @@ async def run_flow_for_stasis(event: dict, ari: AriControl) -> None:
         # (consent notice -> ring every AVAILABLE operator -> first-answer bridge -> else
         # voicemail). Run with NO DB session held (it can bridge/record for minutes). A real
         # assigned flow OVERRIDES this; this is what happens before anything is configured.
+        # CRM link (app/integrations/crm/), additive and opt-in. Returns False — before it
+        # touches the database — unless CRM_LINK_ENABLED is true AND this DID has an enabled
+        # `crm_links` row, in which case the very next line runs the unchanged default
+        # handler. Every failure inside it also returns False, so there is no state in which
+        # this line can leave a caller unhandled.
+        from app.integrations.crm import hook as crm_hook
+
+        if await crm_hook.handle_bound_inbound(ari, channel_id, lid, str(dialed), caller_number):
+            return
         clog(logger, "route", linkedid=lid, mode="default_handling", dialed=dialed)
         await _handle_unassigned(ari, channel_id, lid, str(dialed), caller_number)
         return
