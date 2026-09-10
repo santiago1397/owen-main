@@ -207,9 +207,7 @@ async def usage_middleware(request: Request, call_next):
     # `/api/crm-link/*` is included for the same reason and then some: it can place a
     # telephone call and send a text from a real business line, so every request against
     # it belongs in the audit trail.
-    if not request.url.path.startswith(
-        ("/api/ai", "/api/agent-runtime", "/api/crm-link")
-    ):
+    if not request.url.path.startswith(("/api/ai", "/api/agent-runtime", "/api/crm-link")):
         return await call_next(request)
     started = time.monotonic()
     response = await call_next(request)
