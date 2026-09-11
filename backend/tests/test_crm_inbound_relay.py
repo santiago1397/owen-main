@@ -18,7 +18,7 @@ Run: python -m tests.test_crm_inbound_relay
 import asyncio
 import uuid
 
-from tests.test_crm_unknown_caller import FakeCrmHttp, FakeResponse  # HTTP-boundary mock
+from tests.test_crm_unknown_caller import FakeCrmHttp  # the HTTP-boundary mock
 
 BOUND_DID = "+15615550200"
 UNBOUND_DID = "+15615550100"

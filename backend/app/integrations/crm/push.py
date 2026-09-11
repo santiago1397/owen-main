@@ -150,10 +150,12 @@ async def enqueue_call_event(facts: CallEventFacts) -> bool:
 
 
 def _refusal(what: str, subject: str) -> str | None:
-    """The two configuration refusals every enqueue shares, reported identically.
+    """The two configuration refusals an enqueue has to clear, or None to proceed.
 
-    Returns the reason, or None when the enqueue may proceed. Kept as one function so a
-    message and a call can never drift into disagreeing about whether the link is on.
+    Shared by the message and receipt enqueues. `enqueue_call_event` above keeps its own
+    copy DELIBERATELY: it runs from the middle of a live call, it has worked there since
+    this module shipped, and folding it into a shared helper would change a live path's
+    behaviour and its log lines to save six lines. That is not a trade worth making here.
     """
     cfg = crm_config.current()
     refusal = cfg.delivery_refusal()
