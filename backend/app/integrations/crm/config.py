@@ -92,6 +92,43 @@ REFUSE_NO_TOKEN = "no CRM token configured (CRM_LINK_TOKEN)"
 REFUSE_NOT_BOUND = "that number is not bound to the CRM"
 
 
+# --- the CRM-link marker on an outbound message -------------------------------------------
+# A delivery receipt may only be relayed for a message the CRM ITSELF sent. Nothing else is
+# any of its business, and `POST /api/events/delivery` 404s on a provider_ref it has never
+# seen — so relaying every DID's receipts would be a 404 per operator text, forever.
+#
+# The marker lives in `messages.raw_payload`, which for an OUTBOUND row is always NULL
+# today: only `services/messages.ingest_message_event` and `services/ingestion.py` write it,
+# and both are INBOUND paths. So this ADDS a fact where there was none and overrides
+# nothing — which is the rule this whole module is built on, and the reason it needs no
+# migration. `handle_message_send` rewrites `provider_message_sid` and `status` on send and
+# never touches `raw_payload`, so the marker survives to the receipt.
+#
+# It is not inferable. "Outbound on a bound DID with no `sent_by_user_id`" was the obvious
+# alternative and is wrong: `flows/runtime.py` also sends with no user, so a flow's text on
+# a bound DID would be relayed as though the CRM had sent it.
+
+MARKER_KEY = "crm_link"
+
+
+def link_marker(link_id: str | None, did: str | None) -> dict:
+    """The value stamped on `messages.raw_payload` for a message the CRM sent."""
+    return {MARKER_KEY: {"link_id": str(link_id or ""), "did": str(did or "")}}
+
+
+def marker_of(raw_payload) -> dict | None:
+    """The CRM-link marker on a `messages` row, or None if it was not sent through the link.
+
+    Defensive about the shape: `raw_payload` is JSONB written by several different paths,
+    and a receipt arriving for a row with something unexpected in it must answer "not ours"
+    rather than raise inside a webhook.
+    """
+    if not isinstance(raw_payload, dict):
+        return None
+    marker = raw_payload.get(MARKER_KEY)
+    return marker if isinstance(marker, dict) else None
+
+
 @dataclass(frozen=True)
 class CrmLinkSettings:
     """The env half of the configuration, resolved once and passed around.

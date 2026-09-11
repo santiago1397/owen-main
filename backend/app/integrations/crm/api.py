@@ -51,8 +51,10 @@ from app.db import get_db
 from app.integrations.crm import binding as crm_binding
 from app.integrations.crm import config as crm_config
 from app.integrations.crm.client import CrmClient
-from app.integrations.crm.events import (CallEventFacts, MessageEventFacts, to_crm_event,
-                                         to_crm_message_event, validate_crm_event)
+from app.integrations.crm.events import (CallEventFacts, DeliveryReceiptFacts,
+                                         MessageEventFacts, to_crm_delivery_receipt,
+                                         to_crm_event, to_crm_message_event,
+                                         validate_crm_delivery_receipt, validate_crm_event)
 from app.models import Number
 from app.services import queue, sms
 from app.telephony import outbound as outbound_rules
@@ -289,6 +291,75 @@ async def deliver_message_event(
             "message_id": facts.owen_message_id}
 
 
+class DeliveryReceiptIn(BaseModel):
+    """The `crm_report` job body for a receipt, i.e. `events.DeliveryReceiptFacts.as_payload()`."""
+
+    model_config = {"extra": "allow"}
+
+    owen_message_id: str = ""
+    status: str = ""
+    detail: str = ""
+    dialed_number: str = ""
+    provider_message_sid: str = ""
+    extra: dict = Field(default_factory=dict)
+
+
+@router.post("/delivery-receipts")
+async def deliver_receipt(
+    body: DeliveryReceiptIn,
+    db: AsyncSession = Depends(get_db),
+    _key=Depends(require_scope(SCOPE_AGENT_WRITE)),
+) -> dict:
+    """Relay one carrier delivery receipt to the CRM — "i want to know if the text arrived".
+
+    `provider_ref` carries `messages.id`, which is the id OWEN handed the CRM when it
+    accepted the send (`send_message` below answers `{"message_id": ...}`) and the ONLY key
+    the CRM can match a receipt on. The BulkVS RefId is never sent: the CRM has never seen
+    one. The webhook resolves the RefId to the `messages` row before this is reached.
+
+    Retry contract, as everywhere else on this router: 502 for a CRM that is down, 200 with
+    `ok: false` for anything the CRM understood and refused. A **404** is in the second
+    group and is an ordinary answer, not a fault — it is what a receipt for a text sent
+    before the link existed looks like, and no number of retries will conjure the row.
+    """
+    cfg = _require_enabled()
+    facts = DeliveryReceiptFacts.from_payload(body.model_dump())
+
+    base_url, token = cfg.base_url, cfg.token
+    bound = await crm_binding.resolve(db, facts.dialed_number) if facts.dialed_number else None
+    if bound is None:
+        logger.warning("crm-link: not relaying the receipt for message %s — %s is not bound",
+                       facts.owen_message_id, facts.dialed_number or "<no DID>")
+        return {"ok": False, "reason": crm_config.REFUSE_NOT_BOUND,
+                "message_id": facts.owen_message_id}
+    base_url, token = bound.crm_base_url or base_url, bound.crm_token or token
+    if not token:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, crm_config.REFUSE_NO_TOKEN)
+
+    crm_body = to_crm_delivery_receipt(facts)
+    problems = validate_crm_delivery_receipt(crm_body)
+    if problems:
+        logger.error("crm-link: refusing to send a malformed delivery receipt: %s", problems)
+        return {"ok": False, "reason": "; ".join(problems),
+                "message_id": facts.owen_message_id}
+
+    client = CrmClient(base_url, token, timeout_s=cfg.http_timeout_seconds,
+                       budget_s=cfg.http_budget_seconds)
+    result = await client.post_delivery_receipt(crm_body)
+    if result.ok:
+        return {"ok": True, "message_id": facts.owen_message_id,
+                "status": facts.status, "crm_status": result.status,
+                # False when the CRM correctly ignored a stale or out-of-order receipt.
+                "advanced": (result.data or {}).get("advanced")}
+    if result.retryable:
+        raise HTTPException(
+            status.HTTP_502_BAD_GATEWAY,
+            f"CRM did not accept the receipt ({result.status}): {result.reason}",
+        )
+    return {"ok": False, "reason": f"CRM {result.status}: {result.reason}",
+            "message_id": facts.owen_message_id}
+
+
 # --- direction 2: the CRM -> OWEN ---------------------------------------------------------
 
 
@@ -396,7 +467,7 @@ async def send_message(
         logger.warning("crm-link: REFUSED SMS to %s — %s", body.to_number, refusal)
         raise HTTPException(status.HTTP_403_FORBIDDEN, refusal)
 
-    number, _bound = await _bound_from_number(db, body.from_number)
+    number, bound = await _bound_from_number(db, body.from_number)
 
     # The platform's OWN 10DLC gate. Independent of ours and never bypassed.
     gate = sms.outbound_block_reason(number.sms_enabled, number.sms_campaign_id)
@@ -418,9 +489,18 @@ async def send_message(
         raise HTTPException(status.HTTP_409_CONFLICT, "this contact has opted out of SMS")
 
     msg = await enqueue_outbound_message(db, number, contact, text, None)
+    # Mark the row as the CRM's BEFORE the send job can drain, so a delivery receipt that
+    # comes back fast still finds the marker. This is the ONLY thing that distinguishes a
+    # message the CRM sent from one an operator (or a flow) sent on the same DID, and
+    # `/webhooks/bulkvs/message-status` relays a receipt for the first and not the second.
+    # `raw_payload` is NULL on every outbound row today — see config.py, THE MARKER.
+    msg.raw_payload = crm_config.link_marker(bound.link_id, number.phone_number)
+    await db.commit()
     await queue.enqueue(db, "message_send", {"message_id": str(msg.id)})
     logger.info("crm-link: queued SMS %s -> %s (message %s)",
                 number.phone_number, contact, msg.id)
+    # `message_id` IS the correlation field: the CRM stores it as its ConversationEvent's
+    # `provider_ref`, and every delivery receipt for this text comes back carrying it.
     return {"ok": True, "message_id": str(msg.id), "status": "queued"}
 
 

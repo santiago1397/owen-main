@@ -82,6 +82,21 @@ async def message(request: Request) -> Response:
     return Response(status_code=200)
 
 
+def _carrier_detail(body: dict) -> str:
+    """The carrier's own failure text, if it gave one.
+
+    Shown to the operator verbatim under the message in the CRM, because "failed" alone does
+    not tell them whether to try another number or wait. Read the same defensive way as
+    RefId/Status above: BulkVS's DLR field names are not pinned by a contract we control.
+    """
+    for key in ("ErrorMessage", "Error", "StatusMessage", "Reason", "Description",
+                "errorMessage", "error", "reason", "detail"):
+        value = body.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()[:500]
+    return ""
+
+
 @router.post("/message-status")
 async def message_status(request: Request) -> Response:
     """BulkVS outbound delivery-status (DLR) callback — advances an OUTBOUND row's status
@@ -118,4 +133,20 @@ async def message_status(request: Request) -> Response:
             logger.info("bulkvs message-status: %s %s -> %s", msg.id, msg.status, advanced)
             msg.status = advanced
             await db.commit()
+        # Relayed for EVERY receipt the ladder RECOGNISES, not only the ones that moved
+        # OWEN's own row. `handle_message_send` marks a row 'sent' the moment BulkVS accepts
+        # it, so a carrier "sent" DLR advances nothing here while being exactly the news the
+        # CRM is waiting for — its own copy is still QUEUED. Both sides apply their own
+        # forward-only ladder, so a repeat or an out-of-order receipt is harmless.
+        word = str(new_status or "").strip().lower()
+        receipt = ({"message_id": str(msg.id), "status": word,
+                    "detail": _carrier_detail(body)}
+                   if word in sms.OUTBOUND_STATUS_RANK else None)
+
+    # ADDITIVE and opt-in: this does nothing unless the message was SENT THROUGH the CRM
+    # link (a marker on its `messages` row) on a DID that is still bound. An operator's text
+    # from the Inbox, or a flow's, is not relayed — the CRM has no event for it and would
+    # 404 every one. The hook is total, so the 200 below is reached whatever happens.
+    if receipt:
+        await crm_hook.handle_delivery_receipt(**receipt)
     return Response(status_code=200)

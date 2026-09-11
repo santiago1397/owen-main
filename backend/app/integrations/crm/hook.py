@@ -176,3 +176,64 @@ async def handle_inbound_message(
     except Exception:  # noqa: BLE001 - the text is already ingested; this is the extra
         logger.exception("crm-link: reporting inbound message %s failed", message_id)
         return False
+
+
+async def handle_delivery_receipt(*, message_id: str, status: str, detail: str = "") -> bool:
+    """Relay a carrier delivery receipt for a message the CRM sent through the link.
+
+    True iff a job was written. False — do nothing — for every one of:
+      * the kill switch is off (before any query at all);
+      * the `messages` row is gone, or is not OUTBOUND;
+      * the row carries no CRM-link marker, i.e. an operator or a flow sent it and the CRM
+        has no event for it. Relaying those would be a 404 per text, forever;
+      * the DID is no longer bound;
+      * anything went wrong.
+
+    `status` is the CARRIER's word, not OWEN's advanced status. Both sides apply their own
+    forward-only ladder, which is what makes a late or out-of-order receipt harmless.
+    """
+    try:
+        from app.integrations.crm import config as crm_config
+
+        if not crm_config.link_enabled():
+            return False
+        word = str(status or "").strip().lower()
+        if not word or not message_id:
+            return False
+
+        import uuid as _uuid
+
+        from app.db import SessionLocal
+        from app.integrations.crm import binding as crm_binding
+        from app.models import Message
+
+        async with SessionLocal() as db:
+            msg = await db.get(Message, _uuid.UUID(str(message_id)))
+            if msg is None:
+                return False
+            marker = crm_config.marker_of(msg.raw_payload)
+            if marker is None:
+                # Not the CRM's message. The overwhelmingly common case on a live system,
+                # and the reason this is checked before anything else is looked up.
+                return False
+            if (msg.direction or "").lower() != "outbound":
+                logger.warning("crm-link: receipt for %s ignored — it is not an outbound row",
+                               message_id)
+                return False
+            did = msg.from_number or marker.get("did") or ""
+            sid = msg.provider_message_sid or ""
+            bound = await crm_binding.resolve(db, did)
+        if bound is None:
+            logger.info("crm-link: not relaying the receipt for message %s — %s is no "
+                        "longer bound to the CRM", message_id, did or "<no DID>")
+            return False
+
+        from app.integrations.crm import push as crm_push
+
+        return await crm_push.report_delivery_receipt(
+            message_id=str(message_id), binding=bound, status=word, detail=detail,
+            dialed_number=did, provider_message_sid=sid,
+        )
+    except Exception:  # noqa: BLE001 - OWEN's own row is already advanced and committed
+        logger.exception("crm-link: relaying the delivery receipt for %s failed", message_id)
+        return False

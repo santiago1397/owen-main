@@ -38,7 +38,8 @@ from sqlalchemy import select
 from app.core.config import settings
 from app.db import SessionLocal
 from app.integrations.crm import config as crm_config
-from app.integrations.crm.events import CallEventFacts, MessageEventFacts
+from app.integrations.crm.events import (CallEventFacts, DeliveryReceiptFacts,
+                                         MessageEventFacts)
 from app.models import Call, Recording, Transcription
 from app.services import queue
 
@@ -53,6 +54,7 @@ JOB_TYPE = "crm_report"
 # The three app-side adapters the worker posts back into. One hop, three routes.
 CALL_EVENT_PATH = "/api/crm-link/events"
 MESSAGE_EVENT_PATH = "/api/crm-link/message-events"
+DELIVERY_RECEIPT_PATH = "/api/crm-link/delivery-receipts"
 
 
 def delivery_url(path: str = CALL_EVENT_PATH) -> str:
@@ -271,3 +273,47 @@ async def report_call_phase(
     )
     return await enqueue_call_event(facts)
 
+
+
+async def enqueue_delivery_receipt(facts: DeliveryReceiptFacts) -> bool:
+    """Queue one carrier delivery receipt for relay to the CRM. True iff a job was written.
+
+    Never raises, for the same reason as its two siblings: this runs inside
+    `/webhooks/bulkvs/message-status`, and OWEN's own `messages` row has ALREADY been
+    advanced and committed by the time it is called. Telling the CRM is the extra.
+    """
+    if _refusal("delivery receipt", facts.owen_message_id):
+        return False
+    try:
+        async with SessionLocal() as db:
+            await queue.enqueue(db, JOB_TYPE, {
+                "url": delivery_url(DELIVERY_RECEIPT_PATH),
+                "headers": {"X-OWEN-Key": settings.AGENT_RUNTIME_KEY},
+                "body": facts.as_payload(),
+            })
+        logger.info("crm-link: queued delivery receipt for message %s (status=%s)",
+                    facts.owen_message_id, facts.status)
+        return True
+    except Exception:  # noqa: BLE001 - relaying must never affect the DLR webhook
+        logger.exception("crm-link: queuing the delivery receipt for %s failed",
+                         facts.owen_message_id)
+        return False
+
+
+async def report_delivery_receipt(
+    *, message_id: str, binding, status: str, detail: str = "",
+    dialed_number: str = "", provider_message_sid: str = "", extra: dict | None = None,
+) -> bool:
+    """Queue one receipt for a message the CRM sent. `status` is the CARRIER's word."""
+    return await enqueue_delivery_receipt(DeliveryReceiptFacts(
+        owen_message_id=str(message_id),
+        status=str(status or "").strip().lower(),
+        detail=detail or "",
+        dialed_number=dialed_number or "",
+        provider_message_sid=provider_message_sid or "",
+        extra={
+            "crm_link_id": getattr(binding, "link_id", None),
+            "crm_base_url": getattr(binding, "crm_base_url", None),
+            **(extra or {}),
+        },
+    ))

@@ -428,3 +428,101 @@ def to_crm_message_event(facts: MessageEventFacts,
         "provider_ref": facts.owen_message_id or None,
         **({"contact_id": int(contact_id)} if contact_id is not None else {}),
     }
+
+
+# --- delivery receipts --------------------------------------------------------------------
+# Gap 3, and the owner's own words for what it is for: "i want to know if the text arrived
+# or not."
+#
+# THE CORRELATION FIELD, read out of the CRM's source rather than guessed:
+#
+#   * `crmlink.send_sms` calls OWEN's `POST /api/crm-link/messages`, which answers
+#     `{"ok": true, "message_id": "<messages.id>", "status": "queued"}` (api.send_message).
+#   * `transport.py::OwenMainTransport.send` stores exactly that as the CRM's own
+#     `MessageRef(provider_ref=str(data.get("message_id")))`, which lands on the
+#     ConversationEvent's `provider_ref` column.
+#   * `POST /api/events/delivery` looks a receipt's row up by
+#     `ConversationEvent.provider_ref == body.provider_ref` AND `direction == OUTBOUND`,
+#     404-ing if it finds nothing. Its own docstring: "It is the only join key: the CRM
+#     never sees the BulkVS RefId."
+#
+# So `provider_ref` IS `messages.id`, and the BulkVS RefId — which is what OWEN's own
+# `/webhooks/bulkvs/message-status` matches on — must NOT be sent in its place. The webhook
+# resolves the RefId to the `messages` row first and relays that row's id.
+
+# The CRM's `DELIVERY_RECEIPT_STATUSES`, verified against ghl-clone `main.py`. It is exactly
+# the key set of OWEN's own `services/sms.OUTBOUND_STATUS_RANK` — the CRM took its vocabulary
+# from ours on purpose, so no translation happens anywhere and there is nothing to drift.
+CRM_DELIVERY_STATUSES = frozenset(
+    {"queued", "sent", "delivered", "failed", "undelivered", "blocked"}
+)
+
+
+@dataclass(frozen=True)
+class DeliveryReceiptFacts:
+    """One carrier delivery receipt for a message the CRM sent through the link."""
+
+    owen_message_id: str                        # messages.id — THE correlation field
+    status: str                                 # the CARRIER's word, lowercased
+    detail: str = ""                            # the carrier's failure text, when it gave one
+    dialed_number: str = ""                     # the bound DID it was sent FROM
+    provider_message_sid: str = ""              # bulkvs-<RefId>, for support threads
+    extra: dict = field(default_factory=dict)
+
+    def as_payload(self) -> dict:
+        return {
+            "owen_message_id": self.owen_message_id,
+            "status": self.status,
+            "detail": self.detail,
+            "dialed_number": self.dialed_number,
+            "provider_message_sid": self.provider_message_sid,
+            "extra": dict(self.extra or {}),
+        }
+
+    @classmethod
+    def from_payload(cls, payload: dict) -> "DeliveryReceiptFacts":
+        p = dict(payload or {})
+        return cls(
+            owen_message_id=str(p.get("owen_message_id") or ""),
+            status=str(p.get("status") or "").strip().lower(),
+            detail=str(p.get("detail") or ""),
+            dialed_number=str(p.get("dialed_number") or ""),
+            provider_message_sid=str(p.get("provider_message_sid") or ""),
+            extra=p.get("extra") if isinstance(p.get("extra"), dict) else {},
+        )
+
+
+def to_crm_delivery_receipt(facts: DeliveryReceiptFacts) -> dict[str, Any]:
+    """The exact body `POST /api/events/delivery` accepts: `{provider_ref, status, detail}`.
+
+    The CARRIER's word is sent, not OWEN's own advanced status. A receipt is a report of
+    what the carrier said; both sides then apply their own forward-only ladder to it, which
+    is what makes a late or out-of-order receipt harmless on either side.
+    """
+    body: dict[str, Any] = {
+        "provider_ref": facts.owen_message_id or None,
+        "status": facts.status,
+    }
+    detail = (facts.detail or "").strip()
+    if detail:
+        body["detail"] = detail
+    return body
+
+
+def validate_crm_delivery_receipt(body: dict) -> list[str]:
+    """Everything the CRM would reject about a receipt, checked here first.
+
+    A receipt that cannot name its message is worse than useless: the CRM would 404 it, the
+    job would complete with `ok: false`, and the operator would go on staring at a message
+    stuck on QUEUED. Caught here it is a log line that names the bug.
+    """
+    problems: list[str] = []
+    ref = str(body.get("provider_ref") or "").strip()
+    if not ref:
+        problems.append("provider_ref must carry messages.id — it is the only join key")
+    status = str(body.get("status") or "").strip().lower()
+    if status not in CRM_DELIVERY_STATUSES:
+        problems.append(
+            f"status {body.get('status')!r} is not one of {sorted(CRM_DELIVERY_STATUSES)}"
+        )
+    return problems
