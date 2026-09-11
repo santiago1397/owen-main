@@ -146,3 +146,91 @@ async def list_contacts(page_token: Optional[str] = None, limit: int = 50) -> di
     if page_token:
         params["pageToken"] = page_token
     return await _get("/contacts", params)
+
+
+# ══════════════════════════════════════════════════════════════════════════════════════════
+#  ADDED 2026-09-11 for the CRM mirror (app/integrations/openphone/).
+#
+#  Every function below is a GET through `_get`, for the same reason the rest of this module
+#  is: the mirror's whole job is to COPY OpenPhone activity into the CRM, and a mirror that
+#  can write is a mirror that can text a customer from a number the business is migrating
+#  away from. There is still no `_post`. Adding one removes the guarantee for the whole file.
+#
+#  UNVERIFIED, in the same sense as the header's warning and for the same reason: the probe
+#  (`app.scripts.probe_openphone`) has confirmed `/phone-numbers`, `/calls`, `/contacts`,
+#  `/call-recordings`, `/call-transcripts` and `/call-summaries` against the live account.
+#  It has NOT yet confirmed `/messages` or `/conversations`. The probe has been extended to
+#  cover both; until it is run with the production key, treat these two shapes as a
+#  hypothesis and expect `sync.py` to degrade rather than to be right.
+# ══════════════════════════════════════════════════════════════════════════════════════════
+
+
+async def list_messages(
+    phone_number_id: str, participant: str, *,
+    page_token: Optional[str] = None, limit: int = 50,
+) -> dict:
+    """GET /messages — texts between our OpenPhone number and ONE participant.
+
+    Shaped deliberately like `list_calls_with`, because the API constraint is expected to be
+    the same one: `/calls` rejects a participant-less query with a 400 (verified, spec D11a),
+    and `/messages` is documented with the same required `participants` array. Assuming the
+    symmetry is what lets `sync.py` drive calls and texts from one participant loop.
+
+    If it turns out `/messages` DOES accept a time-only sweep, that is strictly good news and
+    the fix is in `sync.py`'s enumeration, not here.
+
+    Returns the raw page: `{"data": [...], "totalItems": n, "nextPageToken": ...}`.
+    """
+    params: dict = {
+        "phoneNumberId": phone_number_id,
+        "participants[]": participant,
+        "maxResults": limit,
+    }
+    if page_token:
+        params["pageToken"] = page_token
+    return await _get("/messages", params)
+
+
+async def list_conversations(
+    phone_number_id: str, *, page_token: Optional[str] = None, limit: int = 50,
+) -> dict:
+    """GET /conversations — the threads on our number, most-recently-active first.
+
+    THIS IS THE ENUMERATOR, and it is the one thing that makes a 30-day backfill possible.
+    Spec D11a established the hard constraint: there is NO time-based sweep of `/calls`, so
+    OWEN cannot ask "everything that happened since X" — it can only ask "what happened with
+    THIS participant". That is fine for D11 (touches on known leads) and useless for a
+    mirror, which must not silently omit the strangers.
+
+    `/conversations` closes that gap if it exists: it lists threads with their participants
+    and `lastActivityAt`, which turns "who do I ask about?" into a query rather than a guess.
+    `sync.py` pages it until `lastActivityAt` falls out of the window, then asks `/calls` and
+    `/messages` about each participant it found.
+
+    UNVERIFIED — see the block comment above. `sync.participants_in_window` treats a failure
+    here as "enumerate from the sources that ARE verified" (OpenPhone `/contacts` plus the
+    CRM's own contacts), so an account where this endpoint does not exist mirrors a narrower
+    set rather than mirroring nothing.
+    """
+    params: dict = {"phoneNumberId": phone_number_id, "maxResults": limit}
+    if page_token:
+        params["pageToken"] = page_token
+    return await _get("/conversations", params)
+
+
+async def fetch_recording_bytes(url: str) -> tuple[bytes, str]:
+    """GET a recording's media from the URL `get_call_recording` handed back.
+
+    NOT an api.openphone.com call: the URL is a share.quo.com link the API just gave us, and
+    it carries its own authorisation, so **the API key is deliberately not sent here** — it
+    would be handing a credential to a host that did not ask for it.
+
+    Returns `(bytes, content_type)`. Raises on a non-2xx, like `_get`, so the route above it
+    can answer honestly instead of streaming an error page as audio.
+    """
+    if not str(url or "").strip():
+        raise RuntimeError("no recording URL to fetch")
+    async with httpx.AsyncClient(timeout=_TIMEOUT, follow_redirects=True) as client:
+        resp = await client.get(url)
+        resp.raise_for_status()
+        return resp.content, resp.headers.get("content-type", "audio/mpeg")

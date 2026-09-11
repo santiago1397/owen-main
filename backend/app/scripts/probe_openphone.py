@@ -18,7 +18,6 @@ Run (inside the app container on the server, where .env.prod is loaded):
 """
 
 import asyncio
-import json
 
 from app.core.config import settings
 from app.providers import openphone_client as op
@@ -51,7 +50,7 @@ async def main() -> None:
         print("\nFAIL: OPENPHONE_API_KEY is empty in this environment.")
         print("      Set it in .env.prod on the server and re-run.")
         return
-    print(f"\nkey configured : yes (value not shown)")
+    print("\nkey configured : yes (value not shown)")
     print(f"api base       : {settings.OPENPHONE_API_BASE}")
 
     # 1. connectivity — the cheapest read on the API
@@ -74,36 +73,111 @@ async def main() -> None:
         print("\n    No usable phone-number id; cannot probe call logs.")
         return
 
-    # 2. call logs — the data the whole OpenPhone integration depends on (spec D11)
+    # 2. the ENUMERATOR (spec D11a's missing piece, and what the CRM mirror needs)
+    #
+    # D11a established that GET /calls REJECTS a participant-less query, so there is no way
+    # to ask "everything since X". That is survivable for D11 (touches on KNOWN leads) and
+    # fatal for a mirror, which must not silently omit the strangers. /conversations is the
+    # candidate fix: it lists the threads on our line, which turns "who do I ask about?"
+    # into a query. THIS IS THE MAIN THING THIS PROBE NOW EXISTS TO CONFIRM.
     first_id = numbers[0]["id"]
-    print(f"\n[2] GET /calls for phoneNumberId={first_id}")
+    participant = None
+    print(f"\n[2] GET /conversations for phoneNumberId={first_id}")
     try:
-        page = await op.list_calls(first_id, limit=5)
+        page = await op.list_conversations(first_id, limit=5)
+    except Exception as exc:  # noqa: BLE001
+        page = None
+        print(f"    FAILED: {type(exc).__name__}: {exc}")
+        print("    -> The mirror will fall back to /contacts + OWEN's own callers and will")
+        print("       be NARROWER than the account. Record that in the sentinel.")
+    if page is not None:
+        items = page.get("data", []) if isinstance(page, dict) else []
+        print(f"    OK — {len(items)} conversation(s) in this page")
+        if isinstance(page, dict):
+            print(f"    page keys: {list(page.keys())}")
+        if items and isinstance(items[0], dict):
+            c = items[0]
+            print(f"    lastActivityAt={c.get('lastActivityAt')} "
+                  f"updatedAt={c.get('updatedAt')}")
+            print(f"    participants: {[_mask(p) for p in (c.get('participants') or [])]}")
+            print(f"    shape: {_shape(c)}")
+            for entry in c.get("participants") or []:
+                digits = "".join(ch for ch in str(entry) if ch.isdigit())
+                own = "".join(ch for ch in str(numbers[0].get("number") or "")
+                              if ch.isdigit())
+                if digits and digits[-10:] != own[-10:]:
+                    participant = str(entry)
+                    break
+
+    # A participant is REQUIRED by /calls and (we believe) by /messages. Fall back to the
+    # address book, which D11a verified, so the rest of the probe still runs.
+    if participant is None:
+        print("\n[2b] no participant from /conversations — trying GET /contacts")
+        try:
+            book = await op.list_contacts(limit=5)
+            for entry in (book.get("data") or []) if isinstance(book, dict) else []:
+                fields = entry.get("defaultFields") or {}
+                for item in fields.get("phoneNumbers") or []:
+                    value = item.get("value") if isinstance(item, dict) else item
+                    if value:
+                        participant = str(value)
+                        break
+                if participant:
+                    break
+            print(f"    {'got one' if participant else 'no numbers in the address book'}")
+        except Exception as exc:  # noqa: BLE001
+            print(f"    FAILED: {type(exc).__name__}: {exc}")
+
+    if participant is None:
+        print("\n    No participant available; cannot probe /calls or /messages.")
+        print("\n" + "=" * 72)
+        print("Probe complete. Nothing was sent, dialled, or written.")
+        print("=" * 72)
+        return
+
+    print(f"\n[3] GET /calls  participants[]={_mask(participant)}")
+    # NOTE: this used to call `op.list_calls(first_id, limit=5)`, which has not existed
+    # since the client was reshaped around D11a's mandatory `participants` parameter — so
+    # the probe raised AttributeError before reaching any of the interesting reads. Fixed
+    # here because this probe is the instrument for verifying the mirror's two unverified
+    # endpoints, and a verification tool that cannot run verifies nothing.
+    try:
+        page = await op.list_calls_with(first_id, participant, limit=5)
+        items = page.get("data", []) if isinstance(page, dict) else []
+        print(f"    OK — {len(items)} call(s)")
+        if items and isinstance(items[0], dict):
+            c = items[0]
+            print(f"    sample: direction={c.get('direction')} status={c.get('status')} "
+                  f"created={c.get('createdAt')} duration={c.get('duration')}")
+            print(f"    shape: {_shape(c)}")
     except Exception as exc:  # noqa: BLE001
         print(f"    FAILED: {type(exc).__name__}: {exc}")
-        return
-    items = page.get("data", []) if isinstance(page, dict) else []
-    print(f"    OK — {len(items)} call(s) in this page")
-    if isinstance(page, dict):
-        print(f"    page keys: {list(page.keys())}")
-    if items and isinstance(items[0], dict):
-        c = items[0]
-        print(f"    sample: direction={c.get('direction')} status={c.get('status')} "
-              f"created={c.get('createdAt')} duration={c.get('duration')}")
-        print(f"    participants: {[_mask(p) for p in (c.get('participants') or [])]}")
-        print(f"    shape: {_shape(c)}")
 
-        # 3. is there richer content than metadata? (affects spec open item 3)
-        print("\n[3] capability check on that call")
-        for label, key in (("recording", "recordingUrl"), ("transcript", "transcriptId")):
-            present = key in c or any(key.lower() in k.lower() for k in c)
-            print(f"    {label:11s}: {'field present' if present else 'not in call payload'}")
-    else:
-        print("    No calls returned — the account may have no recent activity on this number.")
+    # 4. TEXTS — the reader added for the CRM mirror, and the one with no prior evidence.
+    #    If this 400s the way a participant-less /calls does, the mirror's message half is
+    #    wrong and sync.py needs a different enumeration. Find out here, not in production.
+    print(f"\n[4] GET /messages  participants[]={_mask(participant)}")
+    try:
+        page = await op.list_messages(first_id, participant, limit=5)
+        items = page.get("data", []) if isinstance(page, dict) else []
+        print(f"    OK — {len(items)} message(s)")
+        if isinstance(page, dict):
+            print(f"    page keys: {list(page.keys())}")
+        if items and isinstance(items[0], dict):
+            m = items[0]
+            # Field NAMES only. The BODY of a customer's text is never printed.
+            print(f"    direction={m.get('direction')} created={m.get('createdAt')} "
+                  f"status={m.get('status')} media={len(m.get('media') or [])}")
+            print(f"    body field present: {'text' in m or 'body' in m}")
+            print(f"    shape: {_shape(m)}")
+    except Exception as exc:  # noqa: BLE001
+        print(f"    FAILED: {type(exc).__name__}: {exc}")
+        print("    -> If this is a 400, /messages needs different params than /calls and")
+        print("       integrations/openphone/sync.py must be reworked before enabling.")
 
     print("\n" + "=" * 72)
     print("Probe complete. Nothing was sent, dialled, or written.")
-    print("Paste this output back to decide the Phase 3 ingestion shape.")
+    print("Every request above was a GET; this script has no code path that could write.")
     print("=" * 72)
 
 
