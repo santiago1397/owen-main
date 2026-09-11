@@ -277,10 +277,21 @@ def test_regressions():
     # Widened to the agent-runtime write surface too (AI_AGENT_SPEC D13): auditing every read
     # and none of the writes would be exactly backwards. Widened again to /api/crm-link
     # (app/integrations/crm/), which can place a call and send a text from a real business
-    # line — if anything belongs in the audit trail, that does. Still scoped to the three
-    # API-key surfaces, so no other route pays for it.
+    # line — if anything belongs in the audit trail, that does. And again to
+    # /api/openphone-mirror (app/integrations/openphone/), which reads a live third-party
+    # phone account and streams customer call recordings: read-only, but reading a
+    # customer's recording is exactly the sort of access somebody should be able to account
+    # for afterwards. Still scoped to the API-KEY surfaces, so no other route pays for it.
+    #
+    # This assertion used to grep the SOURCE TEXT of the tuple, which is the third bug
+    # scripts/check.sh exists to catch — "a source literal that a later, correct change had
+    # moved on from". It now reads the VALUE the middleware actually branches on, so a
+    # correct widening updates one list here and a careless one still fails.
     check("...scoped to the API-key surfaces so it never touches other routes",
-          'startswith(("/api/ai", "/api/agent-runtime", "/api/crm-link"))' in src)
+          set(deps.AUDITED_PREFIXES) == {"/api/ai", "/api/agent-runtime", "/api/crm-link",
+                                         "/api/openphone-mirror"})
+    check("...and the middleware branches on that exact tuple, not a copy",
+          "startswith(AUDITED_PREFIXES)" in src)
     check("...and skips requests a route already recorded (no double-count)",
           "ai_usage_recorded" in src)
     import app.main as main_mod
