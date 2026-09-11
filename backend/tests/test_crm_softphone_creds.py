@@ -371,19 +371,25 @@ def test_the_login_time_endpoint_is_untouched():
 
 def test_the_crm_link_router_gained_exactly_one_route():
     """A regression fence around 'additive'. If a future edit moves, renames or re-gates one
-    of the existing routes, this fails rather than the deploy."""
-    print("the crm-link router gained exactly one route and changed none:")
+    of the existing routes, this fails rather than the deploy.
+
+    Widened when feature/crm-link-relay merged: that branch added /message-events and
+    /delivery-receipts, so the fence now names all seven. It CAUGHT the merge, which is
+    exactly its job -- widen it deliberately, never delete it."""
+    print("the crm-link router is exactly the routes we expect:")
     from app.integrations.crm import api as crm_api
 
     paths = sorted((r.path, tuple(sorted(r.methods))) for r in crm_api.router.routes)
     expected = sorted([
         ("/api/crm-link/events", ("POST",)),
+        ("/api/crm-link/message-events", ("POST",)),
+        ("/api/crm-link/delivery-receipts", ("POST",)),
         ("/api/crm-link/calls", ("POST",)),
         ("/api/crm-link/messages", ("POST",)),
         ("/api/crm-link/health", ("GET",)),
         ("/api/crm-link/softphone/credentials", ("POST",)),
     ])
-    check("the route table is exactly the four that existed plus the new one",
+    check("the route table is exactly the seven we expect, no more and no fewer",
           paths == expected)
 
 
