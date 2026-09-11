@@ -7,9 +7,12 @@ route is authenticated anyway.
 
 ## Two callers, two privilege levels
 
-  * **The worker**, delivering a queued call event: `POST /events`, scope `agent_write`.
-    That is the scope `AGENT_RUNTIME_KEY` already carries for the existing agent CRM report,
-    so no new credential is needed for the internal hop.
+  * **The worker**, delivering a queued report: `POST /events` (a call lifecycle phase),
+    `POST /message-events` (an inbound SMS/MMS) and `POST /delivery-receipts` (a carrier
+    receipt for a message the CRM sent) — all scope `agent_write`. That is the scope
+    `AGENT_RUNTIME_KEY` already carries for the existing agent CRM report, so no new
+    credential is needed for the internal hop. All three share one retry contract: 200
+    completes the job, 502 makes the queue retry with backoff.
   * **The CRM**, asking OWEN to do something to a phone line: `POST /calls`, `POST /messages`,
     `GET /health`, scope `crm_link`. A NEW scope, because `agent_write` is documented as
     "WRITE captures and notes via /api/agent-runtime/*" and using it to authorise placing a
