@@ -21,6 +21,8 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
+from app.integrations.crm import softphone as crm_softphone
+
 # --- phone normalisation ------------------------------------------------------------------
 # The allowlist is compared on the LAST 10 DIGITS, so "+15615551234", "15615551234",
 # "(561) 555-1234" and "561-555-1234" are one destination. Matching on the raw string was
@@ -106,6 +108,13 @@ class CrmLinkSettings:
     token: str = ""
     allowlist: frozenset[str] = field(default_factory=frozenset)
     sms_enabled: bool = False
+    # The provisioned CRM browser-softphone operators, as SLUGS (see softphone.py). EMPTY
+    # GRANTS NOTHING, like `allowlist` above: a forgotten roster must mean "nobody got a
+    # softphone", never "anybody did".
+    softphone_operators: frozenset[str] = field(default_factory=frozenset)
+    # Cap on the SIP/TURN lifetime the CRM softphone path hands out. Only ever shortens the
+    # platform's own TTLs — see `softphone.capped_ttl`.
+    softphone_ttl_seconds: int = 900
     max_pstn_legs: int = 2
     ring_timeout_seconds: int = 25
     http_timeout_seconds: float = 5.0
@@ -188,6 +197,12 @@ def settings_view(settings) -> CrmLinkSettings:
         token=str(getattr(settings, "CRM_LINK_TOKEN", "") or ""),
         allowlist=parse_allowlist(getattr(settings, "CRM_LINK_ALLOWLIST", "")),
         sms_enabled=bool(getattr(settings, "CRM_LINK_SMS_ENABLED", False)),
+        softphone_operators=crm_softphone.parse_roster(
+            getattr(settings, "CRM_LINK_SOFTPHONE_OPERATORS", "")
+        ),
+        softphone_ttl_seconds=int(
+            getattr(settings, "CRM_LINK_SOFTPHONE_TTL_SECONDS", 900) or 900
+        ),
         max_pstn_legs=int(getattr(settings, "CRM_LINK_MAX_PSTN_LEGS", 2) or 2),
         ring_timeout_seconds=int(getattr(settings, "CRM_LINK_RING_TIMEOUT_SECONDS", 25) or 25),
         http_timeout_seconds=float(

@@ -281,6 +281,17 @@ class Settings(BaseSettings):
     # INSERTs; it has no dedupe key).
     CRM_LINK_HTTP_TIMEOUT_SECONDS: float = 5.0
     CRM_LINK_HTTP_BUDGET_SECONDS: float = 15.0
+    # WHICH CRM USERS MAY HOLD A BROWSER SOFTPHONE. Comma/semicolon/newline-separated
+    # emails; each is mapped to an operator by the SAME `telephony.credentials.operator_slug`
+    # rule every other operator path uses, so the slug here is the slug `ring.py` dials and
+    # the slug rendered into asterisk/pjsip.conf. Every name listed needs an
+    # `[operator-<slug>]` trio in pjsip.conf or it can register nowhere.
+    # EMPTY GRANTS NOTHING — the roster is a provisioning record, not a convenience.
+    CRM_LINK_SOFTPHONE_OPERATORS: str = ""
+    # Cap on the SIP + TURN lifetime handed to a CRM browser. Only ever SHORTENS the
+    # platform's own OPERATOR_SIP_TTL_SECONDS / TURN_TTL_SECONDS — the machine-authenticated
+    # side entrance is never the most generous door in the building.
+    CRM_LINK_SOFTPHONE_TTL_SECONDS: int = 900
 
     ANALYSIS_ENGINE: str = "dummy"  # dummy | claude | minimax
     ANTHROPIC_API_KEY: str = ""
