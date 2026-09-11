@@ -1,10 +1,11 @@
-"""OWEN call lifecycle -> the CRM's `POST /api/events` body. PURE (stdlib only).
+"""OWEN call + message lifecycle -> the CRM's `POST /api/events` body. PURE (stdlib only).
 
 ## The contract, READ FROM THE CRM'S SOURCE, not guessed
 
 `ghl-clone` (`backend/app/main.py::EventIngest` / `ingest_event`) accepts exactly:
 
-    {"contact_id": int,                                  # REQUIRED, must already exist
+    {"contact_id": int | None,                           # see THE AMENDMENT below
+     "from_number": str | None,                          # alias: "caller_number"
      "type": "SMS" | "CALL" | "EMAIL" | "INTERNAL_COMMENT",
      "direction": "INBOUND" | "OUTBOUND",                # default "INBOUND"
      "body": str | None,
@@ -13,15 +14,40 @@
      "recording_url": str | None,
      "provider_ref": str | None}
 
-and enforces three rules we must satisfy or be rejected with a 400/404:
+and enforces these rules, which we must satisfy or be rejected with a 400/404/422:
 
-  1. `contact_id` must resolve to an existing Contact, else **404**. There is no
-     create-on-ingest and no lookup by phone number on this endpoint, so a caller who is
-     not already in the CRM has nowhere to land. See `client.resolve_contact_id`.
+  1. An event needs a `contact_id` OR a `from_number`, else **422**. A `contact_id` that
+     does not resolve is still a **404** — naming a contact that is not there is a bug,
+     not a stranger.
   2. `call_status` is accepted ONLY when `type == "CALL"`, and only from
      `{completed, no-answer, busy, voicemail, failed}` — anything else is a 400.
   3. Authorisation is `Bearer ghl_pat_...` whose token carries the `events:write` scope
      AND whose owning user is ADMIN or DISPATCHER (`auth.require_events_ingest`).
+
+## THE AMENDMENT (CRM side, 2026-09-11) — why a stranger now gets through
+
+`contact_id` used to be REQUIRED, and that single fact silently discarded the most
+valuable event this business gets. `client.resolve_contact_id` searches the CRM's
+contacts and returns None for a caller who is not in them; `api.deliver_event` then
+dropped the event rather than post one the CRM would 404. A first-time roofing lead
+calling the bound DID therefore reached nobody.
+
+The CRM now accepts `from_number` (its `AliasChoices` also takes `caller_number`,
+which is what this module calls the same field), matches it to a contact on the LAST
+TEN DIGITS — the identity rule both systems share — and CREATES a contact when nothing
+matches, firing its own new-lead automation. So every body built here carries
+`from_number`, on every phase, whether or not a `contact_id` was resolved.
+
+We still resolve a `contact_id` first and send it when we have one. It is the exact
+match, it is the path the CRM's own tests pin, and it costs nothing we were not already
+spending. `from_number` is the fallback that makes a failure to resolve survivable
+instead of fatal — including a resolve that failed because the token lacks the `read`
+scope (see `client.resolve_contact_id`), which used to drop every event outright.
+
+DEPLOY ORDER. A CRM that predates the amendment declares `contact_id: int`, so a body
+without one is a 422 there. That is a 4xx: not retryable, logged, and the event is lost
+exactly as it is lost today. Nothing regresses, but the CRM half must be deployed for
+the fix to have any effect.
 
 ## Why a call produces the events it does
 
@@ -211,20 +237,31 @@ def summary_line(facts: CallEventFacts) -> str:
     return " ".join([line, *tail]).strip()
 
 
-def to_crm_event(facts: CallEventFacts, contact_id: int) -> dict[str, Any]:
+def to_crm_event(facts: CallEventFacts, contact_id: int | None = None) -> dict[str, Any]:
     """Build the exact body `POST /api/events` accepts. See the module docstring for why
     the two pre-terminal phases are INTERNAL_COMMENT rather than CALL.
 
     `provider_ref` carries `calls.id` — the value the CRM stores as
     `Opportunity.custom_fields.owen_call_id`, which is the documented join key back here.
+
+    `contact_id` is OPTIONAL. When OWEN resolved one it is sent and the CRM files the
+    event against exactly that contact; when it did not, the body carries `from_number`
+    alone and the CRM matches or creates the contact itself. The key is OMITTED rather
+    than sent as null so that a body for a resolved contact is byte-for-byte what this
+    function built before `from_number` existed, plus the one new field.
     """
     direction = "OUTBOUND" if str(facts.direction).lower() == "outbound" else "INBOUND"
     body: dict[str, Any] = {
-        "contact_id": int(contact_id),
         "body": summary_line(facts),
         # calls.id, on EVERY phase — the join key must not depend on which event survived.
         "provider_ref": facts.owen_call_id or facts.linkedid or None,
+        # THE fix for the first-time caller. Always sent, even alongside a contact_id: it
+        # costs one field and it is the only thing standing between a stranger's call and
+        # a dropped event if the lookup was wrong or could not run at all.
+        "from_number": facts.caller_number or None,
     }
+    if contact_id is not None:
+        body["contact_id"] = int(contact_id)
 
     if facts.phase != PHASE_ENDED:
         # Internal note. Direction OUTBOUND on purpose: the CRM increments the thread's
@@ -255,7 +292,14 @@ def validate_crm_event(body: dict) -> list[str]:
     than as a 400 in a retry loop against a live CRM.
     """
     problems: list[str] = []
-    if not isinstance(body.get("contact_id"), int):
+    # The CRM needs ONE of the two to know whose thread this belongs on: an explicit
+    # contact_id, or a number it can match-or-create against. Neither is a 422 there.
+    contact_id = body.get("contact_id")
+    has_number = bool(str(body.get("from_number") or "").strip())
+    if contact_id is None:
+        if not has_number:
+            problems.append("an event needs a contact_id or a from_number")
+    elif not isinstance(contact_id, int) or isinstance(contact_id, bool):
         problems.append("contact_id must be an int")
     etype = body.get("type")
     if etype not in ("SMS", "CALL", "EMAIL", "INTERNAL_COMMENT"):

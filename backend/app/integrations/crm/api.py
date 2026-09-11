@@ -147,8 +147,8 @@ async def deliver_event(
     Called by `workers/handlers.py::handle_crm_report` draining a `crm_report` job. The
     status code is the retry contract that handler reads:
 
-      * **200** — delivered, or permanently undeliverable (no matching contact). The job
-        completes. A caller who is not in the CRM will not become one on the sixth attempt.
+      * **200** — delivered, or permanently undeliverable. The job completes. A payload the
+        CRM refuses with a 4xx will not become acceptable on the sixth attempt.
       * **502** — the CRM was unreachable or answered 5xx. Raise so the queue retries with
         backoff and eventually dead-letters.
       * **200 with `ok: false`** for a CRM 4xx: the payload is wrong and retrying it will
@@ -175,9 +175,19 @@ async def deliver_event(
                        budget_s=cfg.http_budget_seconds)
     contact_id, reason = await client.resolve_contact_id(facts.caller_number)
     if contact_id is None:
-        logger.warning("crm-link: dropping %s event for call %s — %s",
-                       facts.phase, facts.owen_call_id or facts.linkedid, reason)
-        return {"ok": False, "reason": reason, "phase": facts.phase}
+        # NOT a drop any more. An unresolved caller is now sent with `from_number` and the
+        # CRM matches-or-creates the contact itself (see events.py, THE AMENDMENT). This
+        # used to `return {"ok": False}` here, which is what silently discarded every
+        # first-time roofing lead — the single most valuable event the business gets.
+        #
+        # INFO, not WARNING: "the caller is new" is the normal life of a phone line, and a
+        # warning per new lead would train everyone to ignore the log. The reason is still
+        # recorded, because it also covers the cases that ARE worth seeing — a token
+        # without the `read` scope, or a CRM that could not be searched.
+        logger.info("crm-link: no contact_id for %s event on call %s (%s) — sending "
+                    "from_number=%s for the CRM to match or create",
+                    facts.phase, facts.owen_call_id or facts.linkedid, reason,
+                    facts.caller_number or "<unknown>")
 
     crm_body = to_crm_event(facts, contact_id)
     problems = validate_crm_event(crm_body)
