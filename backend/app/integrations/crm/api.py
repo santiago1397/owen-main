@@ -11,7 +11,8 @@ route is authenticated anyway.
     That is the scope `AGENT_RUNTIME_KEY` already carries for the existing agent CRM report,
     so no new credential is needed for the internal hop.
   * **The CRM**, asking OWEN to do something to a phone line: `POST /calls`, `POST /messages`,
-    `GET /health`, scope `crm_link`. A NEW scope, because `agent_write` is documented as
+    `POST /softphone/credentials`, `GET /health`, scope `crm_link`. A NEW scope, because
+    `agent_write` is documented as
     "WRITE captures and notes via /api/agent-runtime/*" and using it to authorise placing a
     telephone call would falsify that description — the same objection `api/agent_runtime.py`
     itself raises about bolting writes onto the read-only `/api/ai` surface.
@@ -50,11 +51,13 @@ from app.core.config import settings
 from app.db import get_db
 from app.integrations.crm import binding as crm_binding
 from app.integrations.crm import config as crm_config
+from app.integrations.crm import softphone as crm_softphone
 from app.integrations.crm.client import CrmClient
 from app.integrations.crm.events import (CallEventFacts, to_crm_event, validate_crm_event)
 from app.models import Number
 from app.services import queue, sms
 from app.telephony import outbound as outbound_rules
+from app.telephony.credentials import build_webrtc_credentials
 
 logger = logging.getLogger("integrations.crm.api")
 
@@ -268,6 +271,80 @@ async def place_call(
                 number.phone_number, callee, operator)
     return {"ok": True, "operator_channel": op_channel_id,
             "callee_channel": callee_channel_id, "linkedid": op_channel_id}
+
+
+class SoftphoneCredentialsIn(BaseModel):
+    """The CRM user who wants to become a ring destination. Their EMAIL is the whole
+    request: it is the identity OWEN maps to an operator, and nothing else about a CRM
+    user is meaningful here."""
+
+    email: str
+
+
+@router.post("/softphone/credentials")
+async def softphone_credentials(
+    body: SoftphoneCredentialsIn,
+    _key=Depends(require_scope(SCOPE_CRM_LINK)),
+) -> dict:
+    """Mint short-lived SIP + TURN credentials so a CRM user's BROWSER can register as an
+    OWEN operator, and therefore be one of the phones `ring.py` rings.
+
+    This exists because `POST /api/telephony/webrtc/credentials` is gated on OWEN's own app
+    login (`current_user`), and a CRM user does not have one. The gate here is the CRM-link
+    API key, exactly like every other route in this module — the CRM's backend holds it and
+    the CRM browser never sees it.
+
+    It does NOT mint anything itself. `telephony.credentials.build_webrtc_credentials` is
+    the one minting path in this codebase and is called verbatim, with the same settings the
+    login-time endpoint passes; a second implementation would be a second place for the TURN
+    HMAC and the endpoint naming to drift.
+
+    The order of the guards is the contract:
+      1. the kill switch (503) — before any resolution, any settings read, any logging;
+      2. telephony off (503) — credentials for a dark platform are a lie, not a courtesy;
+      3. the operator roster (403) — an unprovisioned email is refused by name rather than
+         handed a blob that would fail to register with a bare SIP 401.
+
+    NOTHING minted here is logged. The log line carries the slug and the expiry, which is
+    what an operator debugging "why is my browser not ringing" needs, and neither the SIP
+    password nor the TURN credential, which is what an `app_logs` reader must never get.
+    """
+    cfg = _require_enabled()
+    if not settings.ASTERISK_ENABLED:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "telephony is not enabled")
+
+    slug, refusal = crm_softphone.resolve_operator(body.email, cfg.softphone_operators)
+    if refusal:
+        # The slug, not the email: the reason has to be greppable in a log without putting
+        # a staff address in every WARNING line.
+        logger.warning("crm-link: REFUSED softphone credentials for %r — %s",
+                       slug or "(blank)", refusal)
+        code = (status.HTTP_422_UNPROCESSABLE_ENTITY
+                if refusal == crm_softphone.REFUSE_NO_EMAIL
+                else status.HTTP_403_FORBIDDEN)
+        raise HTTPException(code, refusal)
+
+    sip_ttl = crm_softphone.capped_ttl(
+        cfg.softphone_ttl_seconds, settings.OPERATOR_SIP_TTL_SECONDS
+    )
+    turn_ttl = crm_softphone.capped_ttl(cfg.softphone_ttl_seconds, settings.TURN_TTL_SECONDS)
+    creds = build_webrtc_credentials(
+        operator_id=slug,
+        sip_secret=settings.OPERATOR_SIP_SECRET,
+        sip_domain=settings.OPERATOR_SIP_DOMAIN,
+        wss_url=settings.OPERATOR_WSS_URL,
+        turn_secret=settings.TURN_STATIC_SECRET,
+        turn_urls=settings.turn_urls,
+        sip_ttl_seconds=sip_ttl,
+        turn_ttl_seconds=turn_ttl,
+    )
+    logger.info("crm-link: minted softphone credentials for operator %s (sip_ttl=%ds)",
+                slug, sip_ttl)
+    # `operator` is echoed so the CRM can show WHICH operator it registered as. An operator
+    # who thinks they are one endpoint and are really another is the failure this makes
+    # visible — the CRM shows the slug next to the registration state.
+    return {"ok": True, "operator": slug,
+            "endpoint": crm_softphone.endpoint_for(slug), **creds}
 
 
 class SendMessageIn(BaseModel):
