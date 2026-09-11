@@ -316,3 +316,115 @@ def validate_crm_event(body: dict) -> list[str]:
     if duration is not None and not isinstance(duration, int):
         problems.append("duration_seconds must be an int or absent")
     return problems
+
+
+# --- messages -----------------------------------------------------------------------------
+# Gap 2. `push.report_call_phase` was called from three places, all of them the bound-DID
+# INBOUND CALL path, so a text to the same DID reached the CRM not at all: the customer's
+# message was ingested, relayed to GoHighLevel and shown in OWEN's own Inbox, and the CRM —
+# the thing the owner actually works out of — never saw it.
+#
+# An SMS is the same `POST /api/events` endpoint with `type: "SMS"`. Nothing new is needed on
+# the CRM side and nothing new is needed in the queue; this is the same shape as a call
+# event, carried by the same job, down the same delivery hop.
+
+CRM_TYPE_SMS = "SMS"
+
+
+@dataclass(frozen=True)
+class MessageEventFacts:
+    """Everything OWEN knows about one SMS/MMS on a CRM-bound DID.
+
+    The sibling of `CallEventFacts`, and deliberately the same shape of thing: OWEN's own
+    vocabulary, carried in the `crm_report` job payload, mapped onto a specific CRM only at
+    the app-side adapter.
+
+    `owen_message_id` is `messages.id` and is THE join key. It is what this module hands the
+    CRM as `provider_ref` on send (`api.send_message` answers `{"message_id": ...}`, which
+    the CRM stores on its ConversationEvent), so using the same field on an inbound message
+    keeps one identifier for one row on both sides of the link.
+    """
+
+    owen_message_id: str                        # messages.id
+    caller_number: str = ""                     # the CUSTOMER's number, either direction
+    dialed_number: str = ""                     # the bound DID
+    body: str = ""
+    direction: str = "inbound"
+    num_media: int = 0
+    provider_message_sid: str = ""              # BulkVS's own id, for support threads
+    extra: dict = field(default_factory=dict)
+
+    def as_payload(self) -> dict:
+        return {
+            "owen_message_id": self.owen_message_id,
+            "caller_number": self.caller_number,
+            "dialed_number": self.dialed_number,
+            "body": self.body,
+            "direction": self.direction,
+            "num_media": self.num_media,
+            "provider_message_sid": self.provider_message_sid,
+            "extra": dict(self.extra or {}),
+        }
+
+    @classmethod
+    def from_payload(cls, payload: dict) -> "MessageEventFacts":
+        p = dict(payload or {})
+        try:
+            num_media = int(p.get("num_media") or 0)
+        except (TypeError, ValueError):
+            num_media = 0
+        return cls(
+            owen_message_id=str(p.get("owen_message_id") or ""),
+            caller_number=str(p.get("caller_number") or ""),
+            dialed_number=str(p.get("dialed_number") or ""),
+            body=str(p.get("body") or ""),
+            direction=str(p.get("direction") or "inbound"),
+            num_media=max(0, num_media),
+            provider_message_sid=str(p.get("provider_message_sid") or ""),
+            extra=p.get("extra") if isinstance(p.get("extra"), dict) else {},
+        )
+
+
+def message_body(facts: MessageEventFacts) -> str:
+    """What the operator reads on the CRM thread.
+
+    The customer's own words, VERBATIM, and nothing else — an operator deciding whether to
+    send a crew reads this, and a machine-written prefix on a customer's text is the kind of
+    small dishonesty that makes a thread impossible to skim.
+
+    The one addition is an MMS note, because the CRM's event row has no media column and the
+    picture of the roof IS the message. It is appended (never substituted) so the words, if
+    there were any, are still the first thing on the line.
+    """
+    text = (facts.body or "").strip()
+    if facts.num_media > 0:
+        plural = "attachment" if facts.num_media == 1 else "attachments"
+        note = f"[{facts.num_media} {plural} — view in OWEN]"
+        return f"{text} {note}".strip()
+    return text
+
+
+def to_crm_message_event(facts: MessageEventFacts,
+                         contact_id: int | None = None) -> dict[str, Any]:
+    """One SMS/MMS as the CRM's `POST /api/events` body.
+
+    `type: "SMS"` and NEVER a `call_status` — the CRM rejects a status on a non-CALL with a
+    400, and `automations.on_inbound_call` (the missed-call auto text-back) only ever looks
+    at CALL rows, so a text can never trigger it.
+
+    An INBOUND row increments the CRM thread's unread badge, which is exactly right here:
+    unlike the machine-written call notes, a customer's text IS something a person has to
+    read and answer.
+    """
+    return {
+        "type": CRM_TYPE_SMS,
+        "direction": "OUTBOUND" if str(facts.direction).lower() == "outbound" else "INBOUND",
+        "body": message_body(facts),
+        # The customer's number in both directions — it is who the thread belongs to, which
+        # is what the CRM matches (or creates) a contact on.
+        "from_number": facts.caller_number or None,
+        # messages.id. The same key a delivery receipt arrives with, so one OWEN row is one
+        # CRM row however many ways it is touched.
+        "provider_ref": facts.owen_message_id or None,
+        **({"contact_id": int(contact_id)} if contact_id is not None else {}),
+    }

@@ -38,7 +38,7 @@ from sqlalchemy import select
 from app.core.config import settings
 from app.db import SessionLocal
 from app.integrations.crm import config as crm_config
-from app.integrations.crm.events import CallEventFacts
+from app.integrations.crm.events import CallEventFacts, MessageEventFacts
 from app.models import Call, Recording, Transcription
 from app.services import queue
 
@@ -50,9 +50,20 @@ PROVIDER_NAME = "asterisk"  # matches flows/runtime.py + workers/asterisk_consum
 JOB_TYPE = "crm_report"
 
 
-def delivery_url() -> str:
-    """Where the worker posts. See the module docstring for why this is OWEN and not the CRM."""
-    return f"{settings.OWEN_INTERNAL_URL.rstrip('/')}/api/crm-link/events"
+# The three app-side adapters the worker posts back into. One hop, three routes.
+CALL_EVENT_PATH = "/api/crm-link/events"
+MESSAGE_EVENT_PATH = "/api/crm-link/message-events"
+
+
+def delivery_url(path: str = CALL_EVENT_PATH) -> str:
+    """Where the worker posts. See the module docstring for why this is OWEN and not the CRM.
+
+    One hop, three adapters — calls, messages and delivery receipts each have their own
+    route because each maps onto a different CRM body, and a single route switching on a
+    `kind` field would make the CALL path (the one that is live) a shared code path with
+    two paths that are not.
+    """
+    return f"{settings.OWEN_INTERNAL_URL.rstrip('/')}{path}"
 
 
 async def call_artifacts(db, linkedid: str) -> tuple[Optional[str], Optional[str], Optional[str]]:
@@ -134,6 +145,77 @@ async def enqueue_call_event(facts: CallEventFacts) -> bool:
         logger.exception("crm-link: queuing the %s event failed (linkedid=%s)",
                          facts.phase, facts.linkedid)
         return False
+
+
+def _refusal(what: str, subject: str) -> str | None:
+    """The two configuration refusals every enqueue shares, reported identically.
+
+    Returns the reason, or None when the enqueue may proceed. Kept as one function so a
+    message and a call can never drift into disagreeing about whether the link is on.
+    """
+    cfg = crm_config.current()
+    refusal = cfg.delivery_refusal()
+    if refusal:
+        logger.info("crm-link: not reporting %s %s — %s", what, subject, refusal)
+        return refusal
+    if not settings.AGENT_RUNTIME_KEY:
+        logger.warning(
+            "crm-link: AGENT_RUNTIME_KEY is unset; cannot report %s %s "
+            "(mint a key with the 'crm_link' scope and set AGENT_RUNTIME_KEY)",
+            what, subject,
+        )
+        return "AGENT_RUNTIME_KEY is unset"
+    return None
+
+
+async def enqueue_message_event(facts: MessageEventFacts) -> bool:
+    """Queue one SMS/MMS for delivery to the CRM. True iff a job was written.
+
+    Same contract as `enqueue_call_event` and for the same reason: never raises. This is
+    called from the BulkVS inbound webhook, and a CRM that cannot be told about a text must
+    not cost us the 200 that stops BulkVS re-delivering it.
+    """
+    if _refusal("message", facts.owen_message_id):
+        return False
+    try:
+        async with SessionLocal() as db:
+            await queue.enqueue(db, JOB_TYPE, {
+                "url": delivery_url(MESSAGE_EVENT_PATH),
+                "headers": {"X-OWEN-Key": settings.AGENT_RUNTIME_KEY},
+                "body": facts.as_payload(),
+            })
+        logger.info("crm-link: queued %s message %s (%s -> %s)", facts.direction,
+                    facts.owen_message_id, facts.caller_number, facts.dialed_number)
+        return True
+    except Exception:  # noqa: BLE001 - reporting must never affect message handling
+        logger.exception("crm-link: queuing message %s failed", facts.owen_message_id)
+        return False
+
+
+async def report_inbound_message(
+    *, message_id: str, binding, caller_number: str, dialed_number: str, body: str,
+    num_media: int = 0, provider_message_sid: str = "", extra: dict | None = None,
+) -> bool:
+    """Queue one INBOUND text on a bound DID as a CRM message event.
+
+    No database lookup of its own: unlike a call, everything worth reporting about a
+    message is already in the `messages` row the webhook just wrote, and the webhook hands
+    it straight over. One less query on a live path.
+    """
+    return await enqueue_message_event(MessageEventFacts(
+        owen_message_id=str(message_id),
+        caller_number=caller_number or "",
+        dialed_number=dialed_number or "",
+        body=body or "",
+        direction="inbound",
+        num_media=int(num_media or 0),
+        provider_message_sid=provider_message_sid or "",
+        extra={
+            "crm_link_id": getattr(binding, "link_id", None),
+            "crm_base_url": getattr(binding, "crm_base_url", None),
+            **(extra or {}),
+        },
+    ))
 
 
 async def report_call_phase(

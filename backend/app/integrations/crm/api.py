@@ -51,7 +51,8 @@ from app.db import get_db
 from app.integrations.crm import binding as crm_binding
 from app.integrations.crm import config as crm_config
 from app.integrations.crm.client import CrmClient
-from app.integrations.crm.events import (CallEventFacts, to_crm_event, validate_crm_event)
+from app.integrations.crm.events import (CallEventFacts, MessageEventFacts, to_crm_event,
+                                         to_crm_message_event, validate_crm_event)
 from app.models import Number
 from app.services import queue, sms
 from app.telephony import outbound as outbound_rules
@@ -207,6 +208,85 @@ async def deliver_event(
         )
     return {"ok": False, "reason": f"CRM {result.status}: {result.reason}",
             "phase": facts.phase}
+
+
+class MessageDeliveryIn(BaseModel):
+    """The `crm_report` job body for a message, i.e. `events.MessageEventFacts.as_payload()`.
+
+    Loose for the same reason `EventDeliveryIn` is: a job enqueued by an older deploy has to
+    drain against a newer one.
+    """
+
+    model_config = {"extra": "allow"}
+
+    owen_message_id: str = ""
+    caller_number: str = ""
+    dialed_number: str = ""
+    body: str = ""
+    direction: str = "inbound"
+    num_media: int = 0
+    provider_message_sid: str = ""
+    extra: dict = Field(default_factory=dict)
+
+
+@router.post("/message-events")
+async def deliver_message_event(
+    body: MessageDeliveryIn,
+    db: AsyncSession = Depends(get_db),
+    _key=Depends(require_scope(SCOPE_AGENT_WRITE)),
+) -> dict:
+    """Deliver one queued SMS/MMS to the CRM as a `type: "SMS"` event.
+
+    The message sibling of `deliver_event`, with the SAME retry contract, because the same
+    `handle_crm_report` handler drains both and reads the status code the same way:
+    200 completes the job, 502 makes the queue retry with backoff.
+
+    The bound-DID check is repeated HERE, at drain time, and not merely trusted from the
+    webhook that enqueued the job. A binding can be disabled between enqueue and drain —
+    that is the whole point of having a per-number switch — and a job already in the queue
+    must not keep pushing a customer's texts to a CRM the owner has just unbound.
+    """
+    cfg = _require_enabled()
+    facts = MessageEventFacts.from_payload(body.model_dump())
+
+    base_url, token = cfg.base_url, cfg.token
+    bound = await crm_binding.resolve(db, facts.dialed_number) if facts.dialed_number else None
+    if bound is None:
+        logger.warning("crm-link: not delivering message %s — %s is not bound to the CRM",
+                       facts.owen_message_id, facts.dialed_number or "<no DID>")
+        return {"ok": False, "reason": crm_config.REFUSE_NOT_BOUND,
+                "message_id": facts.owen_message_id}
+    base_url, token = bound.crm_base_url or base_url, bound.crm_token or token
+    if not token:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, crm_config.REFUSE_NO_TOKEN)
+
+    client = CrmClient(base_url, token, timeout_s=cfg.http_timeout_seconds,
+                       budget_s=cfg.http_budget_seconds)
+    contact_id, reason = await client.resolve_contact_id(facts.caller_number)
+    if contact_id is None:
+        # Same rule as a call, and it matters more here: a text from a number nobody has
+        # ever called from is a lead writing in, and the CRM creates the contact for it.
+        logger.info("crm-link: no contact_id for message %s (%s) — sending from_number=%s",
+                    facts.owen_message_id, reason, facts.caller_number or "<unknown>")
+
+    crm_body = to_crm_message_event(facts, contact_id)
+    problems = validate_crm_event(crm_body)
+    if problems:
+        logger.error("crm-link: refusing to send a malformed message event: %s", problems)
+        return {"ok": False, "reason": "; ".join(problems),
+                "message_id": facts.owen_message_id}
+
+    result = await client.post_event(crm_body)
+    if result.ok:
+        return {"ok": True, "message_id": facts.owen_message_id, "contact_id": contact_id,
+                "crm_status": result.status}
+    if result.retryable:
+        raise HTTPException(
+            status.HTTP_502_BAD_GATEWAY,
+            f"CRM did not accept the message ({result.status}): {result.reason}",
+        )
+    return {"ok": False, "reason": f"CRM {result.status}: {result.reason}",
+            "message_id": facts.owen_message_id}
 
 
 # --- direction 2: the CRM -> OWEN ---------------------------------------------------------

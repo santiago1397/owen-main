@@ -1,4 +1,17 @@
-"""The ONE function the existing call path calls into this module.
+"""The functions the existing call and message paths call into this module.
+
+Four of them, one per surface, and every one obeys the same contract: they are TOTAL (they
+catch everything), they answer False on any failure at all, and False always means "I did
+nothing — carry on exactly as before". Nothing in here can leave a caller unhandled, a text
+un-ingested or a webhook without its 200.
+
+  * `handle_bound_inbound`   — an inbound CALL on a bound DID (`flows/runtime.py`)
+  * `is_new_inbound_message` — asked BEFORE the ingest upsert, so a re-delivered BulkVS
+                               webhook cannot put a second copy of a text on the CRM thread
+  * `handle_inbound_message` — an inbound SMS/MMS on a bound DID (`webhooks/bulkvs.py`)
+  * `handle_delivery_receipt`— a carrier receipt for a message the CRM sent
+
+## The call hook
 
 `flows/runtime.py::run_flow_for_stasis` gains exactly three lines:
 
@@ -77,3 +90,89 @@ async def handle_bound_inbound(
         except Exception:  # noqa: BLE001
             logger.exception("crm-link: post-failure hangup failed (linkedid=%s)", lid)
     return True
+
+
+# --- the message hooks --------------------------------------------------------------------
+# `webhooks/bulkvs.py` gains one call on each of its two routes, and nothing else. Both are
+# total in the same sense as the call hook above: any failure at all answers False, and the
+# webhook goes on to return its 200 exactly as it does today. A CRM that is down, slow or
+# misconfigured cannot cost us the 200 that stops BulkVS re-delivering a customer's text.
+
+
+async def is_new_inbound_message(db, provider_message_sid: str) -> bool:
+    """True iff this MO webhook has not been ingested before AND the link is on.
+
+    Asked BEFORE `ingest_message_event`, which is an upsert keyed on the provider SID and
+    so cannot tell the caller whether it inserted or updated. BulkVS re-delivers a POST it
+    did not get a 200 for, and `POST /api/events` on the CRM has no dedupe of its own, so
+    without this a retry would put a SECOND copy of the same text on the customer's CRM
+    thread. The existing GoHighLevel relay has exactly this guard in `relayed_to_ghl`; this
+    is its equivalent for a table we may not add a column to.
+
+    Returns False — do not push — when the link is off, and does so BEFORE any query, so
+    the disabled system does strictly less work rather than merely the same amount.
+    """
+    try:
+        from app.integrations.crm import config as crm_config
+
+        if not crm_config.link_enabled():
+            return False
+        sid = str(provider_message_sid or "").strip()
+        if not sid:
+            return False
+
+        from sqlalchemy import select
+
+        from app.models import Message
+
+        existing = (
+            await db.execute(
+                select(Message.id).where(Message.provider_message_sid == sid).limit(1)
+            )
+        ).first()
+        return existing is None
+    except Exception:  # noqa: BLE001 - an unanswerable question is answered "do not push"
+        logger.exception("crm-link: could not tell whether %s was already ingested",
+                         provider_message_sid)
+        return False
+
+
+async def handle_inbound_message(
+    *, message_id: str, from_number: str, dialed_number: str, body: str,
+    num_media: int = 0, provider_message_sid: str = "",
+) -> bool:
+    """Queue an inbound text on a CRM-BOUND DID as a CRM message event.
+
+    True iff a job was written. False means the DID is not bound, the link is off, or
+    something went wrong — in all three cases the message has already been ingested and
+    relayed to GoHighLevel by the caller, and nothing about that changes.
+
+    Ordered cheapest-first, exactly like the call hook: the kill switch is a boolean read,
+    the binding is one indexed query, and a DID that is not bound costs nothing more.
+    """
+    try:
+        from app.integrations.crm import config as crm_config
+
+        if not crm_config.link_enabled():
+            return False
+
+        from app.db import SessionLocal
+        from app.integrations.crm import binding as crm_binding
+
+        async with SessionLocal() as db:
+            bound = await crm_binding.resolve(db, dialed_number)
+        if bound is None:
+            return False
+
+        from app.integrations.crm import push as crm_push
+
+        logger.info("crm-link: reporting inbound message %s on DID %s (link=%s)",
+                    message_id, dialed_number, bound.link_id)
+        return await crm_push.report_inbound_message(
+            message_id=message_id, binding=bound, caller_number=from_number,
+            dialed_number=dialed_number, body=body, num_media=num_media,
+            provider_message_sid=provider_message_sid,
+        )
+    except Exception:  # noqa: BLE001 - the text is already ingested; this is the extra
+        logger.exception("crm-link: reporting inbound message %s failed", message_id)
+        return False

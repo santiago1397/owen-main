@@ -7,6 +7,11 @@ messages ingest + GHL relay path UNCHANGED — BulkVS is just another provider f
 same upsert-on-SID `messages` table (Ticket 09).
 
 Per-DID routing supports the same ?tracking_number= query override the other webhooks use.
+
+CRM LINK (additive, opt-in, off by default). Both routes end with one call into
+`integrations/crm/hook.py`, which does nothing unless `CRM_LINK_ENABLED` is true AND the DID
+has an enabled `crm_links` row. The GoHighLevel relay above it is untouched and is enqueued
+first; the CRM link is an addition to it and never a replacement.
 """
 
 import logging
@@ -15,6 +20,7 @@ from fastapi import APIRouter, Request, Response
 from sqlalchemy import select
 
 from app.db import SessionLocal
+from app.integrations.crm import hook as crm_hook
 from app.models import Message
 from app.providers.bulkvs import BULKVS_INBOUND_IPS, BulkvsAdapter
 from app.services import queue, sms
@@ -49,11 +55,30 @@ async def message(request: Request) -> Response:
     logger.info("bulkvs message: sid=%s from=%s to=%s num_media=%s",
                 evt.provider_message_sid, evt.from_number, evt.to_number, evt.num_media)
     async with SessionLocal() as db:
+        # Asked BEFORE the upsert below, which cannot tell an insert from an update. Costs
+        # nothing (and makes no query) while CRM_LINK_ENABLED is false. See crm/hook.py.
+        crm_first_sight = await crm_hook.is_new_inbound_message(db, evt.provider_message_sid)
         msg = await ingest_message_event(db, "bulkvs", evt)
         # App-level opt-out: STOP/START/HELP maintain the per-(number, contact) opt-out state
         # (Ticket 10). The message itself is still stored + relayed — we only track consent.
         await apply_inbound_keyword(db, msg.number_id, evt.from_number, evt.body)
         await queue.enqueue(db, "message_relay_ghl", {"message_id": str(msg.id)})
+        crm_message = {
+            "message_id": str(msg.id),
+            "from_number": msg.from_number or evt.from_number or "",
+            "dialed_number": msg.to_number or evt.to_number or "",
+            "body": msg.body or "",
+            "num_media": int(msg.num_media or 0),
+            "provider_message_sid": msg.provider_message_sid or "",
+        }
+
+    # ADDITIVE, opt-in, and deliberately AFTER everything above: the GoHighLevel relay is
+    # already enqueued and committed by this point, so the CRM link cannot affect it. A DID
+    # with no enabled `crm_links` row does nothing here, and neither does anything at all
+    # while CRM_LINK_ENABLED is false. The hook is total — it returns False rather than
+    # raising — so the 200 below is reached whatever the CRM is doing.
+    if crm_first_sight:
+        await crm_hook.handle_inbound_message(**crm_message)
     return Response(status_code=200)
 
 
