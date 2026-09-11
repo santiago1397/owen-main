@@ -7,6 +7,11 @@ messages ingest + GHL relay path UNCHANGED — BulkVS is just another provider f
 same upsert-on-SID `messages` table (Ticket 09).
 
 Per-DID routing supports the same ?tracking_number= query override the other webhooks use.
+
+CRM LINK (additive, opt-in, off by default). Both routes end with one call into
+`integrations/crm/hook.py`, which does nothing unless `CRM_LINK_ENABLED` is true AND the DID
+has an enabled `crm_links` row. The GoHighLevel relay above it is untouched and is enqueued
+first; the CRM link is an addition to it and never a replacement.
 """
 
 import logging
@@ -15,6 +20,7 @@ from fastapi import APIRouter, Request, Response
 from sqlalchemy import select
 
 from app.db import SessionLocal
+from app.integrations.crm import hook as crm_hook
 from app.models import Message
 from app.providers.bulkvs import BULKVS_INBOUND_IPS, BulkvsAdapter
 from app.services import queue, sms
@@ -49,12 +55,46 @@ async def message(request: Request) -> Response:
     logger.info("bulkvs message: sid=%s from=%s to=%s num_media=%s",
                 evt.provider_message_sid, evt.from_number, evt.to_number, evt.num_media)
     async with SessionLocal() as db:
+        # Asked BEFORE the upsert below, which cannot tell an insert from an update. Costs
+        # nothing (and makes no query) while CRM_LINK_ENABLED is false. See crm/hook.py.
+        crm_first_sight = await crm_hook.is_new_inbound_message(db, evt.provider_message_sid)
         msg = await ingest_message_event(db, "bulkvs", evt)
         # App-level opt-out: STOP/START/HELP maintain the per-(number, contact) opt-out state
         # (Ticket 10). The message itself is still stored + relayed — we only track consent.
         await apply_inbound_keyword(db, msg.number_id, evt.from_number, evt.body)
         await queue.enqueue(db, "message_relay_ghl", {"message_id": str(msg.id)})
+        crm_message = {
+            "message_id": str(msg.id),
+            "from_number": msg.from_number or evt.from_number or "",
+            "dialed_number": msg.to_number or evt.to_number or "",
+            "body": msg.body or "",
+            "num_media": int(msg.num_media or 0),
+            "provider_message_sid": msg.provider_message_sid or "",
+        }
+
+    # ADDITIVE, opt-in, and deliberately AFTER everything above: the GoHighLevel relay is
+    # already enqueued and committed by this point, so the CRM link cannot affect it. A DID
+    # with no enabled `crm_links` row does nothing here, and neither does anything at all
+    # while CRM_LINK_ENABLED is false. The hook is total — it returns False rather than
+    # raising — so the 200 below is reached whatever the CRM is doing.
+    if crm_first_sight:
+        await crm_hook.handle_inbound_message(**crm_message)
     return Response(status_code=200)
+
+
+def _carrier_detail(body: dict) -> str:
+    """The carrier's own failure text, if it gave one.
+
+    Shown to the operator verbatim under the message in the CRM, because "failed" alone does
+    not tell them whether to try another number or wait. Read the same defensive way as
+    RefId/Status above: BulkVS's DLR field names are not pinned by a contract we control.
+    """
+    for key in ("ErrorMessage", "Error", "StatusMessage", "Reason", "Description",
+                "errorMessage", "error", "reason", "detail"):
+        value = body.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()[:500]
+    return ""
 
 
 @router.post("/message-status")
@@ -93,4 +133,20 @@ async def message_status(request: Request) -> Response:
             logger.info("bulkvs message-status: %s %s -> %s", msg.id, msg.status, advanced)
             msg.status = advanced
             await db.commit()
+        # Relayed for EVERY receipt the ladder RECOGNISES, not only the ones that moved
+        # OWEN's own row. `handle_message_send` marks a row 'sent' the moment BulkVS accepts
+        # it, so a carrier "sent" DLR advances nothing here while being exactly the news the
+        # CRM is waiting for — its own copy is still QUEUED. Both sides apply their own
+        # forward-only ladder, so a repeat or an out-of-order receipt is harmless.
+        word = str(new_status or "").strip().lower()
+        receipt = ({"message_id": str(msg.id), "status": word,
+                    "detail": _carrier_detail(body)}
+                   if word in sms.OUTBOUND_STATUS_RANK else None)
+
+    # ADDITIVE and opt-in: this does nothing unless the message was SENT THROUGH the CRM
+    # link (a marker on its `messages` row) on a DID that is still bound. An operator's text
+    # from the Inbox, or a flow's, is not relayed — the CRM has no event for it and would
+    # 404 every one. The hook is total, so the 200 below is reached whatever happens.
+    if receipt:
+        await crm_hook.handle_delivery_receipt(**receipt)
     return Response(status_code=200)

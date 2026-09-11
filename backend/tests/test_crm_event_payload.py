@@ -131,6 +131,60 @@ def test_a_short_call_is_reported_as_short_and_that_is_deliberate():
           body["duration_seconds"] <= CRM_MISSED_CALL_MAX_SECONDS)
 
 
+def test_an_unknown_caller_is_carried_by_from_number():
+    """Gap 1. The single most valuable event this business gets is a first-time roofing
+    lead calling in, and until the CRM's amendment it was the one event that could not be
+    delivered: no contact to name, so nothing was sent.
+
+    Both halves are asserted — the field is there, AND a body without a contact_id is a
+    body this module considers sendable rather than malformed."""
+    print("a caller with no CRM contact is carried by from_number, not dropped:")
+    from app.integrations.crm.events import to_crm_event, validate_crm_event
+
+    stranger = to_crm_event(_facts(caller_number="+15615559999"), contact_id=None)
+    check("the body carries the caller's number", stranger["from_number"] == "+15615559999")
+    check("and no contact_id at all, rather than a null or a guess",
+          "contact_id" not in stranger)
+    check("it is a sendable body, not a malformed one", validate_crm_event(stranger) == [])
+    check("it is still the CALL row with everything on it",
+          stranger["type"] == "CALL" and stranger["call_status"] == "completed")
+
+    for phase in ("started", "answered"):
+        note = to_crm_event(_facts(phase=phase), contact_id=None)
+        check(f"{phase}: a stranger's pre-terminal note is deliverable too",
+              validate_crm_event(note) == [] and note["from_number"] == "+15615559999")
+
+
+def test_a_resolved_contact_still_sends_exactly_what_it_did_before():
+    """The other half of Gap 1: the path that WORKS today must not change. A resolved
+    contact gets the same body it always got, plus the one new field."""
+    print("a resolved contact's body is unchanged apart from the new field:")
+    from app.integrations.crm.events import to_crm_event
+
+    known = to_crm_event(_facts(), contact_id=41)
+    check("contact_id is still sent, and is still an int", known["contact_id"] == 41)
+    check("from_number rides alongside it", known["from_number"] == "+15615559999")
+    check("and nothing else about the body moved",
+          {k: v for k, v in known.items() if k != "from_number"}
+          == {"contact_id": 41, "body": known["body"],
+              "provider_ref": OWEN_CALL_ID, "type": "CALL", "direction": "INBOUND",
+              "call_status": "completed", "duration_seconds": 134,
+              "recording_url": None})
+
+
+def test_an_event_with_neither_a_contact_nor_a_number_is_refused_here():
+    """The CRM answers 422 for this. Catching it locally keeps a payload we cannot file
+    out of a five-attempt retry loop against a live CRM."""
+    print("an event naming neither a contact nor a number is refused before it is sent:")
+    from app.integrations.crm.events import to_crm_event, validate_crm_event
+
+    nameless = to_crm_event(_facts(caller_number=""), contact_id=None)
+    problems = validate_crm_event(nameless)
+    check("it is refused", problems != [])
+    check("and says what is missing",
+          any("contact_id or a from_number" in p for p in problems))
+
+
 def test_validation_catches_what_the_CRM_would_reject():
     print("validate_crm_event rejects exactly what the CRM rejects:")
     from app.integrations.crm.events import validate_crm_event
@@ -215,8 +269,6 @@ def test_the_contract_still_matches_the_crm_source():
 
     fields, statuses = _crm_contract(main_py)
     check(f"EventIngest was found in {main_py}", bool(fields))
-    check("contact_id is still a required int",
-          fields.get("contact_id") == "int")
     for name in ("type", "direction", "body", "duration_seconds", "call_status",
                  "recording_url", "provider_ref"):
         check(f"the CRM still has a {name} field", name in fields)
@@ -230,11 +282,35 @@ def test_the_contract_still_matches_the_crm_source():
     check("INTERNAL_COMMENT is still an accepted event type",
           f"'{CRM_TYPE_INTERNAL}'" in type_ann)
 
-    # Every key we send must be a field the CRM declares, or it is silently dropped (or,
-    # once the CRM tightens `extra`, a 422).
+    # THE AMENDMENT (CRM side, 2026-09-11): contact_id became optional and from_number was
+    # added, which is what lets a first-time caller reach the CRM at all. The two contract
+    # versions are BOTH recognised here on purpose — the source on this machine may be an
+    # older checkout than the branch that carries the amendment, and a drift check that
+    # cannot tell "older CRM" from "we broke the contract" is not worth running.
+    amended = "from_number" in fields
     body = to_crm_event(_facts(), contact_id=1)
     unknown = sorted(set(body) - set(fields))
-    check(f"we send no key the CRM does not declare (extras: {unknown})", unknown == [])
+
+    if amended:
+        check("contact_id is optional, so a stranger's call is no longer undeliverable",
+              fields.get("contact_id") in ("int | None", "Optional[int]"))
+        check("from_number is declared, and is what carries the stranger",
+              "from_number" in fields)
+        # Every key we send must be a field the CRM declares, or it is silently dropped
+        # (or, once the CRM tightens `extra`, a 422).
+        check(f"we send no key the CRM does not declare (extras: {unknown})",
+              unknown == [])
+        stranger = to_crm_event(_facts(), contact_id=None)
+        check("and a body with no contact_id is still entirely declared fields",
+              sorted(set(stranger) - set(fields)) == [])
+    else:
+        print("  [NOTE] this ghl-clone checkout PREDATES the contact_id amendment "
+              f"({main_py}). owen-main is built for the amended contract; deploy the "
+              "CRM half or an event without a contact_id is a 422 there.")
+        check("the pre-amendment CRM still declares contact_id as a required int",
+              fields.get("contact_id") == "int")
+        check("and the ONLY key it does not declare is the one the amendment adds "
+              f"(extras: {unknown})", unknown == ["from_number"])
 
 
 if __name__ == "__main__":
@@ -242,6 +318,9 @@ if __name__ == "__main__":
     test_outcomes_map_onto_the_five_statuses_the_CRM_accepts()
     test_started_and_answered_are_internal_notes_not_CALL_rows()
     test_a_short_call_is_reported_as_short_and_that_is_deliberate()
+    test_an_unknown_caller_is_carried_by_from_number()
+    test_a_resolved_contact_still_sends_exactly_what_it_did_before()
+    test_an_event_with_neither_a_contact_nor_a_number_is_refused_here()
     test_validation_catches_what_the_CRM_would_reject()
     test_a_payload_survives_the_job_queue_round_trip()
     test_the_contract_still_matches_the_crm_source()

@@ -16,11 +16,9 @@ the one command that settles it.
 
 ## Contact resolution, and why it is fiddly
 
-`POST /api/events` takes a `contact_id` and 404s on anything else. It has no phone lookup
-and no create-on-ingest. So a call can only be filed against a contact that already exists,
-and OWEN has to find it.
-
-Two verified obstacles:
+`POST /api/events` files an event against a `contact_id` when it is given one, and 404s if
+that id does not exist. Naming the exact contact is still the best answer OWEN can give, so
+it looks one up first — and two verified obstacles make that harder than it sounds:
 
   1. **Phone format.** `Contact.phone` is a display string — the CRM's own seed writes
      `"(941) 555-1234"`. OWEN holds E.164. `GET /api/contacts?q=+19415551234` ILIKEs the raw
@@ -31,10 +29,13 @@ Two verified obstacles:
      needs a token carrying **`events:write read`**. With a write-only token, lookup 403s
      and this module reports that clearly instead of guessing an id.
 
-A caller with no matching contact is NOT created here. Creating a contact per inbound call
-is precisely the "hundreds of junk contacts" failure `docs/CRM_CONTEXT_SPEC.md` C10 records,
-and this integration is one week old. The event is dropped with a reason, and the job
-completes rather than retrying against a 404 forever.
+A caller with no matching contact is NOT created here, and never will be. But the event is
+no longer DROPPED for it either: since the CRM's 2026-09-11 amendment the body carries
+`from_number`, and the CRM matches-or-creates on its own side, where the new-lead automation
+and the duplicate guard live. That is the right place for it — creating contacts from here
+is precisely the "hundreds of junk contacts" failure `docs/CRM_CONTEXT_SPEC.md` C10 records.
+So this function returning `(None, reason)` now means "we could not name the contact", not
+"throw the call away"; see `events.py`, THE AMENDMENT.
 
 Match is EXACT on the last ten digits, never fuzzy. Filing a call on the wrong customer's
 timeline is worse than filing it nowhere — the same judgement C3 made about greeting the
@@ -55,6 +56,7 @@ from app.integrations.crm.config import digits, match_key
 logger = logging.getLogger("integrations.crm.client")
 
 EVENTS_PATH = "/api/events"
+DELIVERY_PATH = "/api/events/delivery"
 CONTACTS_PATH = "/api/contacts"
 HEALTH_PATH = "/api/health"
 
@@ -221,6 +223,25 @@ class CrmClient:
                     except (TypeError, ValueError):
                         continue
         return None, f"no CRM contact matches {phone}"
+
+    async def post_delivery_receipt(self, body: dict) -> CrmResult:
+        """`POST /api/events/delivery`. Same `events:write` scope as the event ingest, so a
+        receipt needs no second credential — build the body with
+        `events.to_crm_delivery_receipt` and check it with `validate_crm_delivery_receipt`.
+
+        A **404** here is a real answer, not a failure: it means the CRM has no outbound
+        message with that `provider_ref`, which is what a receipt for a text sent before the
+        link existed looks like. The caller completes the job rather than retrying it.
+        """
+        result = await self._request("POST", DELIVERY_PATH, json=body)
+        if result.ok:
+            logger.info("crm-link: delivery receipt applied (ref=%s status=%s advanced=%s)",
+                        body.get("provider_ref"), body.get("status"),
+                        (result.data or {}).get("advanced"))
+        else:
+            logger.warning("crm-link: delivery receipt REFUSED by the CRM (%s): %s",
+                           result.status, result.reason)
+        return result
 
     async def post_event(self, body: dict) -> CrmResult:
         """`POST /api/events`. The body must already be in the CRM's shape — build it with

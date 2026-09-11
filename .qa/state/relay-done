@@ -1,0 +1,505 @@
+# CRM LINK — THE INBOUND HALF — build report
+
+Branch: **feature/crm-link-relay** (cut from origin/main, which carries `c49b784`, the
+merge of `feature/crm-link`).
+Built: 2026-09-11. **Not deployed. Nothing pushed, no ssh, no merge to main, no production
+contact of any kind.** A human reviews and deploys.
+
+Everything here is behind the SAME two switches as the module it extends:
+
+    CRM_LINK_ENABLED=true                       the global kill switch, default false
+    a `crm_links` row for the DID, enabled      the per-number opt-in, default false
+
+With either off, every path added here does nothing — and, where it costs nothing to
+arrange, does nothing *without opening a database session*. The existing GoHighLevel relay
+is untouched; §6 is the evidence for that specifically, because it is the regression that
+would actually hurt.
+
+**No migration. None was needed, none was written, the `alembic/versions/` directory is
+byte-for-byte unchanged.** §5 explains the one place that looked like it might need a
+column and what was done instead.
+
+---
+
+## 1. COMMITS
+
+| sha | subject |
+|---|---|
+| `ba6cc95` | CRM link: stop discarding a first-time caller |
+| `d7ff40e` | CRM link: push an inbound text on a bound DID to the CRM |
+| `98f919b` | CRM link: relay delivery receipts, so "did the text arrive?" has an answer |
+| `a65beb2` | CRM link: document the inbound half where the module describes itself |
+| `dc68c6a` | CRM link: say why the call path keeps its own refusal check |
+
+`dc68c6a` is a comment I wrote that said the opposite of what the code does, found while
+re-reading my own diff. Separate commit so it is visible rather than folded into a feature.
+
+---
+
+## 2. THE THREE GAPS, AND WHAT EACH ONE NOW DOES
+
+### Gap 1 — an unknown caller never reached the CRM
+
+`to_crm_event` emitted `contact_id` only; `client.resolve_contact_id` returns None for a
+caller who is in none of the CRM's contacts (which is what "first-time lead" means); and
+`deliver_event` then returned `{"ok": false}` and the event was gone. The call was answered,
+rung, recorded and filed in OWEN, and the CRM heard nothing.
+
+Now:
+
+  * every body `to_crm_event` builds carries `"from_number": facts.caller_number`, on
+    **every phase**, whether or not a `contact_id` was resolved;
+  * `contact_id` is **omitted** rather than sent as null when there is none, so a body for a
+    resolved contact is byte-for-byte what it was before, plus the one new field;
+  * `validate_crm_event` now requires *one of* the two, matching the CRM's own 422;
+  * `deliver_event` logs the unresolved caller at INFO and **sends anyway**.
+
+The lookup is still done first. It is the exact match, it is the path the CRM's own tests
+pin, and it costs nothing that was not already being spent. `from_number` is the fallback.
+
+A side effect worth naming: a token scoped `events:write` with no `read` scope cannot search
+contacts, so the lookup 403s — which used to lose **every event on every call, silently**.
+It now delivers through `from_number`. `test_crm_unknown_caller` pins that case by name.
+
+### Gap 2 — inbound SMS was not pushed to the CRM at all
+
+`push.report_call_phase` was called from three places, all in `integrations/crm/handler.py`,
+all the bound-DID inbound *call* path. A text to the same number was ingested, relayed to
+GoHighLevel and shown in OWEN's own Inbox — and the CRM, which is what the owner works out
+of, never saw it, so a reply there had nothing to reply to.
+
+An inbound SMS/MMS on a bound DID now becomes a `type: "SMS"` event on the same
+`POST /api/events` endpoint. Nothing new was needed on the CRM side and nothing new was
+needed in the queue:
+
+  * `events.MessageEventFacts` + `to_crm_message_event` — the pure map. `INBOUND`, so the
+    CRM thread's unread badge is bumped (unlike the machine-written call notes, a
+    customer's text IS something a person must answer); never a `call_status` (the CRM 400s
+    one on a non-CALL); `provider_ref` = `messages.id`.
+  * `push.report_inbound_message` — the **same `crm_report` job**, so retry, linear backoff
+    and dead-lettering are the platform's, not a second copy of them.
+  * `api.deliver_message_event` (`POST /api/crm-link/message-events`) — the app-side
+    adapter, which **re-checks the binding at drain time**. A binding can be disabled
+    between enqueue and drain; that is the entire point of a per-number switch, and a job
+    already in the queue must not outlive it.
+  * `hook.handle_inbound_message` — total, like the call hook: any failure at all returns
+    False and the webhook returns its 200 anyway.
+
+The customer's words go across **verbatim**. The only thing ever appended is an MMS note
+(`[2 attachments — view in OWEN]`), because the CRM's event row has no media column and on
+an MMS the picture of the roof *is* the message.
+
+### Gap 3 — delivery receipts were not pushed
+
+`/webhooks/bulkvs/message-status` advanced OWEN's own `messages` row and returned 200. The
+CRM had built and tested `POST /api/events/delivery` and nothing fed it, so its copy of a
+message sat on QUEUED forever whether the text arrived, bounced or was blocked.
+
+A receipt for a message **sent through the CRM link on a bound DID** is now relayed. §3 is
+the correlation field, which is the part that had to be right.
+
+Two judgements inside it:
+
+  * **The carrier's word is relayed, not OWEN's advanced status.** A receipt is a report of
+    what the carrier said. Both sides then apply their own forward-only ladder to it, which
+    is what makes a late or out-of-order receipt harmless on either side.
+  * **Relayed for every receipt the ladder recognises, not only ones that moved OWEN's own
+    row.** `handle_message_send` marks a row `sent` the moment BulkVS accepts it, so a
+    carrier `sent` DLR advances nothing here — while being exactly the news the CRM is
+    waiting for, because its copy is still QUEUED. Gating on "did OWEN's row move" would
+    have left every message stuck at QUEUED in the CRM whenever BulkVS emits no terminal
+    DLR, which `services/sms.py` explicitly says it need not do.
+
+---
+
+## 3. THE CORRELATION FIELD, AND HOW I PROVED IT
+
+**`provider_ref` — and its value is OWEN's `messages.id`.**
+
+Read out of the CRM's source on this machine
+(`/home/qa/wt/convo`, branch `feature/conversations-live`), not guessed:
+
+1. `backend/app/crmlink.py::send_sms` calls OWEN's `POST /api/crm-link/messages`, and its
+   docstring records the answer it expects: *"owen-main answers `{"ok": true, "message_id":
+   "...", "status": "queued"}`. That `message_id` is the join key a delivery receipt arrives
+   with, so the caller stores it as `provider_ref`."*
+2. `backend/app/transport.py:106` is the caller, and it does exactly that:
+   `MessageRef(provider_ref=str(data.get("message_id") or ""), ...)`.
+3. `backend/app/models.py:374` — the column it lands in: *"The far side's id for this
+   message — owen-main's `message_id`."*
+4. `backend/app/main.py::DeliveryReceipt` — *"`provider_ref` is the id owen-main gave us
+   when it accepted the message — its `message_id`, which we stored on the event. **It is
+   the only join key: the CRM never sees the BulkVS RefId.**"*
+5. `backend/app/main.py::ingest_delivery_receipt` looks the row up by
+   `ConversationEvent.provider_ref == body.provider_ref` **and**
+   `direction == Direction.OUTBOUND`, and raises 404 when it finds nothing.
+
+So the BulkVS **RefId must not be sent**. The RefId is what OWEN matches its *own* row on
+(`provider_message_sid = "bulkvs-<RefId>"`), and sending it would 404 every single receipt.
+`/webhooks/bulkvs/message-status` therefore resolves the RefId to the `messages` row first
+and relays **that row's id**; the RefId rides along in the job payload as
+`provider_message_sid`, for a support thread, and is never the join key.
+
+Pinned by tests, not just by reading:
+
+  * `test_crm_delivery_receipt.py::test_the_receipt_is_keyed_on_owens_message_id_not_the_bulkvs_refid`
+    asserts `provider_ref == messages.id` **and** that the RefId string appears nowhere in
+    the body.
+  * `...::test_a_receipt_for_a_crm_link_message_is_forwarded` drives the REAL webhook and
+    asserts the queued job carries `owen_message_id == str(msg.id)` and that it differs
+    from `bulkvs-<RefId>`.
+  * `...::test_the_receipt_contract_still_matches_the_crm_source` re-derives
+    `DeliveryReceipt` and `DELIVERY_RECEIPT_STATUSES` from the CRM's `main.py` with `ast`
+    and fails if either drifts. It also asserts that the CRM's status vocabulary is still
+    **exactly** the key set of OWEN's own `services/sms.OUTBOUND_STATUS_RANK`
+    (`queued sent delivered failed undelivered blocked`) — the two took their words from the
+    same place, and if they ever diverge a receipt OWEN accepts becomes a 400 at the CRM,
+    per text, silently.
+
+And the other end of the same key: `api.send_message` answers `{"message_id": str(msg.id)}`,
+which is what the CRM stores. One OWEN `messages` row is one CRM `ConversationEvent`,
+however many ways it is touched.
+
+---
+
+## 4. EVERY FILE TOUCHED OUTSIDE `integrations/crm/`, AND EXACTLY WHY
+
+`git diff main --name-only | grep -v integrations/crm` is five files. **One is production
+code; four are tests.**
+
+### `backend/app/webhooks/bulkvs.py` — the only production file
+
+The whole diff is 56 added lines, no line removed or rewritten, and it is three things:
+
+1. **`POST /message` gains two calls.**
+   * `crm_hook.is_new_inbound_message(db, sid)` — asked *before* `ingest_message_event`,
+     which is an upsert and so cannot report whether it inserted or updated. See §5.2.
+   * `crm_hook.handle_inbound_message(...)` — after the `async with SessionLocal()` block
+     has closed, so the GoHighLevel relay is already enqueued **and committed** before the
+     CRM link runs at all.
+2. **`POST /message-status` gains one call**, `crm_hook.handle_delivery_receipt(...)`, after
+   OWEN's own row has been advanced and committed.
+3. **`_carrier_detail(body)`** — five lines pulling the carrier's failure text out of the
+   DLR, so a FAILED message in the CRM says *why*. It lives here rather than in the CRM
+   module because it is BulkVS-specific and sits next to the existing, identically shaped
+   defensive reads of `RefId` and `Status`.
+
+Why this file and not a different seam: it is the only place an inbound BulkVS message or a
+DLR exists. There is no queue, no event bus and no other hook between BulkVS and the
+`messages` table. The alternative — a new job type draining the `messages` table on a timer
+— would be a second delivery mechanism with a second retry policy and a second thing that
+can silently stop working, which is exactly what `push.py` already refuses to build.
+
+Both hook functions are **total**: every failure path returns False, so the webhook's `200`
+is reached whatever the CRM is doing. `test_crm_inbound_relay::test_a_broken_crm_push_does_
+not_break_message_handling` asserts that with a queue write that raises.
+
+### The four test files
+
+| file | what it is |
+|---|---|
+| `backend/tests/test_crm_unknown_caller.py` | NEW. Gap 1 end-to-end through the real `deliver_event`, CRM mocked at the HTTP boundary. |
+| `backend/tests/test_crm_inbound_relay.py` | NEW. Gap 2, driving the real `/webhooks/bulkvs/message`, **plus the GoHighLevel regression**. |
+| `backend/tests/test_crm_delivery_receipt.py` | NEW. Gap 3, driving the real `/webhooks/bulkvs/message-status`, plus the correlation field and the contract drift check. |
+| `backend/tests/test_crm_event_payload.py` | EDITED. Gap 1 payload assertions, and the drift check taught to recognise BOTH contract versions — see §7. |
+
+Nothing else. No migration, no model, no settings key, no scope, no router registration:
+the three new routes hang off the `crm-link` router that `main.py` already includes, and
+they use `SCOPE_AGENT_WRITE`, which `AGENT_RUNTIME_KEY` already carries.
+
+---
+
+## 5. THE DATABASE — NO MIGRATION, AND THE TWO PLACES THAT LOOKED LIKE THEY NEEDED ONE
+
+`git diff main --stat -- backend/alembic/` is empty. Your rule — *add new functionality, do
+not override the database* — was not bent; it decided both of these.
+
+### 5.1 "Which outbound messages did the CRM send?"
+
+A receipt may only be relayed for a message the CRM itself sent. Anything else is none of
+its business, and `POST /api/events/delivery` 404s on a `provider_ref` it has never seen, so
+relaying every DID's receipts would be a 404 per operator text, forever.
+
+The obvious answer was a new boolean column on `messages`. I did not add one.
+
+**What I did instead:** a marker written into `messages.raw_payload` (JSONB, already there)
+at send time — `{"crm_link": {"link_id": ..., "did": ...}}`, `config.link_marker` /
+`config.marker_of`.
+
+Why that is additive and not an override, checked rather than assumed:
+
+  * `grep -rn raw_payload backend/app` is three hits. Two write it
+    (`services/messages.ingest_message_event`, `services/ingestion.py`) and **both are
+    INBOUND paths**. The third is a comment. **Nothing reads it.**
+  * So for an OUTBOUND row `raw_payload` is **always NULL today**. The marker puts a fact
+    where there was none. It cannot overwrite a value, because there is no value.
+  * `workers/handlers.handle_message_send` rewrites `provider_message_sid` and `status` on a
+    successful send and never touches `raw_payload`, so the marker survives to the receipt.
+  * It is written only by `api.send_message`, which is the CRM-link SMS route and is
+    **dark today** (`CRM_LINK_SMS_ENABLED=false` and the DID's 10DLC campaign is SUBMITTED).
+    Until that is lit, this writes nothing at all.
+
+**Why it could not be inferred instead.** "Outbound, on a bound DID, with no
+`sent_by_user_id`" was the free alternative and it is wrong: `flows/runtime.py:106` also
+sends with `user_id=None`, so a flow's text on a bound DID would be relayed to the CRM as
+though the CRM had sent it. `marker_of` is deliberately strict — a non-dict `raw_payload`, a
+missing key, or junk under the key all answer "not ours"
+(`test_crm_delivery_receipt::test_the_marker_is_what_tells_the_two_kinds_of_message_apart`).
+
+### 5.2 "Has this inbound webhook already been ingested?"
+
+BulkVS re-delivers a POST it did not get a 200 for, `ingest_message_event` is an upsert
+keyed on the provider SID, and the CRM's `POST /api/events` has **no dedupe** — so a retry
+would put a second copy of the customer's text on their CRM thread. The existing GoHighLevel
+relay has exactly this guard in the `relayed_to_ghl` column; I may not add the equivalent.
+
+**What I did instead:** ask before the upsert. `hook.is_new_inbound_message(db, sid)` is one
+indexed lookup on the unique `provider_message_sid` column, run *before*
+`ingest_message_event`, and it returns False — no push — when the row is already there. It
+**makes no query at all** while `CRM_LINK_ENABLED` is false, asserted by counting queries in
+`test_crm_inbound_relay::test_the_kill_switch_stops_a_bound_did_too`.
+
+This covers webhook re-delivery. It does **not** cover a `crm_report` job that is retried
+after the CRM already inserted the event — that duplicate has been possible for call events
+since the module shipped, is documented in `client.py`'s own docstring, and closing it needs
+a dedupe key on the CRM's ingest, which is the CRM's side to build. Named here rather than
+left to be discovered.
+
+---
+
+## 6. THE GOHIGHLEVEL RELAY IS UNTOUCHED
+
+This is the regression that would actually hurt, so it is asserted rather than argued.
+
+**Argued:** `git diff main -- backend/app/webhooks/bulkvs.py` removes nothing and rewrites
+nothing. `await queue.enqueue(db, "message_relay_ghl", {"message_id": str(msg.id)})` is the
+same line in the same place, still inside the same session block, still before anything
+CRM-related runs. `workers/handlers.handle_message_relay_ghl` is not in the diff at all, and
+neither is `handle_message_send`, which enqueues the outbound relay.
+
+**Asserted:** `test_crm_inbound_relay::test_the_existing_gohighlevel_relay_still_enqueues_
+exactly_as_it_does_today` drives the REAL route in three worlds — link off; link on with the
+DID unbound; link on with the DID BOUND — and in each one checks that
+
+  * the webhook answered 200,
+  * there is **exactly one** `message_relay_ghl` job,
+  * its payload is **exactly** `{"message_id": str(msg.id)}` and nothing else,
+  * and it is the **first** job enqueued, before anything the CRM link does.
+
+A second test asserts the job *sequence* is identical with the module off and on for an
+unbound DID, and a third asserts the relay still runs on a re-delivered webhook that the CRM
+link correctly skips.
+
+The same shape of assertion covers the DLR route: `test_crm_delivery_receipt::test_owens_own
+_row_is_advanced_exactly_as_it_is_today` checks the forward-only advance (`sent` ->
+`delivered`, and a late `sent` that must not walk a delivered message back) with the link
+both off and on, and that an unrecognised carrier word still leaves the row alone.
+
+---
+
+## 7. THE CRM CONTRACT, AND A DEPLOY-ORDER WARNING
+
+Everything was read out of the CRM's source. The CRM half is on branch
+`feature/conversations-live` in `/home/qa/wt/convo` and **is not on ghl-clone's `main`
+yet** — `/home/qa/ghl-clone` (main) still declares `contact_id: int` and has no
+`/api/events/delivery` at all.
+
+That matters for deploy order, so it is stated plainly:
+
+> **owen-main is built for the amended CRM. Deploying this branch against a CRM that
+> predates the amendment is safe but has no effect for the cases it fixes:** an event with
+> no `contact_id` is a **422** there (a 4xx — not retryable, logged, job completes, event
+> lost exactly as it is lost today), and every delivery receipt is a **404**. Nothing
+> regresses; nothing improves either. **Deploy the CRM half first, or at the same time.**
+
+Rather than let that look like a broken contract, the drift checks recognise **both**
+versions of the CRM and say which one they found:
+
+  * `test_crm_event_payload::test_the_contract_still_matches_the_crm_source` — against the
+    amended source it asserts `contact_id` is optional, `from_number` is declared, and every
+    key we send is a field the CRM declares (with and without a `contact_id`). Against a
+    pre-amendment source it prints a `[NOTE]` naming the file, asserts `contact_id` is still
+    a required int, and asserts the **only** undeclared key we send is `from_number` — the
+    one the amendment adds.
+  * `test_crm_delivery_receipt::test_the_receipt_contract_still_matches_the_crm_source` —
+    same shape, and prints a `[NOTE]` when the checkout has no `DeliveryReceipt` yet.
+
+Point either at the amended tree to see the full check:
+
+    GHL_CLONE_PATH=/home/qa/wt/convo python -m tests.test_crm_event_payload
+    GHL_CLONE_PATH=/home/qa/wt/convo python -m tests.test_crm_delivery_receipt
+
+Both pass against both trees. I ran them both ways.
+
+One behaviour of the amended CRM worth knowing before you switch this on: when it creates a
+contact for a number it has never seen, it fires its own `on_contact_created` — the new-lead
+notification. So a first-time caller or texter on a bound DID will notify the crew through
+the CRM. That is the CRM's rule and it is the point of the amendment; it is named here
+because it is a thing that will start happening.
+
+I also confirmed the inverse risk is not real: the CRM's `automations.on_inbound_call`
+returns early unless `event.type == CALL and direction == INBOUND`, so an SMS event can
+never trigger the missed-call auto text-back.
+
+---
+
+## 8. THE GATE
+
+    $ bash scripts/check.sh
+
+```
+==> pyflakes (undefined names, unreachable imports)
+    clean
+
+==> backend tests
+    ok   test_agent_config_limits
+    ok   test_ai_agent_node
+    ok   test_ai_api
+    ok   test_ai_cost
+    ok   test_asterisk_ingestion
+    ok   test_asterisk_recordings
+    ok   test_billing
+    ok   test_bulkvs_messages
+    ok   test_bulkvs_outbound
+    ok   test_caller_context
+    ok   test_consent_playback_race
+    ok   test_crm_contact_lookup
+    ok   test_crm_delivery_receipt
+    ok   test_crm_event_payload
+    ok   test_crm_hybrid_ring
+    ok   test_crm_inbound_relay
+    ok   test_crm_link_guards
+    ok   test_crm_link_isolation
+    ok   test_crm_unknown_caller
+    ok   test_dial_hangup_forensics
+    ok   test_dial_record_bridge
+    ok   test_dispatch_email
+    ok   test_flow_dtmf
+    ok   test_flow_interpreter
+    ok   test_flow_library
+    ok   test_flow_validator
+    ok   test_flow_variables
+    ok   test_flow_versioning
+    ok   test_health_telephony
+    ok   test_inbox_threads
+    ok   test_job_detection
+    ok   test_menu_prompt_timing
+    ok   test_merge_channels
+    ok   test_number_flow_assignment
+    ok   test_number_match
+    ok   test_number_sync
+    ok   test_openai_realtime_agent
+    ok   test_outbound_call
+    ok   test_ownership
+    ok   test_play_node_consent
+    ok   test_transfer_allowlist
+    ok   test_tts_prompts
+    ok   test_voice_agent_seam
+    ok   test_webrtc_credentials
+
+==> owen-voice tests
+    ok   test_agent_metrics
+    ok   test_audiosocket
+    ok   test_custom_tool_headers
+    ok   test_dsp
+    ok   test_flux_turns
+
+==> frontend typecheck
+    node_modules absent — skipped (run npm ci in frontend/ to enable)
+
+All checks passed.
+```
+
+Exit code 0. Four new/edited test modules, 43 backend modules in total, same as main plus
+three.
+
+**One environment note, because it cost me ten minutes and will cost the next person the
+same.** This is a git worktree and has no `backend/.venv`; `scripts/check.sh` finds the
+interpreter at `backend/.venv/bin/python` relative to the repo root, so with no venv every
+test "fails" with `../python: No such file or directory`. I symlinked the main checkout's
+venv into the worktree and added the symlink to `.git/info/exclude` — **not** to
+`.gitignore`, so nothing about the repo changed:
+
+    ln -s /home/qa/owen-main/backend/.venv backend/.venv
+
+`git status` is clean with that in place. The symlink is not part of any commit.
+
+---
+
+## 9. WHAT THE TESTS ASSERT
+
+Every one of these drives real code. The CRM is mocked at the **HTTP boundary**
+(`httpx.AsyncClient` inside `integrations/crm/client.py`), so the route, the client, the
+budget and the body builder are all the real thing. **No test contacts a live CRM.**
+
+| behaviour | where |
+|---|---|
+| an unknown caller's event carries `from_number` and is NOT dropped when `contact_id` is None | `test_crm_unknown_caller::test_a_stranger_is_delivered_instead_of_dropped` |
+| a KNOWN caller is still filed on the exact contact, body otherwise unchanged | `test_crm_unknown_caller::test_a_known_caller_is_still_filed...`, `test_crm_event_payload::test_a_resolved_contact_still_sends_exactly_what_it_did_before` |
+| a write-only token no longer loses every event | `test_crm_unknown_caller::test_a_token_without_the_read_scope_no_longer_loses_the_event` |
+| an inbound SMS on a BOUND DID produces a CRM message event with the right body, direction and numbers | `test_crm_inbound_relay::test_an_inbound_sms_on_a_bound_did_is_reported_to_the_crm`, `::test_the_crm_body_that_inbound_text_becomes` |
+| an inbound SMS on an UNBOUND DID produces NO CRM event and its handling is unchanged | `test_crm_inbound_relay::test_an_inbound_sms_on_an_unbound_did_produces_no_crm_event` |
+| a delivery receipt for a CRM-link message is forwarded, carrying the correlation field | `test_crm_delivery_receipt::test_a_receipt_for_a_crm_link_message_is_forwarded` |
+| a receipt for a message NOT sent through the link is not forwarded | `test_crm_delivery_receipt::test_a_receipt_for_a_message_not_sent_through_the_link_is_not_forwarded` |
+| with `CRM_LINK_ENABLED=false`, none of it fires at all (and the duplicate guard makes zero queries) | `test_crm_unknown_caller::test_the_kill_switch_still_refuses_the_whole_route`, `test_crm_inbound_relay::test_the_kill_switch_stops_a_bound_did_too`, `test_crm_delivery_receipt::test_the_kill_switch_stops_the_relay_entirely` |
+| **the existing `message_relay_ghl` path still enqueues exactly as today** | `test_crm_inbound_relay::test_the_existing_gohighlevel_relay_still_enqueues_exactly_as_it_does_today` |
+| a CRM that is unreachable or 500s does not break inbound SMS handling or the 200 | `test_crm_inbound_relay::test_a_broken_crm_push_does_not_break_message_handling`, `::test_a_crm_that_is_down_makes_the_queue_retry_rather_than_losing_the_text` |
+| a re-delivered BulkVS webhook does not duplicate the text on the CRM thread | `test_crm_inbound_relay::test_a_redelivered_webhook_does_not_duplicate...` |
+| a binding disabled between enqueue and drain stops the delivery | `test_crm_inbound_relay::test_the_delivery_route_refuses_a_did_that_is_no_longer_bound`, `test_crm_delivery_receipt::test_an_unbound_did_stops_the_relay_too` |
+| OWEN's own DLR handling (forward-only) is unchanged, link on or off | `test_crm_delivery_receipt::test_owens_own_row_is_advanced_exactly_as_it_is_today` |
+| the CRM contract has not drifted (events AND receipts) | `test_crm_event_payload::test_the_contract_still_matches_the_crm_source`, `test_crm_delivery_receipt::test_the_receipt_contract_still_matches_the_crm_source` |
+
+---
+
+## 10. WHAT I COULD NOT VERIFY WITHOUT A REAL CALL OR A REAL TEXT
+
+Stated plainly, because the difference between "tested" and "believed" is the whole point of
+this file.
+
+1. **Container reachability is still unproven.** `http://ghl_clone_api:8000` resolving from
+   inside `callmon_app` over the shared `traefik-public` network was read out of the compose
+   files on both sides and has never been exercised from inside a running container. This
+   sandbox has no docker. It is unchanged from the previous build report, and the one
+   command that settles it is still `GET /api/crm-link/health` — its `crm_reachable` field.
+2. **No real inbound text has ever gone through this.** The BulkVS MO webhook path is driven
+   by the real route function against a faked database. `BulkvsAdapter.parse_message_event`
+   and `ingest_message_event` are existing, live code and are not changed here, but the
+   combination — a real MO POST, ingested, then reported to a real CRM — has not happened.
+3. **No real DLR has ever gone through this.** BulkVS's DLR field names for the *failure
+   text* are a guess: `_carrier_detail` tries nine plausible keys and returns `""` when it
+   recognises none, so a failed message still reports FAILED and the CRM falls back to its
+   own wording — "the carrier could not deliver it". `RefId` and `Status` are NOT guesses;
+   they are the existing code's, unchanged. The first real failed text is what settles the
+   detail key, and finding `""` there is a five-minute fix, not a design problem.
+4. **The CRM-link SMS send path is still dark**, so the marker in §5.1 has never been written
+   by a real send. `CRM_LINK_SMS_ENABLED=false`, the DID's `sms_enabled` is false, and its
+   10DLC campaign is SUBMITTED and unapproved. Which means the delivery-receipt relay has
+   nothing to relay until 10DLC lands — it is built and tested ahead of the switch, not in
+   use. `providers/bulkvs_client.send_message`'s own note still stands: its `/messageSend`
+   request shape has never been exercised against the live BulkVS API.
+5. **The CRM's QUEUED -> SENT transition depends on the carrier.** If BulkVS emits no `sent`
+   DLR at all, the CRM's copy stays QUEUED until a terminal receipt arrives, because nothing
+   relays OWEN's own "the send succeeded" moment — that happens in
+   `workers/handlers.handle_message_send`, which I did not touch. If the owner finds
+   messages resting on QUEUED in the CRM after a real send, that is the cause, and the fix
+   is one `report_delivery_receipt(status="sent")` call in that handler. I left it out
+   deliberately: it is a change to a live worker on a path I cannot exercise, and it is not
+   needed unless the carrier's behaviour turns out to require it.
+6. **The amended CRM is not on ghl-clone's `main`.** See §7. Deploy order matters.
+
+---
+
+## 11. HOW TO TURN IT ON, AND HOW TO TURN IT OFF
+
+Unchanged from the previous report, because nothing here added a switch:
+
+    CRM_LINK_ENABLED=true          # the kill switch. Everything above is dead without it.
+    CRM_LINK_BASE_URL=http://ghl_clone_api:8000
+    CRM_LINK_TOKEN=ghl_pat_...     # needs `events:write`; add `read` for exact contact matching
+    AGENT_RUNTIME_KEY=...          # the internal hop; already set for the agent CRM report
+
+then bind a number with `python -m app.integrations.crm.manage`.
+
+**To turn it off: `CRM_LINK_ENABLED=false`, or disable the `crm_links` row.** Either one
+stops all three of the paths added here, at the first branch, before any database work.
+Neither requires a code change and neither touches anything the phone system already does.

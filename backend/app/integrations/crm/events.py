@@ -1,10 +1,11 @@
-"""OWEN call lifecycle -> the CRM's `POST /api/events` body. PURE (stdlib only).
+"""OWEN call + message lifecycle -> the CRM's `POST /api/events` body. PURE (stdlib only).
 
 ## The contract, READ FROM THE CRM'S SOURCE, not guessed
 
 `ghl-clone` (`backend/app/main.py::EventIngest` / `ingest_event`) accepts exactly:
 
-    {"contact_id": int,                                  # REQUIRED, must already exist
+    {"contact_id": int | None,                           # see THE AMENDMENT below
+     "from_number": str | None,                          # alias: "caller_number"
      "type": "SMS" | "CALL" | "EMAIL" | "INTERNAL_COMMENT",
      "direction": "INBOUND" | "OUTBOUND",                # default "INBOUND"
      "body": str | None,
@@ -13,15 +14,40 @@
      "recording_url": str | None,
      "provider_ref": str | None}
 
-and enforces three rules we must satisfy or be rejected with a 400/404:
+and enforces these rules, which we must satisfy or be rejected with a 400/404/422:
 
-  1. `contact_id` must resolve to an existing Contact, else **404**. There is no
-     create-on-ingest and no lookup by phone number on this endpoint, so a caller who is
-     not already in the CRM has nowhere to land. See `client.resolve_contact_id`.
+  1. An event needs a `contact_id` OR a `from_number`, else **422**. A `contact_id` that
+     does not resolve is still a **404** — naming a contact that is not there is a bug,
+     not a stranger.
   2. `call_status` is accepted ONLY when `type == "CALL"`, and only from
      `{completed, no-answer, busy, voicemail, failed}` — anything else is a 400.
   3. Authorisation is `Bearer ghl_pat_...` whose token carries the `events:write` scope
      AND whose owning user is ADMIN or DISPATCHER (`auth.require_events_ingest`).
+
+## THE AMENDMENT (CRM side, 2026-09-11) — why a stranger now gets through
+
+`contact_id` used to be REQUIRED, and that single fact silently discarded the most
+valuable event this business gets. `client.resolve_contact_id` searches the CRM's
+contacts and returns None for a caller who is not in them; `api.deliver_event` then
+dropped the event rather than post one the CRM would 404. A first-time roofing lead
+calling the bound DID therefore reached nobody.
+
+The CRM now accepts `from_number` (its `AliasChoices` also takes `caller_number`,
+which is what this module calls the same field), matches it to a contact on the LAST
+TEN DIGITS — the identity rule both systems share — and CREATES a contact when nothing
+matches, firing its own new-lead automation. So every body built here carries
+`from_number`, on every phase, whether or not a `contact_id` was resolved.
+
+We still resolve a `contact_id` first and send it when we have one. It is the exact
+match, it is the path the CRM's own tests pin, and it costs nothing we were not already
+spending. `from_number` is the fallback that makes a failure to resolve survivable
+instead of fatal — including a resolve that failed because the token lacks the `read`
+scope (see `client.resolve_contact_id`), which used to drop every event outright.
+
+DEPLOY ORDER. A CRM that predates the amendment declares `contact_id: int`, so a body
+without one is a 422 there. That is a 4xx: not retryable, logged, and the event is lost
+exactly as it is lost today. Nothing regresses, but the CRM half must be deployed for
+the fix to have any effect.
 
 ## Why a call produces the events it does
 
@@ -211,20 +237,31 @@ def summary_line(facts: CallEventFacts) -> str:
     return " ".join([line, *tail]).strip()
 
 
-def to_crm_event(facts: CallEventFacts, contact_id: int) -> dict[str, Any]:
+def to_crm_event(facts: CallEventFacts, contact_id: int | None = None) -> dict[str, Any]:
     """Build the exact body `POST /api/events` accepts. See the module docstring for why
     the two pre-terminal phases are INTERNAL_COMMENT rather than CALL.
 
     `provider_ref` carries `calls.id` — the value the CRM stores as
     `Opportunity.custom_fields.owen_call_id`, which is the documented join key back here.
+
+    `contact_id` is OPTIONAL. When OWEN resolved one it is sent and the CRM files the
+    event against exactly that contact; when it did not, the body carries `from_number`
+    alone and the CRM matches or creates the contact itself. The key is OMITTED rather
+    than sent as null so that a body for a resolved contact is byte-for-byte what this
+    function built before `from_number` existed, plus the one new field.
     """
     direction = "OUTBOUND" if str(facts.direction).lower() == "outbound" else "INBOUND"
     body: dict[str, Any] = {
-        "contact_id": int(contact_id),
         "body": summary_line(facts),
         # calls.id, on EVERY phase — the join key must not depend on which event survived.
         "provider_ref": facts.owen_call_id or facts.linkedid or None,
+        # THE fix for the first-time caller. Always sent, even alongside a contact_id: it
+        # costs one field and it is the only thing standing between a stranger's call and
+        # a dropped event if the lookup was wrong or could not run at all.
+        "from_number": facts.caller_number or None,
     }
+    if contact_id is not None:
+        body["contact_id"] = int(contact_id)
 
     if facts.phase != PHASE_ENDED:
         # Internal note. Direction OUTBOUND on purpose: the CRM increments the thread's
@@ -255,7 +292,14 @@ def validate_crm_event(body: dict) -> list[str]:
     than as a 400 in a retry loop against a live CRM.
     """
     problems: list[str] = []
-    if not isinstance(body.get("contact_id"), int):
+    # The CRM needs ONE of the two to know whose thread this belongs on: an explicit
+    # contact_id, or a number it can match-or-create against. Neither is a 422 there.
+    contact_id = body.get("contact_id")
+    has_number = bool(str(body.get("from_number") or "").strip())
+    if contact_id is None:
+        if not has_number:
+            problems.append("an event needs a contact_id or a from_number")
+    elif not isinstance(contact_id, int) or isinstance(contact_id, bool):
         problems.append("contact_id must be an int")
     etype = body.get("type")
     if etype not in ("SMS", "CALL", "EMAIL", "INTERNAL_COMMENT"):
@@ -271,4 +315,214 @@ def validate_crm_event(body: dict) -> list[str]:
     duration = body.get("duration_seconds")
     if duration is not None and not isinstance(duration, int):
         problems.append("duration_seconds must be an int or absent")
+    return problems
+
+
+# --- messages -----------------------------------------------------------------------------
+# Gap 2. `push.report_call_phase` was called from three places, all of them the bound-DID
+# INBOUND CALL path, so a text to the same DID reached the CRM not at all: the customer's
+# message was ingested, relayed to GoHighLevel and shown in OWEN's own Inbox, and the CRM —
+# the thing the owner actually works out of — never saw it.
+#
+# An SMS is the same `POST /api/events` endpoint with `type: "SMS"`. Nothing new is needed on
+# the CRM side and nothing new is needed in the queue; this is the same shape as a call
+# event, carried by the same job, down the same delivery hop.
+
+CRM_TYPE_SMS = "SMS"
+
+
+@dataclass(frozen=True)
+class MessageEventFacts:
+    """Everything OWEN knows about one SMS/MMS on a CRM-bound DID.
+
+    The sibling of `CallEventFacts`, and deliberately the same shape of thing: OWEN's own
+    vocabulary, carried in the `crm_report` job payload, mapped onto a specific CRM only at
+    the app-side adapter.
+
+    `owen_message_id` is `messages.id` and is THE join key. It is what this module hands the
+    CRM as `provider_ref` on send (`api.send_message` answers `{"message_id": ...}`, which
+    the CRM stores on its ConversationEvent), so using the same field on an inbound message
+    keeps one identifier for one row on both sides of the link.
+    """
+
+    owen_message_id: str                        # messages.id
+    caller_number: str = ""                     # the CUSTOMER's number, either direction
+    dialed_number: str = ""                     # the bound DID
+    body: str = ""
+    direction: str = "inbound"
+    num_media: int = 0
+    provider_message_sid: str = ""              # BulkVS's own id, for support threads
+    extra: dict = field(default_factory=dict)
+
+    def as_payload(self) -> dict:
+        return {
+            "owen_message_id": self.owen_message_id,
+            "caller_number": self.caller_number,
+            "dialed_number": self.dialed_number,
+            "body": self.body,
+            "direction": self.direction,
+            "num_media": self.num_media,
+            "provider_message_sid": self.provider_message_sid,
+            "extra": dict(self.extra or {}),
+        }
+
+    @classmethod
+    def from_payload(cls, payload: dict) -> "MessageEventFacts":
+        p = dict(payload or {})
+        try:
+            num_media = int(p.get("num_media") or 0)
+        except (TypeError, ValueError):
+            num_media = 0
+        return cls(
+            owen_message_id=str(p.get("owen_message_id") or ""),
+            caller_number=str(p.get("caller_number") or ""),
+            dialed_number=str(p.get("dialed_number") or ""),
+            body=str(p.get("body") or ""),
+            direction=str(p.get("direction") or "inbound"),
+            num_media=max(0, num_media),
+            provider_message_sid=str(p.get("provider_message_sid") or ""),
+            extra=p.get("extra") if isinstance(p.get("extra"), dict) else {},
+        )
+
+
+def message_body(facts: MessageEventFacts) -> str:
+    """What the operator reads on the CRM thread.
+
+    The customer's own words, VERBATIM, and nothing else — an operator deciding whether to
+    send a crew reads this, and a machine-written prefix on a customer's text is the kind of
+    small dishonesty that makes a thread impossible to skim.
+
+    The one addition is an MMS note, because the CRM's event row has no media column and the
+    picture of the roof IS the message. It is appended (never substituted) so the words, if
+    there were any, are still the first thing on the line.
+    """
+    text = (facts.body or "").strip()
+    if facts.num_media > 0:
+        plural = "attachment" if facts.num_media == 1 else "attachments"
+        note = f"[{facts.num_media} {plural} — view in OWEN]"
+        return f"{text} {note}".strip()
+    return text
+
+
+def to_crm_message_event(facts: MessageEventFacts,
+                         contact_id: int | None = None) -> dict[str, Any]:
+    """One SMS/MMS as the CRM's `POST /api/events` body.
+
+    `type: "SMS"` and NEVER a `call_status` — the CRM rejects a status on a non-CALL with a
+    400, and `automations.on_inbound_call` (the missed-call auto text-back) only ever looks
+    at CALL rows, so a text can never trigger it.
+
+    An INBOUND row increments the CRM thread's unread badge, which is exactly right here:
+    unlike the machine-written call notes, a customer's text IS something a person has to
+    read and answer.
+    """
+    return {
+        "type": CRM_TYPE_SMS,
+        "direction": "OUTBOUND" if str(facts.direction).lower() == "outbound" else "INBOUND",
+        "body": message_body(facts),
+        # The customer's number in both directions — it is who the thread belongs to, which
+        # is what the CRM matches (or creates) a contact on.
+        "from_number": facts.caller_number or None,
+        # messages.id. The same key a delivery receipt arrives with, so one OWEN row is one
+        # CRM row however many ways it is touched.
+        "provider_ref": facts.owen_message_id or None,
+        **({"contact_id": int(contact_id)} if contact_id is not None else {}),
+    }
+
+
+# --- delivery receipts --------------------------------------------------------------------
+# Gap 3, and the owner's own words for what it is for: "i want to know if the text arrived
+# or not."
+#
+# THE CORRELATION FIELD, read out of the CRM's source rather than guessed:
+#
+#   * `crmlink.send_sms` calls OWEN's `POST /api/crm-link/messages`, which answers
+#     `{"ok": true, "message_id": "<messages.id>", "status": "queued"}` (api.send_message).
+#   * `transport.py::OwenMainTransport.send` stores exactly that as the CRM's own
+#     `MessageRef(provider_ref=str(data.get("message_id")))`, which lands on the
+#     ConversationEvent's `provider_ref` column.
+#   * `POST /api/events/delivery` looks a receipt's row up by
+#     `ConversationEvent.provider_ref == body.provider_ref` AND `direction == OUTBOUND`,
+#     404-ing if it finds nothing. Its own docstring: "It is the only join key: the CRM
+#     never sees the BulkVS RefId."
+#
+# So `provider_ref` IS `messages.id`, and the BulkVS RefId — which is what OWEN's own
+# `/webhooks/bulkvs/message-status` matches on — must NOT be sent in its place. The webhook
+# resolves the RefId to the `messages` row first and relays that row's id.
+
+# The CRM's `DELIVERY_RECEIPT_STATUSES`, verified against ghl-clone `main.py`. It is exactly
+# the key set of OWEN's own `services/sms.OUTBOUND_STATUS_RANK` — the CRM took its vocabulary
+# from ours on purpose, so no translation happens anywhere and there is nothing to drift.
+CRM_DELIVERY_STATUSES = frozenset(
+    {"queued", "sent", "delivered", "failed", "undelivered", "blocked"}
+)
+
+
+@dataclass(frozen=True)
+class DeliveryReceiptFacts:
+    """One carrier delivery receipt for a message the CRM sent through the link."""
+
+    owen_message_id: str                        # messages.id — THE correlation field
+    status: str                                 # the CARRIER's word, lowercased
+    detail: str = ""                            # the carrier's failure text, when it gave one
+    dialed_number: str = ""                     # the bound DID it was sent FROM
+    provider_message_sid: str = ""              # bulkvs-<RefId>, for support threads
+    extra: dict = field(default_factory=dict)
+
+    def as_payload(self) -> dict:
+        return {
+            "owen_message_id": self.owen_message_id,
+            "status": self.status,
+            "detail": self.detail,
+            "dialed_number": self.dialed_number,
+            "provider_message_sid": self.provider_message_sid,
+            "extra": dict(self.extra or {}),
+        }
+
+    @classmethod
+    def from_payload(cls, payload: dict) -> "DeliveryReceiptFacts":
+        p = dict(payload or {})
+        return cls(
+            owen_message_id=str(p.get("owen_message_id") or ""),
+            status=str(p.get("status") or "").strip().lower(),
+            detail=str(p.get("detail") or ""),
+            dialed_number=str(p.get("dialed_number") or ""),
+            provider_message_sid=str(p.get("provider_message_sid") or ""),
+            extra=p.get("extra") if isinstance(p.get("extra"), dict) else {},
+        )
+
+
+def to_crm_delivery_receipt(facts: DeliveryReceiptFacts) -> dict[str, Any]:
+    """The exact body `POST /api/events/delivery` accepts: `{provider_ref, status, detail}`.
+
+    The CARRIER's word is sent, not OWEN's own advanced status. A receipt is a report of
+    what the carrier said; both sides then apply their own forward-only ladder to it, which
+    is what makes a late or out-of-order receipt harmless on either side.
+    """
+    body: dict[str, Any] = {
+        "provider_ref": facts.owen_message_id or None,
+        "status": facts.status,
+    }
+    detail = (facts.detail or "").strip()
+    if detail:
+        body["detail"] = detail
+    return body
+
+
+def validate_crm_delivery_receipt(body: dict) -> list[str]:
+    """Everything the CRM would reject about a receipt, checked here first.
+
+    A receipt that cannot name its message is worse than useless: the CRM would 404 it, the
+    job would complete with `ok: false`, and the operator would go on staring at a message
+    stuck on QUEUED. Caught here it is a log line that names the bug.
+    """
+    problems: list[str] = []
+    ref = str(body.get("provider_ref") or "").strip()
+    if not ref:
+        problems.append("provider_ref must carry messages.id — it is the only join key")
+    status = str(body.get("status") or "").strip().lower()
+    if status not in CRM_DELIVERY_STATUSES:
+        problems.append(
+            f"status {body.get('status')!r} is not one of {sorted(CRM_DELIVERY_STATUSES)}"
+        )
     return problems

@@ -7,9 +7,12 @@ route is authenticated anyway.
 
 ## Two callers, two privilege levels
 
-  * **The worker**, delivering a queued call event: `POST /events`, scope `agent_write`.
-    That is the scope `AGENT_RUNTIME_KEY` already carries for the existing agent CRM report,
-    so no new credential is needed for the internal hop.
+  * **The worker**, delivering a queued report: `POST /events` (a call lifecycle phase),
+    `POST /message-events` (an inbound SMS/MMS) and `POST /delivery-receipts` (a carrier
+    receipt for a message the CRM sent) — all scope `agent_write`. That is the scope
+    `AGENT_RUNTIME_KEY` already carries for the existing agent CRM report, so no new
+    credential is needed for the internal hop. All three share one retry contract: 200
+    completes the job, 502 makes the queue retry with backoff.
   * **The CRM**, asking OWEN to do something to a phone line: `POST /calls`, `POST /messages`,
     `POST /softphone/credentials`, `GET /health`, scope `crm_link`. A NEW scope, because
     `agent_write` is documented as
@@ -53,7 +56,10 @@ from app.integrations.crm import binding as crm_binding
 from app.integrations.crm import config as crm_config
 from app.integrations.crm import softphone as crm_softphone
 from app.integrations.crm.client import CrmClient
-from app.integrations.crm.events import (CallEventFacts, to_crm_event, validate_crm_event)
+from app.integrations.crm.events import (CallEventFacts, DeliveryReceiptFacts,
+                                         MessageEventFacts, to_crm_delivery_receipt,
+                                         to_crm_event, to_crm_message_event,
+                                         validate_crm_delivery_receipt, validate_crm_event)
 from app.models import Number
 from app.services import queue, sms
 from app.telephony import outbound as outbound_rules
@@ -150,8 +156,8 @@ async def deliver_event(
     Called by `workers/handlers.py::handle_crm_report` draining a `crm_report` job. The
     status code is the retry contract that handler reads:
 
-      * **200** — delivered, or permanently undeliverable (no matching contact). The job
-        completes. A caller who is not in the CRM will not become one on the sixth attempt.
+      * **200** — delivered, or permanently undeliverable. The job completes. A payload the
+        CRM refuses with a 4xx will not become acceptable on the sixth attempt.
       * **502** — the CRM was unreachable or answered 5xx. Raise so the queue retries with
         backoff and eventually dead-letters.
       * **200 with `ok: false`** for a CRM 4xx: the payload is wrong and retrying it will
@@ -178,9 +184,19 @@ async def deliver_event(
                        budget_s=cfg.http_budget_seconds)
     contact_id, reason = await client.resolve_contact_id(facts.caller_number)
     if contact_id is None:
-        logger.warning("crm-link: dropping %s event for call %s — %s",
-                       facts.phase, facts.owen_call_id or facts.linkedid, reason)
-        return {"ok": False, "reason": reason, "phase": facts.phase}
+        # NOT a drop any more. An unresolved caller is now sent with `from_number` and the
+        # CRM matches-or-creates the contact itself (see events.py, THE AMENDMENT). This
+        # used to `return {"ok": False}` here, which is what silently discarded every
+        # first-time roofing lead — the single most valuable event the business gets.
+        #
+        # INFO, not WARNING: "the caller is new" is the normal life of a phone line, and a
+        # warning per new lead would train everyone to ignore the log. The reason is still
+        # recorded, because it also covers the cases that ARE worth seeing — a token
+        # without the `read` scope, or a CRM that could not be searched.
+        logger.info("crm-link: no contact_id for %s event on call %s (%s) — sending "
+                    "from_number=%s for the CRM to match or create",
+                    facts.phase, facts.owen_call_id or facts.linkedid, reason,
+                    facts.caller_number or "<unknown>")
 
     crm_body = to_crm_event(facts, contact_id)
     problems = validate_crm_event(crm_body)
@@ -200,6 +216,154 @@ async def deliver_event(
         )
     return {"ok": False, "reason": f"CRM {result.status}: {result.reason}",
             "phase": facts.phase}
+
+
+class MessageDeliveryIn(BaseModel):
+    """The `crm_report` job body for a message, i.e. `events.MessageEventFacts.as_payload()`.
+
+    Loose for the same reason `EventDeliveryIn` is: a job enqueued by an older deploy has to
+    drain against a newer one.
+    """
+
+    model_config = {"extra": "allow"}
+
+    owen_message_id: str = ""
+    caller_number: str = ""
+    dialed_number: str = ""
+    body: str = ""
+    direction: str = "inbound"
+    num_media: int = 0
+    provider_message_sid: str = ""
+    extra: dict = Field(default_factory=dict)
+
+
+@router.post("/message-events")
+async def deliver_message_event(
+    body: MessageDeliveryIn,
+    db: AsyncSession = Depends(get_db),
+    _key=Depends(require_scope(SCOPE_AGENT_WRITE)),
+) -> dict:
+    """Deliver one queued SMS/MMS to the CRM as a `type: "SMS"` event.
+
+    The message sibling of `deliver_event`, with the SAME retry contract, because the same
+    `handle_crm_report` handler drains both and reads the status code the same way:
+    200 completes the job, 502 makes the queue retry with backoff.
+
+    The bound-DID check is repeated HERE, at drain time, and not merely trusted from the
+    webhook that enqueued the job. A binding can be disabled between enqueue and drain —
+    that is the whole point of having a per-number switch — and a job already in the queue
+    must not keep pushing a customer's texts to a CRM the owner has just unbound.
+    """
+    cfg = _require_enabled()
+    facts = MessageEventFacts.from_payload(body.model_dump())
+
+    base_url, token = cfg.base_url, cfg.token
+    bound = await crm_binding.resolve(db, facts.dialed_number) if facts.dialed_number else None
+    if bound is None:
+        logger.warning("crm-link: not delivering message %s — %s is not bound to the CRM",
+                       facts.owen_message_id, facts.dialed_number or "<no DID>")
+        return {"ok": False, "reason": crm_config.REFUSE_NOT_BOUND,
+                "message_id": facts.owen_message_id}
+    base_url, token = bound.crm_base_url or base_url, bound.crm_token or token
+    if not token:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, crm_config.REFUSE_NO_TOKEN)
+
+    client = CrmClient(base_url, token, timeout_s=cfg.http_timeout_seconds,
+                       budget_s=cfg.http_budget_seconds)
+    contact_id, reason = await client.resolve_contact_id(facts.caller_number)
+    if contact_id is None:
+        # Same rule as a call, and it matters more here: a text from a number nobody has
+        # ever called from is a lead writing in, and the CRM creates the contact for it.
+        logger.info("crm-link: no contact_id for message %s (%s) — sending from_number=%s",
+                    facts.owen_message_id, reason, facts.caller_number or "<unknown>")
+
+    crm_body = to_crm_message_event(facts, contact_id)
+    problems = validate_crm_event(crm_body)
+    if problems:
+        logger.error("crm-link: refusing to send a malformed message event: %s", problems)
+        return {"ok": False, "reason": "; ".join(problems),
+                "message_id": facts.owen_message_id}
+
+    result = await client.post_event(crm_body)
+    if result.ok:
+        return {"ok": True, "message_id": facts.owen_message_id, "contact_id": contact_id,
+                "crm_status": result.status}
+    if result.retryable:
+        raise HTTPException(
+            status.HTTP_502_BAD_GATEWAY,
+            f"CRM did not accept the message ({result.status}): {result.reason}",
+        )
+    return {"ok": False, "reason": f"CRM {result.status}: {result.reason}",
+            "message_id": facts.owen_message_id}
+
+
+class DeliveryReceiptIn(BaseModel):
+    """The `crm_report` job body for a receipt, i.e. `events.DeliveryReceiptFacts.as_payload()`."""
+
+    model_config = {"extra": "allow"}
+
+    owen_message_id: str = ""
+    status: str = ""
+    detail: str = ""
+    dialed_number: str = ""
+    provider_message_sid: str = ""
+    extra: dict = Field(default_factory=dict)
+
+
+@router.post("/delivery-receipts")
+async def deliver_receipt(
+    body: DeliveryReceiptIn,
+    db: AsyncSession = Depends(get_db),
+    _key=Depends(require_scope(SCOPE_AGENT_WRITE)),
+) -> dict:
+    """Relay one carrier delivery receipt to the CRM — "i want to know if the text arrived".
+
+    `provider_ref` carries `messages.id`, which is the id OWEN handed the CRM when it
+    accepted the send (`send_message` below answers `{"message_id": ...}`) and the ONLY key
+    the CRM can match a receipt on. The BulkVS RefId is never sent: the CRM has never seen
+    one. The webhook resolves the RefId to the `messages` row before this is reached.
+
+    Retry contract, as everywhere else on this router: 502 for a CRM that is down, 200 with
+    `ok: false` for anything the CRM understood and refused. A **404** is in the second
+    group and is an ordinary answer, not a fault — it is what a receipt for a text sent
+    before the link existed looks like, and no number of retries will conjure the row.
+    """
+    cfg = _require_enabled()
+    facts = DeliveryReceiptFacts.from_payload(body.model_dump())
+
+    base_url, token = cfg.base_url, cfg.token
+    bound = await crm_binding.resolve(db, facts.dialed_number) if facts.dialed_number else None
+    if bound is None:
+        logger.warning("crm-link: not relaying the receipt for message %s — %s is not bound",
+                       facts.owen_message_id, facts.dialed_number or "<no DID>")
+        return {"ok": False, "reason": crm_config.REFUSE_NOT_BOUND,
+                "message_id": facts.owen_message_id}
+    base_url, token = bound.crm_base_url or base_url, bound.crm_token or token
+    if not token:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, crm_config.REFUSE_NO_TOKEN)
+
+    crm_body = to_crm_delivery_receipt(facts)
+    problems = validate_crm_delivery_receipt(crm_body)
+    if problems:
+        logger.error("crm-link: refusing to send a malformed delivery receipt: %s", problems)
+        return {"ok": False, "reason": "; ".join(problems),
+                "message_id": facts.owen_message_id}
+
+    client = CrmClient(base_url, token, timeout_s=cfg.http_timeout_seconds,
+                       budget_s=cfg.http_budget_seconds)
+    result = await client.post_delivery_receipt(crm_body)
+    if result.ok:
+        return {"ok": True, "message_id": facts.owen_message_id,
+                "status": facts.status, "crm_status": result.status,
+                # False when the CRM correctly ignored a stale or out-of-order receipt.
+                "advanced": (result.data or {}).get("advanced")}
+    if result.retryable:
+        raise HTTPException(
+            status.HTTP_502_BAD_GATEWAY,
+            f"CRM did not accept the receipt ({result.status}): {result.reason}",
+        )
+    return {"ok": False, "reason": f"CRM {result.status}: {result.reason}",
+            "message_id": facts.owen_message_id}
 
 
 # --- direction 2: the CRM -> OWEN ---------------------------------------------------------
@@ -383,7 +547,7 @@ async def send_message(
         logger.warning("crm-link: REFUSED SMS to %s — %s", body.to_number, refusal)
         raise HTTPException(status.HTTP_403_FORBIDDEN, refusal)
 
-    number, _bound = await _bound_from_number(db, body.from_number)
+    number, bound = await _bound_from_number(db, body.from_number)
 
     # The platform's OWN 10DLC gate. Independent of ours and never bypassed.
     gate = sms.outbound_block_reason(number.sms_enabled, number.sms_campaign_id)
@@ -405,9 +569,18 @@ async def send_message(
         raise HTTPException(status.HTTP_409_CONFLICT, "this contact has opted out of SMS")
 
     msg = await enqueue_outbound_message(db, number, contact, text, None)
+    # Mark the row as the CRM's BEFORE the send job can drain, so a delivery receipt that
+    # comes back fast still finds the marker. This is the ONLY thing that distinguishes a
+    # message the CRM sent from one an operator (or a flow) sent on the same DID, and
+    # `/webhooks/bulkvs/message-status` relays a receipt for the first and not the second.
+    # `raw_payload` is NULL on every outbound row today — see config.py, THE MARKER.
+    msg.raw_payload = crm_config.link_marker(bound.link_id, number.phone_number)
+    await db.commit()
     await queue.enqueue(db, "message_send", {"message_id": str(msg.id)})
     logger.info("crm-link: queued SMS %s -> %s (message %s)",
                 number.phone_number, contact, msg.id)
+    # `message_id` IS the correlation field: the CRM stores it as its ConversationEvent's
+    # `provider_ref`, and every delivery receipt for this text comes back carrying it.
     return {"ok": True, "message_id": str(msg.id), "status": "queued"}
 
 
