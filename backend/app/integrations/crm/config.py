@@ -89,6 +89,7 @@ def parse_allowlist(raw: str | None) -> frozenset[str]:
 REFUSE_KILL_SWITCH = "CRM link is disabled (CRM_LINK_ENABLED=false)"
 REFUSE_NOT_ALLOWLISTED = "destination is not on CRM_LINK_ALLOWLIST"
 REFUSE_NO_DESTINATION = "no destination given"
+REFUSE_NOT_A_PHONE_NUMBER = "destination is not a full phone number"
 REFUSE_SMS_DARK = "CRM-link SMS is dark (CRM_LINK_SMS_ENABLED=false)"
 REFUSE_NO_TOKEN = "no CRM token configured (CRM_LINK_TOKEN)"
 REFUSE_NOT_BOUND = "that number is not bound to the CRM"
@@ -144,6 +145,12 @@ class CrmLinkSettings:
     base_url: str = ""
     token: str = ""
     allowlist: frozenset[str] = field(default_factory=frozenset)
+    # The owner's decision, 2026-09-13: "i should be able to call any number from there".
+    # True lifts the allowlist and nothing else: the kill switch still applies, SMS stays
+    # behind its own dark switch and the 10DLC gate, the per-contact block list still
+    # applies, and a destination must be a full phone number (10+ digits), so a short code
+    # or an emergency number can never be dialled from the CRM by this path.
+    allow_any_destination: bool = False
     sms_enabled: bool = False
     # The provisioned CRM browser-softphone operators, as SLUGS (see softphone.py). EMPTY
     # GRANTS NOTHING, like `allowlist` above: a forgotten roster must mean "nobody got a
@@ -170,6 +177,10 @@ class CrmLinkSettings:
         key = match_key(number)
         if not key:
             return REFUSE_NO_DESTINATION
+        if self.allow_any_destination:
+            if len(key) < 10:
+                return REFUSE_NOT_A_PHONE_NUMBER
+            return None
         if key not in self.allowlist:
             return REFUSE_NOT_ALLOWLISTED
         return None
@@ -233,6 +244,7 @@ def settings_view(settings) -> CrmLinkSettings:
         base_url=str(getattr(settings, "CRM_LINK_BASE_URL", "") or "").rstrip("/"),
         token=str(getattr(settings, "CRM_LINK_TOKEN", "") or ""),
         allowlist=parse_allowlist(getattr(settings, "CRM_LINK_ALLOWLIST", "")),
+        allow_any_destination=bool(getattr(settings, "CRM_LINK_ALLOW_ANY_DESTINATION", False)),
         sms_enabled=bool(getattr(settings, "CRM_LINK_SMS_ENABLED", False)),
         softphone_operators=crm_softphone.parse_roster(
             getattr(settings, "CRM_LINK_SOFTPHONE_OPERATORS", "")

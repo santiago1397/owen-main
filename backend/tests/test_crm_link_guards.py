@@ -39,6 +39,38 @@ def _cfg(**kw):
     return c.CrmLinkSettings(**base)
 
 
+def test_allow_any_destination_lifts_only_the_allowlist():
+    print("CRM_LINK_ALLOW_ANY_DESTINATION lifts the allowlist and nothing else:")
+    from app.integrations.crm import config as c
+
+    cfg = _cfg(allowlist=frozenset(), allow_any_destination=True)
+    check("an unlisted full number is permitted", cfg.allows(NOT_ALLOWED))
+    check("formatting still does not matter", cfg.allows("(305) 555-7777"))
+    check("a short code is refused", cfg.destination_refusal("911") == c.REFUSE_NOT_A_PHONE_NUMBER)
+    check("a 7-digit number is refused", not cfg.allows("5557777"))
+    check("an empty destination is still refused",
+          cfg.destination_refusal("") == c.REFUSE_NO_DESTINATION)
+    off = _cfg(enabled=False, allowlist=frozenset(), allow_any_destination=True)
+    check("the kill switch still wins", off.destination_refusal(NOT_ALLOWED) == c.REFUSE_KILL_SWITCH)
+    check("SMS stays dark even with any destination allowed",
+          cfg.sms_refusal(NOT_ALLOWED) == c.REFUSE_SMS_DARK)
+    default = _cfg(allowlist=frozenset())
+    check("the default is still: empty allowlist allows nothing", not default.allows(NOT_ALLOWED))
+
+
+def test_the_setting_defaults_off_and_is_read_from_settings():
+    print("the switch defaults OFF and is read from settings:")
+    from types import SimpleNamespace
+    from app.integrations.crm import config as c
+
+    unset = c.settings_view(SimpleNamespace(CRM_LINK_ENABLED=True, CRM_LINK_ALLOWLIST=""))
+    check("unset means off", unset.allow_any_destination is False)
+    check("and an unset allowlist still allows nothing", not unset.allows(NOT_ALLOWED))
+    on = c.settings_view(SimpleNamespace(CRM_LINK_ENABLED=True, CRM_LINK_ALLOWLIST="",
+                                         CRM_LINK_ALLOW_ANY_DESTINATION=True))
+    check("set means on", on.allow_any_destination is True and on.allows(NOT_ALLOWED))
+
+
 # --- 1. the allowlist -----------------------------------------------------------------------
 
 def test_allowlist_refuses_anything_not_on_it():
@@ -265,6 +297,8 @@ if __name__ == "__main__":
     test_allowlist_refuses_anything_not_on_it()
     test_an_empty_allowlist_allows_nothing()
     test_allowlist_matching_ignores_formatting_but_not_identity()
+    test_allow_any_destination_lifts_only_the_allowlist()
+    test_the_setting_defaults_off_and_is_read_from_settings()
     test_pstn_ring_legs_are_filtered_and_capped()
     test_outbound_call_and_sms_refuse_while_the_kill_switch_is_off()
     test_sms_stays_dark_even_with_the_link_on_and_the_number_allowlisted()

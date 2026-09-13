@@ -263,6 +263,10 @@ class Settings(BaseSettings):
     # ten digits, so formatting does not matter. EMPTY ALLOWS NOTHING — while this module is
     # new, the failure mode of an unset or mis-parsed allowlist must be "no call went out".
     CRM_LINK_ALLOWLIST: str = ""
+    # Lifts CRM_LINK_ALLOWLIST so the CRM may call ANY full phone number (the owner's
+    # decision, 2026-09-13). Default False: the allowlist stays the guard unless this is set.
+    # The kill switch, the dark SMS switch, the 10DLC gate and the block list still apply.
+    CRM_LINK_ALLOW_ANY_DESTINATION: bool = False
     # SMS is BUILT AND DARK. The bound DID's 10DLC campaign is submitted and not approved, so
     # carriers would filter the message whatever this code did. This is the module's own gate,
     # ON TOP OF the platform's per-number `numbers.sms_enabled` + `sms_campaign_id` check and
