@@ -47,8 +47,18 @@ The guarantee is structural, not careful:
 | `push.py`   | queues onto the EXISTING `crm_report` job (retry/backoff for free)      |
 | `api.py`    | `/api/openphone-mirror/*`: the delivery hop and the recording stream    |
 | `manage.py` | `python -m app.integrations.openphone.manage` — status/preview/backfill |
+| `webhook.py`| PUBLIC `POST /webhooks/openphone`: verify, queue; then process via sync |
+| `contact_book.py` | Quo's own contact names, read + cached, for non-contact threads |
 
-## Polling, not webhooks
+## Polling AND a webhook (2026-09-13)
+
+The owner registers a Quo webhook by hand and pastes its signing secret into config, which
+removes both reasons given below for polling only. `webhook.py` receives it — HMAC-verified,
+off by default (`OPENPHONE_WEBHOOK_ENABLED`) — and hands each object to the same idempotent
+functions the poll uses; the poll stays on as the backstop. Setup steps and the URL:
+`docs/QUO_WEBHOOK.md`. OWEN still makes no non-GET request to OpenPhone.
+
+The original reasoning, kept for the record:
 
 Registering an OpenPhone webhook requires `POST /v1/webhooks`, and the signing secret is
 returned only in that call's response. Both halves disqualify it here: the POST is the exact

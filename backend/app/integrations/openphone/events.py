@@ -148,6 +148,9 @@ class MirroredCall:
     has_recording: bool = False
     transcript: str = ""
     summary: str = ""
+    # The name Quo's own contact book has for the customer's number, when it has one.
+    # Filled at the delivery hop (api.py), never stored in OWEN's database.
+    contact_name: str = ""
     extra: dict = field(default_factory=dict)
 
     def as_payload(self) -> dict:
@@ -163,6 +166,7 @@ class MirroredCall:
             "has_recording": self.has_recording,
             "transcript": self.transcript,
             "summary": self.summary,
+            "contact_name": self.contact_name,
             "extra": dict(self.extra or {}),
         }
 
@@ -185,6 +189,7 @@ class MirroredCall:
             has_recording=bool(p.get("has_recording")),
             transcript=str(p.get("transcript") or ""),
             summary=str(p.get("summary") or ""),
+            contact_name=str(p.get("contact_name") or ""),
             extra=p.get("extra") if isinstance(p.get("extra"), dict) else {},
         )
 
@@ -200,6 +205,7 @@ class MirroredMessage:
     body: str = ""
     occurred_at: Optional[str] = None
     num_media: int = 0
+    contact_name: str = ""
     extra: dict = field(default_factory=dict)
 
     def as_payload(self) -> dict:
@@ -212,6 +218,7 @@ class MirroredMessage:
             "body": self.body,
             "occurred_at": self.occurred_at,
             "num_media": self.num_media,
+            "contact_name": self.contact_name,
             "extra": dict(self.extra or {}),
         }
 
@@ -230,6 +237,7 @@ class MirroredMessage:
             body=str(p.get("body") or ""),
             occurred_at=p.get("occurred_at") or None,
             num_media=num_media,
+            contact_name=str(p.get("contact_name") or ""),
             extra=p.get("extra") if isinstance(p.get("extra"), dict) else {},
         )
 
@@ -310,6 +318,10 @@ def _common(facts, contact_id: int | None, kind: str) -> dict[str, Any]:
         "source_system": SOURCE_SYSTEM,
         "source_number": facts.line_number or None,
     }
+    if facts.contact_name:
+        # Shown by the CRM on a thread for a number that is NOT one of its contacts,
+        # labelled "from Quo". It creates nothing there and renames nothing.
+        body["source_contact_name"] = facts.contact_name
     if contact_id is not None:
         body["contact_id"] = int(contact_id)
     return body
@@ -341,6 +353,11 @@ def to_crm_call_event(facts: MirroredCall,
         body["recording_url"] = f"{CRM_RECORDING_PATH}/{facts.external_id}"
     if facts.transcript.strip():
         body["transcript"] = facts.transcript.strip()
+    if facts.summary.strip():
+        # Also inside `body` above. Sent on its own too so that a summary Quo produces
+        # AFTER the call was mirrored (webhook `call.summary.completed`) can be added to
+        # the one existing CRM row — which fills blanks and never rewrites the sentence.
+        body["summary"] = facts.summary.strip()
     return body
 
 

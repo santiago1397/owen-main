@@ -27,6 +27,7 @@ from app.api import settings as settings_api
 from app.api import telephony as telephony_api
 from app.integrations.crm import api as crm_link_api
 from app.integrations.openphone import api as openphone_mirror_api
+from app.integrations.openphone import webhook as openphone_webhook
 from app.core.config import settings
 from app.db import engine
 from app.migrate import run_migrations
@@ -93,6 +94,9 @@ app.include_router(telephony_api.router)
 # is false, so mounting it changes nothing until the kill switch is flipped.
 app.include_router(crm_link_api.router)
 app.include_router(openphone_mirror_api.router)
+# Quo's webhook: PUBLIC (POST /webhooks/openphone), HMAC-verified, 404 while
+# OPENPHONE_WEBHOOK_ENABLED is false. See integrations/openphone/webhook.py.
+app.include_router(openphone_webhook.router)
 # Key management is JWT-authed (the UI's surface); the AI API is API-key-authed. A machine
 # credential must never be able to mint or widen another machine credential.
 app.include_router(api_keys_api.router)

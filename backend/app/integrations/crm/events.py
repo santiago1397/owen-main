@@ -237,6 +237,11 @@ def summary_line(facts: CallEventFacts) -> str:
     return " ".join([line, *tail]).strip()
 
 
+# The label the CRM shows beside every event that came through the bound BulkVS DID. The
+# CRM's own outbound sends are stamped with the same word (`automations.SENT_SOURCE_SYSTEM`).
+SOURCE_SYSTEM = "BulkVS"
+
+
 def to_crm_event(facts: CallEventFacts, contact_id: int | None = None) -> dict[str, Any]:
     """Build the exact body `POST /api/events` accepts. See the module docstring for why
     the two pre-terminal phases are INTERNAL_COMMENT rather than CALL.
@@ -259,6 +264,11 @@ def to_crm_event(facts: CallEventFacts, contact_id: int | None = None) -> dict[s
         # costs one field and it is the only thing standing between a stranger's call and
         # a dropped event if the lookup was wrong or could not run at all.
         "from_number": facts.caller_number or None,
+        # WHICH system and WHICH line (2026-09-13). The CRM's thread now holds BulkVS and
+        # Quo events side by side and labels every row with both; without these a BulkVS
+        # row is the one that shows no source at all.
+        "source_system": SOURCE_SYSTEM,
+        "source_number": facts.dialed_number or None,
     }
     if contact_id is not None:
         body["contact_id"] = int(contact_id)
@@ -426,6 +436,9 @@ def to_crm_message_event(facts: MessageEventFacts,
         # messages.id. The same key a delivery receipt arrives with, so one OWEN row is one
         # CRM row however many ways it is touched.
         "provider_ref": facts.owen_message_id or None,
+        # See `to_crm_event`: the line and system every CRM thread row is labelled with.
+        "source_system": SOURCE_SYSTEM,
+        "source_number": facts.dialed_number or None,
         **({"contact_id": int(contact_id)} if contact_id is not None else {}),
     }
 

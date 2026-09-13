@@ -2,6 +2,11 @@
 
 ## POLLING, NOT WEBHOOKS — the decision and the honest reason
 
+> AMENDED 2026-09-13: both disqualifiers below were removed by the owner, who registers the
+> webhook in Quo's dashboard and supplies the signing secret. `webhook.py` now receives it
+> and calls `_mirror_call` / `_mirror_message` exactly as this paragraph anticipated. This
+> poll stays on as the backstop. See docs/QUO_WEBHOOK.md.
+
 OpenPhone supports webhooks and they would be the better mechanism. This module polls
 anyway, and the reason is not effort:
 
@@ -77,7 +82,7 @@ from sqlalchemy.exc import IntegrityError
 
 from app.db import SessionLocal
 from app.integrations.openphone import config as op_config
-from app.integrations.openphone import push
+from app.integrations.openphone import contact_book, push
 from app.integrations.openphone.events import MirroredCall, MirroredMessage
 from app.integrations.openphone.models import (BACKFILL_SETTING_KEY, OpenPhoneMirrorRow)
 from app.models import AppSetting
@@ -216,6 +221,8 @@ async def _from_address_book(line_key: str,
             items = _page_items(body)
             if not items:
                 break
+            # Keep Quo's names for these numbers, for a CRM thread that is not a contact.
+            contact_book.remember(items)
             for entry in items:
                 for number in _numbers_from_contact(entry):
                     key = op_config.match_key(number)

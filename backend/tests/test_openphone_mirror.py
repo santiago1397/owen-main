@@ -647,8 +647,11 @@ def test_the_router_is_exactly_these_routes_and_the_crm_link_is_untouched():
         "/api/openphone-mirror/recordings/{call_id}",
         "/api/openphone-mirror/status",
         "/api/openphone-mirror/preview",
+        # 2026-09-13: where a verified Quo webhook event is processed. Worker-only
+        # (agent_write), like /events. The public receiver is NOT on this router.
+        "/api/openphone-mirror/webhook-events",
     })
-    check(f"exactly four routes: {routes}", routes == expected)
+    check(f"exactly five routes: {routes}", routes == expected)
     check("no route mentions sending, dialling or answering",
           not any(re.search(r"send|dial|answer|call$", p) for p in routes))
 

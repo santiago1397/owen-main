@@ -57,7 +57,9 @@ from app.core.apikeys import SCOPE_AGENT_WRITE, SCOPE_CRM_LINK
 from app.integrations.crm import config as crm_config
 from app.integrations.crm.client import CrmClient
 from app.integrations.openphone import config as op_config
+from app.integrations.openphone import contact_book
 from app.integrations.openphone import sync as op_sync
+from app.integrations.openphone import webhook as op_webhook
 from app.integrations.openphone.events import to_crm_event
 from app.providers import openphone_client as op
 
@@ -140,6 +142,11 @@ async def deliver_mirrored(
                     "for the CRM to match or create", payload.get("kind"),
                     payload.get("external_id"), reason)
 
+    if contact_id is None and not payload.get("contact_name"):
+        # Not a CRM contact: the CRM files it on a number-only thread and shows the name
+        # Quo's own contact book has for it, if any. Read-only, cached; "" if unknown.
+        payload["contact_name"] = await contact_book.name_for(customer)
+
     try:
         crm_body = to_crm_event(payload, contact_id)
     except ValueError as exc:
@@ -159,6 +166,28 @@ async def deliver_mirrored(
         )
     return {"ok": False, "reason": f"CRM {result.status}: {result.reason}",
             "kind": payload.get("kind")}
+
+
+@router.post("/webhook-events")
+async def process_webhook_event(
+    body: dict,
+    _key=Depends(require_scope(SCOPE_AGENT_WRITE)),
+) -> dict:
+    """Process one verified Quo webhook event, queued by `webhook.accept`.
+
+    The public route verified the signature and wrote the job; this is where the work
+    happens, off the request Quo is waiting on. It reuses the poll's own idempotent
+    functions (see webhook.py), so the same object arriving by webhook and by poll is
+    ONE CRM event. Retry contract as `/events`: 200 completes the job, 502 retries.
+    """
+    _require_enabled()
+    try:
+        return await op_webhook.process(body)
+    except Exception as exc:  # noqa: BLE001 - an OpenPhone read failed; retry later
+        logger.warning("openphone-mirror: webhook event %s could not be processed (%s)",
+                       (body or {}).get("event_id"), type(exc).__name__)
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY,
+                            "the webhook event could not be processed yet") from None
 
 
 @router.get("/recordings/{call_id}")

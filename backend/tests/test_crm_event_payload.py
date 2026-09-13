@@ -164,8 +164,13 @@ def test_a_resolved_contact_still_sends_exactly_what_it_did_before():
     known = to_crm_event(_facts(), contact_id=41)
     check("contact_id is still sent, and is still an int", known["contact_id"] == 41)
     check("from_number rides alongside it", known["from_number"] == "+15615559999")
+    # 2026-09-13: the line and system labels are the second additive pair, and they are
+    # pinned here rather than excluded, so any THIRD change still fails this check.
+    check("the BulkVS line and system ride along too",
+          known["source_system"] == "BulkVS" and known["source_number"] == _facts().dialed_number)
     check("and nothing else about the body moved",
-          {k: v for k, v in known.items() if k != "from_number"}
+          {k: v for k, v in known.items()
+           if k not in ("from_number", "source_system", "source_number")}
           == {"contact_id": 41, "body": known["body"],
               "provider_ref": OWEN_CALL_ID, "type": "CALL", "direction": "INBOUND",
               "call_status": "completed", "duration_seconds": 134,

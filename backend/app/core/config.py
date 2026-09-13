@@ -473,6 +473,19 @@ class Settings(BaseSettings):
     OPENPHONE_MIRROR_FETCH_TRANSCRIPTS: bool = True
     OPENPHONE_MIRROR_PAGE_LIMIT: int = 50
 
+    # --- Quo (OpenPhone) webhook receiver (integrations/openphone/webhook.py) -----------
+    # PUBLIC route POST /webhooks/openphone on api.${APP_DOMAIN}. OFF by default: with
+    # this false the route answers 404 before reading the body, verifying anything or
+    # touching the database. It also needs the mirror above switched on, because it
+    # reuses the mirror's own idempotent path and its delivery job.
+    OPENPHONE_WEBHOOK_ENABLED: bool = False
+    # The base64 "signing secret" Quo shows under Settings -> Webhooks -> (your webhook)
+    # -> ... -> Reveal signing secret. NEVER logged and never echoed in any response.
+    OPENPHONE_WEBHOOK_SECRET: str = ""
+    # Replay window. A signature whose timestamp is further than this from now, in
+    # either direction, is refused.
+    OPENPHONE_WEBHOOK_TOLERANCE_SECONDS: int = 300
+
     # --- Operator WebRTC softphone (Ticket 13, additive, gated on ASTERISK_ENABLED) -------
     # The operator answers platform calls in the browser via a per-operator chan_pjsip
     # WebRTC endpoint (SIP.js, wss + DTLS-SRTP). Signalling wss is fronted by Traefik; media
