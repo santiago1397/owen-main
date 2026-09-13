@@ -442,6 +442,50 @@ class Settings(BaseSettings):
     def openphone_enabled(self) -> bool:
         return bool(self.OPENPHONE_API_KEY)
 
+    # --- OpenPhone -> CRM mirror (app/integrations/openphone/, additive + opt-in) ---------
+    # Mirrors OpenPhone calls and texts onto the CRM's conversation threads so a customer
+    # has ONE timeline. STILL READ-ONLY: the mirror adds GET readers to openphone_client
+    # and no writer. It can never send a text, place a call or answer one.
+    #
+    # OFF by default. With this false nothing is scheduled, no request is made and every
+    # /api/openphone-mirror route answers 503.
+    OPENPHONE_MIRROR_ENABLED: bool = False
+    # Which OpenPhone lines to mirror, compared on the LAST TEN DIGITS.
+    # EMPTY = every line on the account (the owner states there is exactly one). That is
+    # deliberately the opposite default from CRM_LINK_ALLOWLIST, which allows nothing when
+    # empty -- see integrations/openphone/config.py for why the asymmetry is correct: that
+    # list governs where a CALL MAY BE PLACED, this one governs only what OWEN READS.
+    OPENPHONE_MIRROR_NUMBERS: str = ""
+    # Always excluded, and wins over the include list. This is the "exclude a line later
+    # without a code change" switch.
+    OPENPHONE_MIRROR_EXCLUDE_NUMBERS: str = ""
+    # How far back the ONE-TIME backfill reaches. Nothing is ever pruned afterwards --
+    # deleting customer correspondence on a timer is a separate decision nobody has made.
+    OPENPHONE_MIRROR_BACKFILL_DAYS: int = 30
+    # Poll cadence. OpenPhone has no time-based call sweep (spec D11a), so a tick costs
+    # roughly two requests per participant against a measured 10 req/s limit.
+    OPENPHONE_MIRROR_POLL_SECONDS: int = 300
+    # Hard ceiling on participants per tick, so a large address book cannot turn a poll
+    # into a rate-limit storm. Truncation is logged and reported, never silent.
+    OPENPHONE_MIRROR_MAX_PARTICIPANTS: int = 200
+    # Fetch the transcript + summary for each NEW call (never re-fetched). OpenPhone has
+    # already done the STT, so this costs two requests and no transcription spend.
+    OPENPHONE_MIRROR_FETCH_TRANSCRIPTS: bool = True
+    OPENPHONE_MIRROR_PAGE_LIMIT: int = 50
+
+    # --- Quo (OpenPhone) webhook receiver (integrations/openphone/webhook.py) -----------
+    # PUBLIC route POST /webhooks/openphone on api.${APP_DOMAIN}. OFF by default: with
+    # this false the route answers 404 before reading the body, verifying anything or
+    # touching the database. It also needs the mirror above switched on, because it
+    # reuses the mirror's own idempotent path and its delivery job.
+    OPENPHONE_WEBHOOK_ENABLED: bool = False
+    # The base64 "signing secret" Quo shows under Settings -> Webhooks -> (your webhook)
+    # -> ... -> Reveal signing secret. NEVER logged and never echoed in any response.
+    OPENPHONE_WEBHOOK_SECRET: str = ""
+    # Replay window. A signature whose timestamp is further than this from now, in
+    # either direction, is refused.
+    OPENPHONE_WEBHOOK_TOLERANCE_SECONDS: int = 300
+
     # --- Operator WebRTC softphone (Ticket 13, additive, gated on ASTERISK_ENABLED) -------
     # The operator answers platform calls in the browser via a per-operator chan_pjsip
     # WebRTC endpoint (SIP.js, wss + DTLS-SRTP). Signalling wss is fronted by Traefik; media

@@ -26,6 +26,8 @@ from app.workers.handlers import HANDLERS
 from app.workers.bulkvs_sync import enabled as bulkvs_sync_enabled
 from app.workers.bulkvs_sync import sync_numbers as bulkvs_sync_numbers
 from app.workers.mail_poller import enabled as mail_enabled
+from app.integrations.openphone.sync import enabled as openphone_mirror_enabled
+from app.integrations.openphone.sync import poll as openphone_mirror_poll
 from app.workers.mail_poller import poll_mailbox
 from app.workers.reconciler import reconcile_recent
 
@@ -163,6 +165,18 @@ def build_scheduler() -> AsyncIOScheduler:
             seconds=settings.BILLING_POLL_SECONDS, id="billing_charges",
         )
         logger.info("billing charge reconcile scheduled every %ss", settings.BILLING_POLL_SECONDS)
+    # OpenPhone -> CRM mirror (app/integrations/openphone/). Only when the kill switch is
+    # on -- otherwise the worker does not wake up for it at all, which is the difference
+    # between "the mirror declined" and "the mirror does not exist". OpenPhone has no
+    # time-based call sweep (spec D11a), so this poll IS the live path: see sync.py for
+    # why a webhook would require a POST against an API this platform may only GET.
+    if openphone_mirror_enabled():
+        sched.add_job(
+            openphone_mirror_poll, "interval",
+            seconds=settings.OPENPHONE_MIRROR_POLL_SECONDS, id="openphone_mirror",
+        )
+        logger.info("openphone mirror scheduled every %ss",
+                    settings.OPENPHONE_MIRROR_POLL_SECONDS)
     return sched
 
 

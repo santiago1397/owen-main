@@ -190,6 +190,32 @@ def require_scope(scope: str):
 
 
 # --- audit ---------------------------------------------------------------------------
+# Every API-KEY surface, and only those. A route outside this list is authenticated by
+# session and audited elsewhere, so making it pay for this middleware would be cost with no
+# trail to show for it.
+#
+#   /api/ai            the read surface the whole audit trail was built for
+#   /api/agent-runtime AI_AGENT_SPEC D13 — the one that can MUTATE platform data. Auditing
+#                      every read and none of the writes would be exactly backwards.
+#   /api/crm-link      it can place a telephone call and send a text from a real business
+#                      line. If anything belongs in an audit trail, that does.
+#   /api/openphone-mirror  it reads a live third-party phone account and streams customer
+#                      call recordings. Read-only, but reading a customer's recording is
+#                      exactly the sort of access somebody should be able to account for
+#                      afterwards.
+#
+# A TUPLE, named, rather than a literal inlined below: `tests/test_ai_api.py` used to assert
+# on the source text of that literal, which is the third bug `scripts/check.sh` was written
+# to catch ("a source literal that a later, correct change had moved on from"). It now
+# asserts on THIS VALUE, which cannot drift from what the middleware actually does.
+AUDITED_PREFIXES = (
+    "/api/ai",
+    "/api/agent-runtime",
+    "/api/crm-link",
+    "/api/openphone-mirror",
+)
+
+
 async def usage_middleware(request: Request, call_next):
     """Record every `/api/ai/*` request, not just the interesting ones.
 
@@ -201,13 +227,7 @@ async def usage_middleware(request: Request, call_next):
     `/query` still records itself (it alone knows the SQL and the row count) and flags the
     request so it is not counted twice.
     """
-    # Both API-key surfaces, not just /api/ai. `/api/agent-runtime/*` (AI_AGENT_SPEC D13) is
-    # the one that can MUTATE platform data, so leaving it out would mean the audit trail
-    # covered every read and none of the writes — exactly backwards.
-    # `/api/crm-link/*` is included for the same reason and then some: it can place a
-    # telephone call and send a text from a real business line, so every request against
-    # it belongs in the audit trail.
-    if not request.url.path.startswith(("/api/ai", "/api/agent-runtime", "/api/crm-link")):
+    if not request.url.path.startswith(AUDITED_PREFIXES):
         return await call_next(request)
     started = time.monotonic()
     response = await call_next(request)
