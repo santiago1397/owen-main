@@ -66,6 +66,39 @@ def match_key(value: str | None) -> str:
     return d[-10:] if len(d) >= 10 else d
 
 
+def to_e164(value: str | None) -> str:
+    """A participant as Quo requires it (`^\\+[1-9]\\d{1,14}$`), or "" if it cannot be one.
+
+    Quo's List calls / List messages reject anything else with a 400, and an address-book
+    entry is whatever a person typed ("(941) 555-0123"). NANP rules, matching
+    `crm.config.to_e164`: ten digits are +1; eleven starting with 1 get a +; a number that
+    already carried a + keeps its own country code. Anything shorter than ten digits (a
+    short code, an extension typo) is not a participant anybody can be asked about.
+    """
+    raw = str(value or "").strip()
+    d = digits(raw)
+    if len(d) == 10:
+        return "+1" + d
+    if len(d) == 11 and d.startswith("1"):
+        return "+" + d
+    if raw.startswith("+") and 10 <= len(d) <= 15 and not d.startswith("0"):
+        return "+" + d
+    return ""
+
+
+_LONG_NUMBER = re.compile(r"\+?\d[\d\s().-]{6,}\d")
+
+
+def redact(text: str | None, limit: int = 300) -> str:
+    """Text safe to print or log: every phone-number-shaped run replaced by <number>.
+
+    Used for the errors `preview` prints and the warnings the poll logs. Quo echoes the
+    request back in its errors (the 400 on production carried the customer's number in
+    the URL), so an error message is customer data until this has run over it.
+    """
+    return _LONG_NUMBER.sub("<number>", str(text or ""))[:limit]
+
+
 def parse_numbers(raw: str | None) -> frozenset[str]:
     """Comma / semicolon / newline-separated numbers -> a set of match keys.
 

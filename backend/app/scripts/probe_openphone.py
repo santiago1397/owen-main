@@ -20,6 +20,7 @@ Run (inside the app container on the server, where .env.prod is loaded):
 import asyncio
 
 from app.core.config import settings
+from app.integrations.openphone import config as op_config
 from app.providers import openphone_client as op
 
 
@@ -106,7 +107,8 @@ async def main() -> None:
                 own = "".join(ch for ch in str(numbers[0].get("number") or "")
                               if ch.isdigit())
                 if digits and digits[-10:] != own[-10:]:
-                    participant = str(entry)
+                    # Quo rejects a participant that is not E.164 (2026-09-14).
+                    participant = op_config.to_e164(entry) or str(entry)
                     break
 
     # A participant is REQUIRED by /calls and (we believe) by /messages. Fall back to the
@@ -120,7 +122,7 @@ async def main() -> None:
                 for item in fields.get("phoneNumbers") or []:
                     value = item.get("value") if isinstance(item, dict) else item
                     if value:
-                        participant = str(value)
+                        participant = op_config.to_e164(value) or str(value)
                         break
                 if participant:
                     break
@@ -135,7 +137,7 @@ async def main() -> None:
         print("=" * 72)
         return
 
-    print(f"\n[3] GET /calls  participants[]={_mask(participant)}")
+    print(f"\n[3] GET /calls  participants={_mask(participant)}")
     # NOTE: this used to call `op.list_calls(first_id, limit=5)`, which has not existed
     # since the client was reshaped around D11a's mandatory `participants` parameter — so
     # the probe raised AttributeError before reaching any of the interesting reads. Fixed
@@ -156,7 +158,7 @@ async def main() -> None:
     # 4. TEXTS — the reader added for the CRM mirror, and the one with no prior evidence.
     #    If this 400s the way a participant-less /calls does, the mirror's message half is
     #    wrong and sync.py needs a different enumeration. Find out here, not in production.
-    print(f"\n[4] GET /messages  participants[]={_mask(participant)}")
+    print(f"\n[4] GET /messages  participants={_mask(participant)}")
     try:
         page = await op.list_messages(first_id, participant, limit=5)
         items = page.get("data", []) if isinstance(page, dict) else []

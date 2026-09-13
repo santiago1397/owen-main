@@ -60,10 +60,27 @@ async def cmd_preview(_args) -> None:
     """Read OpenPhone and report what a backfill WOULD send. Writes nothing, anywhere."""
     result = await op_sync.run_once(dry_run=True, force_backfill=True)
     print(json.dumps(result, indent=2, default=str))
+    for src in result.get("participant_sources") or []:
+        print("\nparticipants: /conversations %s; %s found (%s from /conversations%s), "
+              "%s not E.164 and skipped; ceiling %s"
+              % (src.get("conversations"), src.get("participants_found"),
+                 src.get("from_conversations"),
+                 "" if src.get("conversations") == "ok" else
+                 ", %s from the address book, %s from OWEN callers"
+                 % (src.get("from_address_book"), src.get("from_owen_callers")),
+                 src.get("skipped_not_e164"),
+                 "TRUNCATED the set" if src.get("truncated_by_ceiling") else "not reached"))
+    # Every error, redacted: no phone number and no query value is ever in these lines.
+    for err in result.get("errors") or []:
+        if isinstance(err, dict):
+            print("ERROR %s: %s participant(s) — %s" % (
+                err.get("resource"), err.get("participants"), err.get("error")))
+        else:
+            print("ERROR:", err)
     if not result.get("complete", True):
         print("\nNOTE: the participant set was INCOMPLETE — /conversations could not be "
-              "read, or the max-participants ceiling truncated it. The real backfill is "
-              "larger than these counts.")
+              "read, or the max-participants ceiling truncated it (see the line above). "
+              "The real backfill is larger than these counts.")
 
 
 async def cmd_run(_args) -> None:

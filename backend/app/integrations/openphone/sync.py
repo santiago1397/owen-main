@@ -202,11 +202,13 @@ async def _from_conversations(number_id: str, line_key: str, since: datetime,
             if exhausted or not token:
                 break
         return found, True
-    except Exception:  # noqa: BLE001 - degrade to the verified sources
+    except Exception as exc:  # noqa: BLE001 - degrade to the verified sources
         logger.warning(
-            "openphone-mirror: /conversations unavailable — falling back to the address "
-            "book and OWEN's own callers. The mirror will be NARROWER than the account "
-            "(a stranger with no contact record will be missed).", exc_info=True)
+            "openphone-mirror: /conversations unavailable (%s) — falling back to the "
+            "address book and OWEN's own callers. The mirror will be NARROWER than the "
+            "account (a stranger with no contact record will be missed).",
+            describe_error(exc))
+        _LAST_CONVERSATIONS_ERROR[number_id] = describe_error(exc)
         return found, False
 
 
@@ -257,32 +259,63 @@ async def _from_owen_callers(db, since: datetime, line_key: str) -> set[str]:
     return found
 
 
-async def participants_in_window(db, number_id: str, line_number: str, since: datetime,
-                                 cfg: op_config.MirrorSettings) -> tuple[list[str], bool]:
-    """Who to ask OpenPhone about. `(participants, complete)`.
+# Why /conversations last failed, per line, so `run_once` can report it. Redacted.
+_LAST_CONVERSATIONS_ERROR: dict[str, str] = {}
 
-    `complete` is False when `/conversations` could not be read, meaning the set is the
-    people we already knew about rather than everyone who touched the line. `run_once`
-    surfaces that; it is the difference between "mirrored everything" and "mirrored what it
-    could see", and reporting the second as the first is the failure this flag exists for.
+
+async def participants_in_window(db, number_id: str, line_number: str, since: datetime,
+                                 cfg: op_config.MirrorSettings,
+                                 stats: Optional[dict] = None) -> tuple[list[str], bool]:
+    """Who to ask OpenPhone about. `(participants, complete)`, every one in E.164.
+
+    AMENDED 2026-09-14 after the first live preview. When `/conversations` WORKS it is the
+    whole answer: it lists every thread on the line with activity in the window, strangers
+    included, so the address book and OWEN's callers add only people with NO activity on
+    this line — two wasted requests each, and on production enough of them to hit the
+    200-participant ceiling (participants 200, complete false). Those two sources are now
+    used only as the FALLBACK when `/conversations` cannot be read.
+
+    `complete` is False when `/conversations` could not be read or the ceiling truncated
+    the set. `stats` (optional) receives the per-source counts and the number found BEFORE
+    the ceiling, so `preview` can say which of the two it was and how big the set really is.
     """
+    stats = stats if stats is not None else {}
     line_key = op_config.match_key(line_number)
+    _LAST_CONVERSATIONS_ERROR.pop(number_id, None)
     from_convos, complete = await _from_conversations(number_id, line_key, since, cfg)
+    stats["conversations"] = ("ok" if complete else
+                              "failed: " + _LAST_CONVERSATIONS_ERROR.get(number_id, "unknown"))
+    stats["from_conversations"] = len(from_convos)
     merged: dict[str, str] = {}
+    skipped = 0
 
     def add(numbers: Iterable[str]) -> None:
+        nonlocal skipped
         for number in numbers:
-            key = op_config.match_key(number)
+            e164 = op_config.to_e164(number)
+            key = op_config.match_key(e164)
+            # Quo's list endpoints reject a participant that is not E.164 with a 400, so a
+            # number that cannot be normalised is skipped (and counted), never sent.
+            if not e164:
+                skipped += 1
+                continue
             # Keyed by match key so "+19415550123" and "(941) 555-0123" cost ONE request,
             # not two — the same identity rule the CRM files the result under.
-            if key and key not in merged:
-                merged[key] = number
+            if key != line_key and key not in merged:
+                merged[key] = e164
 
     add(sorted(from_convos))
-    add(sorted(await _from_address_book(line_key, cfg)))
-    add(sorted(await _from_owen_callers(db, since, line_key)))
+    if not complete:
+        book = await _from_address_book(line_key, cfg)
+        callers = await _from_owen_callers(db, since, line_key)
+        stats["from_address_book"] = len(book)
+        stats["from_owen_callers"] = len(callers)
+        add(sorted(book))
+        add(sorted(callers))
+    stats["skipped_not_e164"] = skipped
 
     participants = list(merged.values())
+    stats["participants_found"] = len(participants)
     if len(participants) > cfg.max_participants:
         # Truncation is logged loudly and reported, never silent. The order above is
         # deliberate: conversation participants come first, so what gets dropped is the
@@ -292,8 +325,52 @@ async def participants_in_window(db, number_id: str, line_number: str, since: da
             "%d — mirroring the %d most recently active. Raise the limit or narrow the "
             "window.", len(participants), cfg.max_participants, cfg.max_participants)
         participants = participants[:cfg.max_participants]
+        stats["truncated_by_ceiling"] = True
         complete = False
+    else:
+        stats["truncated_by_ceiling"] = False
     return participants, complete
+
+
+# --- errors, redacted -----------------------------------------------------------------
+
+# After this many CLIENT errors (4xx other than 429) in a row for one resource, with no
+# success in between, the tick stops asking about that resource. A 400 that every
+# participant gets is a malformed request, not 200 separate problems, and asking 200 times
+# is 400 wasted requests against a 10 req/s limit. A 429 or a network error does not count:
+# those are transient and each participant still gets its turn.
+MAX_CONSECUTIVE_CLIENT_ERRORS = 5
+
+
+def _status_of(exc: Exception) -> Optional[int]:
+    response = getattr(exc, "response", None)
+    code = getattr(response, "status_code", None)
+    return int(code) if isinstance(code, int) else None
+
+
+def describe_error(exc: Exception) -> str:
+    """One line about a failed OpenPhone read, with no phone number and no query values:
+    exception type, HTTP status, the request PATH and parameter NAMES, and Quo's own
+    message (redacted)."""
+    bits = [type(exc).__name__]
+    status = _status_of(exc)
+    if status is not None:
+        bits.append(str(status))
+    request = getattr(exc, "request", None)
+    url = getattr(request, "url", None)
+    if url is not None:
+        try:
+            names = sorted({k for k, _ in url.params.multi_items()})
+            bits.append("GET %s?%s" % (url.path, "&".join("%s=…" % n for n in names)))
+        except Exception:  # noqa: BLE001
+            pass
+    response = getattr(exc, "response", None)
+    if response is not None:
+        try:
+            bits.append("quo said: " + op_config.redact(response.text, 200))
+        except Exception:  # noqa: BLE001
+            pass
+    return op_config.redact(" | ".join(bits), 400)
 
 
 # --- mirroring one object -------------------------------------------------------------
@@ -566,10 +643,17 @@ async def run_once(*, dry_run: bool = False, force_backfill: bool = False) -> di
             line_key = op_config.match_key(line_number)
             result["numbers"].append(line_number)
 
+            sources: dict = {}
             participants, complete = await participants_in_window(
-                db, number_id, line_number, since, cfg)
+                db, number_id, line_number, since, cfg, stats=sources)
             result["participants"] += len(participants)
             result["complete"] = result["complete"] and complete
+            result.setdefault("participant_sources", []).append(sources)
+
+            # Per resource: consecutive client errors, and whether it has been given up on.
+            streak = {"call": 0, "message": 0}
+            gave_up: set[str] = set()
+            errors: dict[tuple, dict] = {}
 
             for participant in participants:
                 for kind, fetch in (
@@ -578,6 +662,9 @@ async def run_once(*, dry_run: bool = False, force_backfill: bool = False) -> di
                     ("message", lambda t, lim, p=participant: op.list_messages(
                         number_id, p, page_token=t, limit=lim)),
                 ):
+                    if kind in gave_up:
+                        errors[(kind, "skipped")]["participants"] += 1
+                        continue
                     try:
                         async for entry in _walk(fetch, page_limit=cfg.page_limit):
                             if kind == "call":
@@ -597,15 +684,38 @@ async def run_once(*, dry_run: bool = False, force_backfill: bool = False) -> di
                                 result["refused"] += 1
                             else:
                                 result["calls" if kind == "call" else "messages"] += 1
+                        streak[kind] = 0
                     except Exception as exc:  # noqa: BLE001 - one participant, not the tick
                         # Deliberately per-participant-per-resource: a single malformed
-                        # object or a transient 429 must not cost the other 199 customers
-                        # their mirror for this tick.
-                        note = f"{kind}s for one participant: {type(exc).__name__}"
-                        if note not in result["errors"]:
-                            result["errors"].append(note)
-                        logger.warning("openphone-mirror: %s listing failed for one "
-                                       "participant", kind, exc_info=True)
+                        # object or a transient 429 must not cost the other customers their
+                        # mirror for this tick. Every failure is COUNTED under one redacted
+                        # description, so `preview` says how many participants each error
+                        # hit — no phone number, no query value, no message body.
+                        status = _status_of(exc)
+                        detail = describe_error(exc)
+                        key = (kind, detail)
+                        if key not in errors:
+                            errors[key] = {"resource": kind + "s", "status": status,
+                                           "error": detail, "participants": 0}
+                            logger.warning("openphone-mirror: %s listing failed: %s",
+                                           kind, detail)
+                        errors[key]["participants"] += 1
+                        client_error = status is not None and 400 <= status < 500 \
+                            and status != 429
+                        streak[kind] = streak[kind] + 1 if client_error else 0
+                        if streak[kind] >= MAX_CONSECUTIVE_CLIENT_ERRORS:
+                            gave_up.add(kind)
+                            errors[(kind, "skipped")] = {
+                                "resource": kind + "s", "status": None,
+                                "error": "not asked for the remaining participants this tick "
+                                         "after %d client errors in a row"
+                                         % MAX_CONSECUTIVE_CLIENT_ERRORS,
+                                "participants": 0}
+                            logger.warning("openphone-mirror: giving up on %s listings this "
+                                           "tick after %d client errors in a row", kind,
+                                           MAX_CONSECUTIVE_CLIENT_ERRORS)
+
+            result["errors"].extend(errors.values())
 
         if backfilling and not dry_run and not result["errors"] and result["complete"]:
             # Only close the backfill on a CLEAN, COMPLETE pass. A partial one stays in

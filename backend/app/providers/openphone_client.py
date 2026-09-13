@@ -19,6 +19,15 @@ touches-before-close, leads never called back) — they are NEVER counted as lea
   genuinely needed, it belongs in a separate, separately-reviewed module.
 ════════════════════════════════════════════════════════════════════════════════════════
 
+QUERY STRINGS — VERIFIED AGAINST QUO'S API REFERENCE (2026-09-14, after a live 400):
+array parameters are sent as a REPEATED KEY WITHOUT BRACKETS. Quo's reference says so
+verbatim for both list endpoints: "Repeat the 'participants' key for each phone number
+without brackets, e.g. 'participants=%2B15555555555&participants=%2B15555555556'"
+(List messages) and "Pass the 'participants' key without brackets" (List calls). This client
+used to send `participants[]`, and `GET /messages` answered 400 on production for every
+participant. httpx renders a str or a list value under a plain key as exactly that form; the
+exact bytes are pinned by `tests/test_openphone_query.py`. Participants must be E.164.
+
 UNVERIFIED: the endpoint paths, auth header form and response shapes below are from
 documented behaviour, NOT yet confirmed against the live account. `app.scripts.probe_openphone`
 exists to confirm them safely (it only calls the functions here). Treat every shape as a
@@ -95,7 +104,8 @@ async def list_calls_with(
     Returns the raw page: `{"data": [...], "totalItems": n, "nextPageToken": ...}`."""
     params: dict = {
         "phoneNumberId": phone_number_id,
-        "participants[]": participant,
+        # No brackets (see the module header). List calls: required, max ONE item, E.164.
+        "participants": participant,
         "maxResults": limit,
     }
     if page_token:
@@ -183,7 +193,10 @@ async def list_messages(
     """
     params: dict = {
         "phoneNumberId": phone_number_id,
-        "participants[]": participant,
+        # No brackets (see the module header) — `participants[]` is what 400'd on
+        # production. List messages: required, up to 10 items, E.164; one here, because
+        # several participants means a GROUP conversation, not this customer's thread.
+        "participants": participant,
         "maxResults": limit,
     }
     if page_token:
@@ -212,7 +225,10 @@ async def list_conversations(
     CRM's own contacts), so an account where this endpoint does not exist mirrors a narrower
     set rather than mirroring nothing.
     """
-    params: dict = {"phoneNumberId": phone_number_id, "maxResults": limit}
+    # Quo's reference names the filter `phoneNumbers` (array, E.164 or a `PN` id, 1-100
+    # items). There is NO `phoneNumberId` parameter on this endpoint; this client used to
+    # send one. Encoded like the other arrays: a plain repeated key, no brackets.
+    params: dict = {"phoneNumbers": phone_number_id, "maxResults": limit}
     if page_token:
         params["pageToken"] = page_token
     return await _get("/conversations", params)
