@@ -659,7 +659,10 @@ def test_the_router_is_exactly_these_routes_and_the_crm_link_is_untouched():
 
     crm = sorted({r.path for r in main_mod.app.routes
                   if getattr(r, "path", "").startswith("/api/crm-link")})
-    check(f"the CRM link still has its seven routes, unwidened ({len(crm)})", len(crm) == 7)
+    # Eight since 2026-09-14: /email-jobs (the AHS email hop) was added to the CRM link on
+    # purpose, by feature/ahs-email-to-crm. The mirror still adds none.
+    check(f"the CRM link still has its eight routes, unwidened by the mirror ({len(crm)})",
+          len(crm) == 8 and "/api/crm-link/email-jobs" in crm)
     check("scopes exist and are the two reused ones",
           bool(SCOPE_AGENT_WRITE) and bool(SCOPE_CRM_LINK))
 

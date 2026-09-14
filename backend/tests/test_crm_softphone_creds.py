@@ -375,7 +375,10 @@ def test_the_crm_link_router_gained_exactly_one_route():
 
     Widened when feature/crm-link-relay merged: that branch added /message-events and
     /delivery-receipts, so the fence now names all seven. It CAUGHT the merge, which is
-    exactly its job -- widen it deliberately, never delete it."""
+    exactly its job -- widen it deliberately, never delete it.
+
+    Widened again 2026-09-14 (feature/ahs-email-to-crm): /email-jobs, the worker's hop for an
+    AHS work-order email, scope agent_write like /events. Eight."""
     print("the crm-link router is exactly the routes we expect:")
     from app.integrations.crm import api as crm_api
 
@@ -388,8 +391,9 @@ def test_the_crm_link_router_gained_exactly_one_route():
         ("/api/crm-link/messages", ("POST",)),
         ("/api/crm-link/health", ("GET",)),
         ("/api/crm-link/softphone/credentials", ("POST",)),
+        ("/api/crm-link/email-jobs", ("POST",)),
     ])
-    check("the route table is exactly the seven we expect, no more and no fewer",
+    check("the route table is exactly the eight we expect, no more and no fewer",
           paths == expected)
 
 
