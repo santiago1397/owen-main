@@ -279,7 +279,7 @@ def test_a_calls_later_parts_each_go_once_under_the_calls_own_key():
     # At call.completed time Quo has not produced these yet.
     routes[r"/call-transcripts/"] = {"dialogue": []}
     routes[r"/call-summaries/"] = {"summary": ""}
-    routes[r"/call-recordings/"] = {}
+    routes[r"/call-recordings/"] = {"data": []}      # Quo's real "no audio yet" shape
     with configured():
         _, jobs = process(queued_body("call.completed", CALL), routes, session, calls)
         all_jobs += jobs

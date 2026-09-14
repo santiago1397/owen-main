@@ -58,22 +58,30 @@ def refusal() -> str | None:
     return None
 
 
-async def enqueue_mirrored(db, payload: dict) -> bool:
+async def enqueue_mirrored(db, payload: dict, *, delay_seconds: int = 0) -> bool:
     """Queue one mirrored call or text for delivery. True iff a job was written.
 
     Takes the session rather than opening its own: `sync.py` writes the
     `openphone_mirror_rows` row and enqueues the job in ONE transaction, so a crash between
     the two cannot leave a row claiming something was sent that never was. Getting that
     backwards is how a mirror silently drops a customer's text forever.
+
+    `delay_seconds` staggers a batch (the `recordings` repair): every delivery goes through
+    OWEN's own adapter on the agent key, which is rate-limited per minute, so hundreds of
+    jobs due at once would 429 and pile into retries. The poll and the webhook pass 0.
     """
     stop = refusal()
     if stop:
         logger.info("openphone-mirror: not reporting %s %s — %s",
                     payload.get("kind"), payload.get("external_id"), stop)
         return False
-    await queue.enqueue(db, JOB_TYPE, {
+    job = {
         "url": delivery_url(),
         "headers": {"X-OWEN-Key": settings.AGENT_RUNTIME_KEY},
         "body": dict(payload or {}),
-    })
+    }
+    if delay_seconds > 0:
+        await queue.enqueue(db, JOB_TYPE, job, delay_seconds=int(delay_seconds))
+    else:
+        await queue.enqueue(db, JOB_TYPE, job)
     return True

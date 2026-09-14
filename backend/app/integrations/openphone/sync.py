@@ -389,7 +389,7 @@ async def _already_mirrored(db, kind: str, external_id: str) -> bool:
 
 async def _record_and_enqueue(db, *, kind: str, external_id: str, customer_number: str,
                               line_number: str, occurred_at: Optional[datetime],
-                              payload: dict) -> str:
+                              payload: dict, delay_seconds: int = 0) -> str:
     """Write the state row and queue the delivery IN ONE TRANSACTION.
 
     The order matters and it is the opposite of the obvious one. Enqueue-then-record would
@@ -412,7 +412,7 @@ async def _record_and_enqueue(db, *, kind: str, external_id: str, customer_numbe
         occurred_at=occurred_at,
     ))
     try:
-        queued = await push.enqueue_mirrored(db, payload)
+        queued = await push.enqueue_mirrored(db, payload, delay_seconds=delay_seconds)
     except IntegrityError:
         # The other tick won. Its job is already queued, so this is success, not an error.
         await db.rollback()
@@ -501,8 +501,9 @@ async def _mirror_call(db, entry: dict, *, line_number: str, line_key: str,
         # The list shape does not reliably carry it, so ask — but only for a call we are
         # about to mirror, and only once in its life. A missing recording is not an error.
         try:
+            # A dict with a url, or {} — never Quo's raw list (see `pick_recording`).
             rec = await op.get_call_recording(call_id)
-            has_recording = bool((rec or {}).get("url"))
+            has_recording = bool(rec.get("url"))
         except Exception:  # noqa: BLE001 - no recording, or none exposed. Mirror anyway.
             has_recording = False
 

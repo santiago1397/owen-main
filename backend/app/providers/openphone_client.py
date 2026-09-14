@@ -130,11 +130,50 @@ async def get_call_transcript(call_id: str) -> dict:
     return body.get("data", body)
 
 
+def pick_recording(body: Any) -> dict:
+    """The ONE recording in a `/call-recordings/{id}` response, or `{}` when there is none.
+
+    MEASURED ON PRODUCTION 2026-09-14: `data` is a LIST, one entry per recording —
+
+        with audio:    {"data": [{"duration", "id", "startTime", "status", "type", "url"}]}
+        without audio: {"data": []}
+
+    This function used to return that list as though it were one dict, and both callers
+    did `.get("url")` on it: the poll swallowed the AttributeError and marked every call
+    as having no recording, and the stream endpoint would have answered 500. A bare dict
+    (the shape the old docstring assumed) is still accepted, defensively.
+
+    Several recordings: a `completed` one with a url wins, then the longest with a url.
+    Anything that is not a dict with a non-empty `url` is not a recording.
+    """
+    data = body.get("data", body) if isinstance(body, dict) else body
+    if isinstance(data, dict):
+        data = [data]
+    if not isinstance(data, list):
+        return {}
+    playable = [r for r in data
+                if isinstance(r, dict) and isinstance(r.get("url"), str) and r["url"].strip()]
+    if not playable:
+        return {}
+
+    def rank(rec: dict) -> tuple[int, int]:
+        try:
+            duration = int(rec.get("duration") or 0)
+        except (TypeError, ValueError):
+            duration = 0
+        return (1 if str(rec.get("status") or "").lower() == "completed" else 0, duration)
+
+    return max(playable, key=rank)
+
+
 async def get_call_recording(call_id: str) -> dict:
-    """GET /call-recordings/{id} — `{url, type: audio/mpeg, duration, status}`. The URL is
-    hosted on share.quo.com."""
-    body = await _get(f"/call-recordings/{call_id}")
-    return body.get("data", body)
+    """GET /call-recordings/{id} — the call's recording as ONE dict
+    `{url, type, duration, status, ...}`, or `{}` when the call has no audio.
+
+    Always a dict, never the raw list Quo sends: see `pick_recording`. The URL is hosted on
+    share.quo.com. Raises (like every read here) when the request itself fails, so a caller
+    can tell "no recording" (`{}`) from "could not ask" (an exception)."""
+    return pick_recording(await _get(f"/call-recordings/{call_id}"))
 
 
 async def get_call_summary(call_id: str) -> dict:

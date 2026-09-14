@@ -7,6 +7,8 @@ Examples (inside the app container, exactly like `app.scripts.manage`):
     python -m app.integrations.openphone.manage run         # one tick, for real
     python -m app.integrations.openphone.manage backfill    # force the 30-day pass again
     python -m app.integrations.openphone.manage rows --limit 20
+    python -m app.integrations.openphone.manage recordings            # DRY RUN: counts only
+    python -m app.integrations.openphone.manage recordings --commit   # ...and repair
 
 `preview` is the one to run first on the production box. It reads OpenPhone and reports
 exactly what a backfill WOULD send — no state row, no queued job, nothing to the CRM — which
@@ -108,6 +110,28 @@ async def cmd_rows(args) -> None:
               f"...{key[-4:]:4}  occurred={r.occurred_at}")
 
 
+async def cmd_recordings(args) -> None:
+    """Give already-mirrored calls the recording they were sent without (2026-09-14).
+
+    DRY RUN unless `--commit`. Reads Quo (GET only), prints counts and nothing that names a
+    customer. See `recordings.py` for the pacing and why a second run changes nothing."""
+    from app.integrations.openphone import recordings
+
+    result = await recordings.repair(commit=args.commit, spacing_seconds=args.spacing)
+    print(json.dumps(result, indent=2))
+    if not result.get("ran"):
+        print("NOT RUN: %s" % result.get("reason"))
+        return
+    print("%s: checked %d, with audio %d, without %d, already sent %d, errors %d, "
+          "enqueued %d" % ("COMMIT" if args.commit else "DRY RUN (nothing enqueued)",
+                           result["checked"], result["with_audio"], result["without_audio"],
+                           result["already_sent"], result["errors"], result["enqueued"]))
+    if result["enqueued"]:
+        print("The last job is due in about %d s (jobs are spaced %d s apart for the "
+              "agent key's per-minute limit)." % ((result["enqueued"] - 1) * args.spacing,
+                                                 args.spacing))
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(prog="python -m app.integrations.openphone.manage")
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -124,6 +148,14 @@ def main() -> None:
     p = sub.add_parser("rows", help="recently mirrored objects")
     p.add_argument("--limit", type=int, default=20)
     p.set_defaults(func=cmd_rows)
+
+    p = sub.add_parser("recordings", help="repair mirrored calls sent without their "
+                                          "recording — DRY RUN unless --commit")
+    p.add_argument("--commit", action="store_true",
+                   help="enqueue the CRM enrichments (default: count only, write nothing)")
+    p.add_argument("--spacing", type=int, default=3,
+                   help="seconds between queued deliveries (default 3, i.e. 20/min)")
+    p.set_defaults(func=cmd_recordings)
 
     args = parser.parse_args()
     asyncio.run(args.func(args))

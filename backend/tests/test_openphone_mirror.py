@@ -194,8 +194,11 @@ def account(calls=None, messages=None, conversations=None, contacts=None):
         r"/call-transcripts/": {"dialogue": [
             {"identifier": CUSTOMER, "content": "The skylight is leaking."}]},
         r"/call-summaries/": {"summary": "Customer reports a leaking skylight."},
-        r"/call-recordings/": {"url": "https://share.quo.com/rec/abc.mp3",
-                               "type": "audio/mpeg"},
+        # The shape MEASURED on production 2026-09-14: `data` is a LIST of recordings.
+        r"/call-recordings/": {"data": [{"duration": 184, "id": "REC1",
+                                         "startTime": "2026-09-11T10:00:05Z",
+                                         "status": "completed", "type": "audio/mpeg",
+                                         "url": "https://share.quo.com/rec/abc.mp3"}]},
     }
 
 

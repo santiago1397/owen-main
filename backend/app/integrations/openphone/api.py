@@ -211,7 +211,9 @@ async def stream_recording(
         raise HTTPException(status.HTTP_502_BAD_GATEWAY,
                             "OpenPhone could not be reached for that recording") from None
 
-    url = str((meta or {}).get("url") or "").strip()
+    # `get_call_recording` always hands back a dict (see `pick_recording`), but this route
+    # answers a browser through two hops, so a shape surprise is a sentence, never a 500.
+    url = str(meta.get("url") or "").strip() if isinstance(meta, dict) else ""
     if not url:
         raise HTTPException(status.HTTP_404_NOT_FOUND,
                             "OpenPhone has no recording for that call")
