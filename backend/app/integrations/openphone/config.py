@@ -171,6 +171,27 @@ class MirrorSettings:
         return None
 
 
+def tick_record(result: dict | None, at_iso: str) -> dict:
+    """The heartbeat row for one poll tick, from `sync.run_once`'s result.
+
+    Deliberately lossy. The result carries the mirrored line's number and per-error detail;
+    this keeps only what "is the sync alive?" needs — when, whether it ran, which mode, and
+    how many errors — so the row can be handed to the CRM without naming anybody. The
+    reason is redacted anyway: some refusals quote Quo's own error text.
+    """
+    result = result if isinstance(result, dict) else {}
+    reason = result.get("reason")
+    errors = result.get("errors")
+    return {
+        "at": str(at_iso),
+        "ran": bool(result.get("ran")),
+        "mode": str(result.get("mode") or "") or None,
+        "complete": bool(result.get("complete")) if "complete" in result else None,
+        "errors": len(errors) if isinstance(errors, list) else 0,
+        "reason": redact(reason, 200) if reason else None,
+    }
+
+
 def settings_view(settings) -> MirrorSettings:
     """Build the view from anything with the right attribute names — the real pydantic
     settings object in production, a plain namespace in a test."""

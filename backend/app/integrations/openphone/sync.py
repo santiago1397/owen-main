@@ -84,7 +84,8 @@ from app.db import SessionLocal
 from app.integrations.openphone import config as op_config
 from app.integrations.openphone import contact_book, push
 from app.integrations.openphone.events import MirroredCall, MirroredMessage
-from app.integrations.openphone.models import (BACKFILL_SETTING_KEY, OpenPhoneMirrorRow)
+from app.integrations.openphone.models import (BACKFILL_SETTING_KEY, LAST_TICK_SETTING_KEY,
+                                               OpenPhoneMirrorRow)
 from app.models import AppSetting
 from app.providers import openphone_client as op
 
@@ -739,6 +740,34 @@ async def poll() -> None:
     if not enabled():
         return
     try:
-        await run_once()
+        result = await run_once()
     except Exception:  # noqa: BLE001 - the mirror must never disturb the worker
         logger.exception("openphone-mirror: poll failed")
+        result = {"ran": False, "reason": "the poll raised (see the worker log)"}
+    await _record_tick(result)
+
+
+async def _record_tick(result: dict, *, session_factory=None) -> None:
+    """Overwrite the heartbeat row with what this tick did (2026-09-14).
+
+    Without it nothing records that a tick HAPPENED: a quiet line mirrors nothing, so the
+    newest `openphone_mirror_rows` row cannot tell "idle" from "the scheduler died". The CRM's
+    status dot reads this through `GET /api/link-status`.
+
+    Only the scheduled poll writes it — never `preview` (a dry run) — and it carries no
+    phone number: `config.tick_record` keeps counts and a redacted reason. A failure to write
+    it is logged and swallowed; the heartbeat must never be what disturbs the worker.
+    """
+    factory = session_factory or SessionLocal
+    try:
+        value = op_config.tick_record(result, _now().isoformat())
+        async with factory() as db:
+            row = await db.get(AppSetting, LAST_TICK_SETTING_KEY)
+            if row is None:
+                db.add(AppSetting(key=LAST_TICK_SETTING_KEY, value=value))
+            else:
+                row.value = value
+            await db.commit()
+    except Exception as exc:  # noqa: BLE001 - see the docstring
+        logger.warning("openphone-mirror: could not record the tick heartbeat (%s)",
+                       type(exc).__name__)
