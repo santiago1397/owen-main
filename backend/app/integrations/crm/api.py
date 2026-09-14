@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import logging
 import uuid
+from datetime import datetime, timezone
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -54,13 +55,14 @@ from app.core.config import settings
 from app.db import get_db
 from app.integrations.crm import binding as crm_binding
 from app.integrations.crm import config as crm_config
+from app.integrations.crm import email_jobs as crm_email_jobs
 from app.integrations.crm import softphone as crm_softphone
 from app.integrations.crm.client import CrmClient
 from app.integrations.crm.events import (CallEventFacts, DeliveryReceiptFacts,
                                          MessageEventFacts, to_crm_delivery_receipt,
                                          to_crm_event, to_crm_message_event,
                                          validate_crm_delivery_receipt, validate_crm_event)
-from app.models import Number
+from app.models import InboundEmail, Number
 from app.services import queue, sms
 from app.telephony import outbound as outbound_rules
 from app.telephony.credentials import build_webrtc_credentials
@@ -364,6 +366,78 @@ async def deliver_receipt(
         )
     return {"ok": False, "reason": f"CRM {result.status}: {result.reason}",
             "message_id": facts.owen_message_id}
+
+
+class EmailJobDeliveryIn(BaseModel):
+    """The `email_relay_crm` job body. Only the id: the row is re-read here, so the job
+    table never holds a customer's name, phone or address."""
+
+    model_config = {"extra": "allow"}
+
+    email_id: str = ""
+
+
+@router.post("/email-jobs")
+async def deliver_email_job(
+    body: EmailJobDeliveryIn,
+    db: AsyncSession = Depends(get_db),
+    _key=Depends(require_scope(SCOPE_AGENT_WRITE)),
+) -> dict:
+    """Deliver one AHS work order or cancellation to the CRM, and record what happened on
+    the email (2026-09-14). Called by `handle_email_relay_crm`. Independent of the GHL
+    relay: this reads and writes `crm_*` columns only. See `email_jobs.py`.
+
+    Same retry contract as every route on this router: 200 completes the job (delivered,
+    or refused by the CRM with a 4xx that no retry will fix — recorded 'refused'), 502 for
+    a CRM that is down or answered 5xx (recorded 'failed', and the queue retries).
+    """
+    cfg = _require_enabled()
+    reason = crm_email_jobs.refusal(settings)
+    if reason:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, reason)
+    try:
+        email_id = uuid.UUID(str(body.email_id))
+    except ValueError:
+        return {"ok": False, "reason": "email_id is not a uuid"}
+    em = await db.get(InboundEmail, email_id)
+    if em is None:
+        return {"ok": False, "reason": "email not found", "email_id": body.email_id}
+    # THE NO-BACKFILL GUARD. Only a row the poller stamped when it inserted it.
+    if em.crm_status not in crm_email_jobs.ACTIONABLE:
+        return {"ok": True, "skipped": True, "crm_status": em.crm_status,
+                "email_id": body.email_id}
+    if not crm_email_jobs.should_deliver(em.parse_status):
+        em.crm_status = "refused"
+        em.crm_error = f"parse_status {em.parse_status!r} is not delivered to the CRM"
+        em.crm_attempted_at = datetime.now(timezone.utc)
+        await db.commit()
+        return {"ok": False, "reason": em.crm_error, "email_id": body.email_id}
+
+    kind = em.parse_status
+    client = CrmClient(cfg.base_url, cfg.token, timeout_s=cfg.http_timeout_seconds,
+                       budget_s=cfg.http_budget_seconds)
+    if kind == crm_email_jobs.CANCELLATION:
+        result = await client.post_ahs_cancellation(crm_email_jobs.cancellation_body(em))
+    else:
+        result = await client.post_ahs_job(crm_email_jobs.job_body(em))
+
+    em.crm_attempted_at = datetime.now(timezone.utc)
+    if result.ok:
+        em.crm_result = crm_email_jobs.result_summary(result.data)
+        em.crm_status = crm_email_jobs.status_for(kind, em.crm_result.get("outcome"))
+        em.crm_error = None
+        await db.commit()
+        return {"ok": True, "email_id": body.email_id, "crm_status": em.crm_status,
+                "crm_result": em.crm_result}
+    em.crm_error = f"CRM {result.status}: {result.reason}"[:2000]
+    if result.retryable:
+        em.crm_status = crm_email_jobs.FAILED
+        await db.commit()
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY,
+                            f"CRM did not accept the AHS email ({result.status}): {result.reason}")
+    em.crm_status = "refused"
+    await db.commit()
+    return {"ok": False, "reason": em.crm_error, "email_id": body.email_id}
 
 
 # --- direction 2: the CRM -> OWEN ---------------------------------------------------------

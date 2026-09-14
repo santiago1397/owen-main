@@ -416,6 +416,20 @@ class InboundEmail(Base):
     # What the relay created in GHL (for the log UI): {mode, contact_id, opportunity_id, ...}.
     relay_result: Mapped[dict | None] = mapped_column(JSONB)
 
+    # --- delivery to the CRM (ghl-clone), INDEPENDENT of the GHL relay above (2026-09-14) ---
+    # NULL = never queued for the CRM, which is every email stored before
+    # CRM_LINK_EMAIL_JOBS_ENABLED was switched on. That NULL is the no-backfill guard: the
+    # `email_relay_crm` job only acts on a row the poller stamped 'queued' when it inserted
+    # it. Lifecycle: 'queued' -> 'sent' | 'existing' | 'cancellation_noted' |
+    # 'cancellation_already_noted' | 'skipped_no_card' | 'refused' (the CRM said no, a retry
+    # will not help) | 'failed' (retried with backoff) | 'skipped_disabled'.
+    # See integrations/crm/email_jobs.py.
+    crm_status: Mapped[str | None] = mapped_column(String)
+    crm_error: Mapped[str | None] = mapped_column(Text)
+    # What the CRM answered: {outcome, opportunity_id, contact_id, matched_by, note_id}.
+    crm_result: Mapped[dict | None] = mapped_column(JSONB)
+    crm_attempted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
     received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 

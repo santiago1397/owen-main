@@ -296,6 +296,15 @@ class Settings(BaseSettings):
     # platform's own OPERATOR_SIP_TTL_SECONDS / TURN_TTL_SECONDS — the machine-authenticated
     # side entrance is never the most generous door in the building.
     CRM_LINK_SOFTPHONE_TTL_SECONDS: int = 900
+    # AHS WORK-ORDER EMAILS -> CRM CARDS (2026-09-14). A SECOND destination for the Dispatch
+    # emails `workers/mail_poller.py` already relays to GoHighLevel; the GHL relay is not
+    # touched and does not depend on this. True = every NEWLY-INSERTED parsed work order and
+    # cancellation also gets its own `email_relay_crm` job, which posts it to the CRM's
+    # `POST /api/ahs-jobs` with CRM_LINK_BASE_URL + CRM_LINK_TOKEN. Needs CRM_LINK_ENABLED
+    # and AGENT_RUNTIME_KEY as well (the worker reaches the CRM through the app). NO BACKFILL:
+    # an email stored before this was switched on is never sent — see
+    # `integrations/crm/email_jobs.py`.
+    CRM_LINK_EMAIL_JOBS_ENABLED: bool = False
 
     ANALYSIS_ENGINE: str = "dummy"  # dummy | claude | minimax
     ANTHROPIC_API_KEY: str = ""

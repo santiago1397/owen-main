@@ -22,6 +22,21 @@ function RelayBadge({ status, relayed }: { status: string | null; relayed: boole
   return <span className="muted">—</span>;
 }
 
+// Delivery to the CRM (ghl-clone), independent of the GHL relay (2026-09-14). NULL means the
+// email was never queued for the CRM — every email from before CRM_LINK_EMAIL_JOBS_ENABLED.
+function CrmBadge({ status }: { status: string | null }) {
+  if (status === "sent") return <span className="badge new" title="A card was created in the CRM">card created</span>;
+  if (status === "existing") return <span className="badge new" title="The CRM already had the card for this job">already in CRM</span>;
+  if (status === "cancellation_noted") return <span className="badge new" title="The cancellation was noted on the job's card; the card was left open">cancellation noted</span>;
+  if (status === "cancellation_already_noted") return <span className="badge new">cancellation noted</span>;
+  if (status === "skipped_no_card") return <span className="badge" title="The CRM has no card for the cancelled job, so there is nothing to note">no card in CRM</span>;
+  if (status === "queued") return <span className="badge">CRM queued…</span>;
+  if (status === "failed") return <span className="badge spam" title="The CRM could not be reached; the job retries with backoff">CRM failed</span>;
+  if (status === "refused") return <span className="badge spam" title="The CRM refused this email; a retry will not help">CRM refused</span>;
+  if (status === "skipped_disabled") return <span className="badge" title="CRM delivery was switched off before this was sent">CRM off</span>;
+  return <span className="muted">—</span>;
+}
+
 function ParseBadge({ status }: { status: string }) {
   if (status === "parsed") return <span className="badge new">parsed</span>;
   // 'ignored' = Dispatch mail that was never a work order (cancellations, notes, account
@@ -73,7 +88,26 @@ function EmailDrawer({ id, onClose }: { id: string; onClose: () => void }) {
             <RelayBadge status={e.relay_status} relayed={e.relayed_to_ghl} />
             {e.relayed_at && <span className="muted"> — {new Date(e.relayed_at).toLocaleString()}</span>}
           </span>
+          <span className="muted">CRM</span>
+          <span>
+            <CrmBadge status={e.crm_status} />
+            {e.crm_attempted_at && <span className="muted"> — {new Date(e.crm_attempted_at).toLocaleString()}</span>}
+          </span>
         </div>
+
+        {(e.crm_error || e.crm_result) && (
+          <div className="card" style={{ marginBottom: 12 }}>
+            <div className="l" style={{ marginBottom: 8 }}>CRM delivery</div>
+            {e.crm_error && <pre className="muted" style={{ whiteSpace: "pre-wrap", margin: 0 }}>{e.crm_error}</pre>}
+            {e.crm_result && (
+              <div className="kv">
+                {e.crm_result.opportunity_id != null && (<><span className="muted">Opportunity ID</span><span>{e.crm_result.opportunity_id}</span></>)}
+                {e.crm_result.contact_id != null && (<><span className="muted">Contact ID</span><span>{e.crm_result.contact_id}</span></>)}
+                {e.crm_result.matched_by && (<><span className="muted">Customer</span><span>{e.crm_result.matched_by === "created" ? "new contact" : `matched by ${e.crm_result.matched_by}`}</span></>)}
+              </div>
+            )}
+          </div>
+        )}
 
         {e.parse_status !== "parsed" && (
           <div className="card" style={{ marginBottom: 12 }}>
@@ -208,7 +242,7 @@ export default function Emails() {
       <div className="card">
         <div className="tablewrap"><table>
           <thead>
-            <tr><th>Received</th><th>From</th><th>Subject</th><th>Job ID</th><th>Parse</th><th>Relay</th></tr>
+            <tr><th>Received</th><th>From</th><th>Subject</th><th>Job ID</th><th>Parse</th><th>Relay</th><th>CRM</th></tr>
           </thead>
           <tbody>
             {(data?.items || []).map((e: any) => (
@@ -221,10 +255,11 @@ export default function Emails() {
                 <td>{e.job_id || "—"}</td>
                 <td><ParseBadge status={e.parse_status} /></td>
                 <td><RelayBadge status={e.relay_status} relayed={e.relayed_to_ghl} /></td>
+                <td><CrmBadge status={e.crm_status} /></td>
               </tr>
             ))}
             {data && data.items.length === 0 && (
-              <tr><td colSpan={6} className="muted" style={{ textAlign: "center", padding: 20 }}>
+              <tr><td colSpan={7} className="muted" style={{ textAlign: "center", padding: 20 }}>
                 No emails ingested yet.
               </td></tr>
             )}

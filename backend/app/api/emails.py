@@ -38,6 +38,12 @@ def _summary(e: InboundEmail) -> dict:
         "relay_error": e.relay_error,
         "relay_result": e.relay_result,
         "relayed_at": e.relayed_at.isoformat() if e.relayed_at else None,
+        # Delivery to the CRM, independent of the GHL relay (2026-09-14). NULL crm_status =
+        # never queued for the CRM (every email from before CRM_LINK_EMAIL_JOBS_ENABLED).
+        "crm_status": e.crm_status,
+        "crm_error": e.crm_error,
+        "crm_result": e.crm_result,
+        "crm_attempted_at": e.crm_attempted_at.isoformat() if e.crm_attempted_at else None,
         "received_at": e.received_at.isoformat() if e.received_at else None,
     }
 

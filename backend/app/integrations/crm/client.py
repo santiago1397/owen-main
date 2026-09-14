@@ -243,6 +243,30 @@ class CrmClient:
                            result.status, result.reason)
         return result
 
+    async def post_ahs_job(self, body: dict) -> CrmResult:
+        """`POST /api/ahs-jobs` — one AHS work order (2026-09-14). A 200 is the card that
+        already exists for that `ahs_job_id`; a 201 is a new one. Logged by job number
+        only: the body carries the customer's name, phone and address."""
+        result = await self._request("POST", "/api/ahs-jobs", json=body)
+        if result.ok:
+            logger.info("crm-link: AHS job %s delivered (%s, %s)", body.get("ahs_job_id"),
+                        result.status, (result.data or {}).get("outcome"))
+        else:
+            logger.warning("crm-link: AHS job %s REFUSED by the CRM (%s): %s",
+                           body.get("ahs_job_id"), result.status, result.reason)
+        return result
+
+    async def post_ahs_cancellation(self, body: dict) -> CrmResult:
+        """`POST /api/ahs-jobs/cancellations` — note the cancellation on that job's card."""
+        result = await self._request("POST", "/api/ahs-jobs/cancellations", json=body)
+        if result.ok:
+            logger.info("crm-link: AHS cancellation %s delivered (%s)",
+                        body.get("ahs_job_id"), (result.data or {}).get("outcome"))
+        else:
+            logger.warning("crm-link: AHS cancellation %s REFUSED by the CRM (%s): %s",
+                           body.get("ahs_job_id"), result.status, result.reason)
+        return result
+
     async def post_event(self, body: dict) -> CrmResult:
         """`POST /api/events`. The body must already be in the CRM's shape — build it with
         `events.to_crm_event` and check it with `events.validate_crm_event`."""

@@ -15,6 +15,7 @@ import logging
 
 from app.core.config import settings
 from app.db import SessionLocal
+from app.integrations.crm import email_jobs as crm_email_jobs
 from app.providers import dispatch_email
 from app.services import emails, queue
 from app.services import mailbox
@@ -46,7 +47,7 @@ async def poll_mailbox() -> None:
         return
 
     handled_uids: list[bytes] = []
-    relayed = failed = ignored = cancelled = 0
+    relayed = failed = ignored = cancelled = to_crm = 0
     async with SessionLocal() as db:
         for msg in fetched:
             if not msg.message_id:
@@ -82,6 +83,12 @@ async def poll_mailbox() -> None:
                     failed += 1
                     logger.warning("mail_poller: parse failed for job_id=%s: %s",
                                    parsed.job_id, parsed.error)
+                # The CRM is a SECOND destination (2026-09-14), queued only AFTER the GHL
+                # relay above and only for a row this poll inserted. Off by default
+                # (CRM_LINK_EMAIL_JOBS_ENABLED); never raises. integrations/crm/email_jobs.py
+                if await crm_email_jobs.enqueue_for_new_email(
+                        db, row, parsed.status, created=created):
+                    to_crm += 1
                 handled_uids.append(msg.uid)
             except Exception:  # noqa: BLE001 - leave UNSEEN so it retries next poll
                 logger.exception("mail_poller: failed to persist message_id=%s", msg.message_id)
@@ -99,3 +106,5 @@ async def poll_mailbox() -> None:
 
     logger.info("mail_poller: handled=%d relayed=%d cancellations=%d parse_failed=%d "
                 "ignored_non_job=%d", len(handled_uids), relayed, cancelled, failed, ignored)
+    if to_crm:
+        logger.info("mail_poller: queued %d for the CRM", to_crm)

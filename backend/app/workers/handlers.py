@@ -764,6 +764,59 @@ async def handle_crm_report(db: AsyncSession, payload: dict) -> None:
     logger.info("crm_report: %s reported to %s", body.get("linkedid"), url)
 
 
+async def handle_email_relay_crm(db: AsyncSession, payload: dict) -> None:
+    """Deliver one AHS email to the CRM (2026-09-14) — its OWN job, beside `email_relay_ghl`.
+
+    Reads and writes `crm_*` columns only; nothing here can touch the GHL relay's state, and
+    the GHL handler above does not know this one exists. The worker cannot reach the CRM
+    (it is on `callmon-net` only), so the delivery itself runs in the app-side adapter
+    `POST /api/crm-link/email-jobs`, which records the outcome. See
+    `integrations/crm/email_jobs.py` for the no-backfill guard, which is checked here AND
+    there.
+    """
+    from app.integrations.crm import email_jobs
+
+    em = await db.get(InboundEmail, uuid.UUID(payload["email_id"]))
+    if em is None:
+        logger.warning("email_relay_crm: email %s not found", payload.get("email_id"))
+        return
+    if em.crm_status not in email_jobs.ACTIONABLE:
+        # Never queued by the poller (an email from before the switch), or already done.
+        logger.info("email_relay_crm: %s has crm_status=%r, nothing to send",
+                    em.message_id, em.crm_status)
+        return
+    reason = email_jobs.refusal(settings)
+    if reason:
+        em.crm_status = "skipped_disabled"
+        em.crm_error = reason
+        em.crm_attempted_at = datetime.now(timezone.utc)
+        await db.commit()
+        logger.info("email_relay_crm: %s not sent — %s", em.message_id, reason)
+        return
+
+    url = f"{settings.OWEN_INTERNAL_URL.rstrip('/')}{email_jobs.ADAPTER_PATH}"
+    try:
+        async with httpx.AsyncClient(timeout=20) as client:
+            resp = await client.post(url, json={"email_id": str(em.id)},
+                                     headers={"X-OWEN-Key": settings.AGENT_RUNTIME_KEY})
+    except Exception as exc:  # noqa: BLE001 - record, then re-raise for the queue's backoff
+        resp, error = None, f"adapter unreachable: {exc!r}"
+    else:
+        error = None if resp.status_code < 400 else (
+            f"adapter {resp.status_code}: {resp.text[:300]}")
+    if error:
+        # The adapter records CRM-side outcomes itself. This covers the hop failing before
+        # it could (unreachable, 401 on the key, 503 switched off mid-flight).
+        await db.refresh(em)
+        if em.crm_status in email_jobs.ACTIONABLE:
+            em.crm_status = email_jobs.FAILED
+            em.crm_error = error[:2000]
+            em.crm_attempted_at = datetime.now(timezone.utc)
+            await db.commit()
+        raise RuntimeError(f"email_relay_crm: {error}")
+    logger.info("email_relay_crm: %s (job_id=%s) handed to the CRM", em.message_id, em.job_id)
+
+
 HANDLERS = {
     "recording_fetch": handle_recording_fetch,
     "transcribe": handle_transcribe,
@@ -772,6 +825,7 @@ HANDLERS = {
     "message_send": handle_message_send,
     "call_relay_ghl": handle_call_relay_ghl,
     "email_relay_ghl": handle_email_relay_ghl,
+    "email_relay_crm": handle_email_relay_crm,
     "outbound_call": handle_outbound_call,
     "monitor_listen": handle_monitor_listen,
     "monitor_takeover": handle_monitor_takeover,
