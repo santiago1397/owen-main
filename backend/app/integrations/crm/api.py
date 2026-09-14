@@ -433,8 +433,10 @@ async def deliver_email_job(
     if result.retryable:
         em.crm_status = crm_email_jobs.FAILED
         await db.commit()
+        # The detail lands in `jobs.last_error`; the status is enough there, the reason is
+        # on the email row.
         raise HTTPException(status.HTTP_502_BAD_GATEWAY,
-                            f"CRM did not accept the AHS email ({result.status}): {result.reason}")
+                            f"CRM did not accept the AHS email ({result.status})")
     em.crm_status = "refused"
     await db.commit()
     return {"ok": False, "reason": em.crm_error, "email_id": body.email_id}

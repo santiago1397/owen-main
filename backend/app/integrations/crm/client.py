@@ -252,8 +252,10 @@ class CrmClient:
             logger.info("crm-link: AHS job %s delivered (%s, %s)", body.get("ahs_job_id"),
                         result.status, (result.data or {}).get("outcome"))
         else:
-            logger.warning("crm-link: AHS job %s REFUSED by the CRM (%s): %s",
-                           body.get("ahs_job_id"), result.status, result.reason)
+            # Status only: a CRM 422 echoes the request's values, which are a customer's.
+            # The reason is kept on the email row (`crm_error`), beside the raw email.
+            logger.warning("crm-link: AHS job %s REFUSED by the CRM (%s)",
+                           body.get("ahs_job_id"), result.status)
         return result
 
     async def post_ahs_cancellation(self, body: dict) -> CrmResult:
@@ -263,8 +265,8 @@ class CrmClient:
             logger.info("crm-link: AHS cancellation %s delivered (%s)",
                         body.get("ahs_job_id"), (result.data or {}).get("outcome"))
         else:
-            logger.warning("crm-link: AHS cancellation %s REFUSED by the CRM (%s): %s",
-                           body.get("ahs_job_id"), result.status, result.reason)
+            logger.warning("crm-link: AHS cancellation %s REFUSED by the CRM (%s)",
+                           body.get("ahs_job_id"), result.status)
         return result
 
     async def post_event(self, body: dict) -> CrmResult:

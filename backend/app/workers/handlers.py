@@ -802,8 +802,7 @@ async def handle_email_relay_crm(db: AsyncSession, payload: dict) -> None:
     except Exception as exc:  # noqa: BLE001 - record, then re-raise for the queue's backoff
         resp, error = None, f"adapter unreachable: {exc!r}"
     else:
-        error = None if resp.status_code < 400 else (
-            f"adapter {resp.status_code}: {resp.text[:300]}")
+        error = None if resp.status_code < 400 else f"adapter answered {resp.status_code}"
     if error:
         # The adapter records CRM-side outcomes itself. This covers the hop failing before
         # it could (unreachable, 401 on the key, 503 switched off mid-flight).
