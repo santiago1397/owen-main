@@ -50,6 +50,11 @@ from app.db import Base
 # `app_settings` table. A second table for one boolean would be a migration nobody needs.
 BACKFILL_SETTING_KEY = "openphone_mirror_backfill"
 
+# The poll's heartbeat, in the same table: when the last scheduled tick finished and whether
+# it ran. Read by `GET /api/link-status` so the CRM can say "Quo sync last checked 3 min ago"
+# (2026-09-14). One row, overwritten each tick — not a history, and no migration.
+LAST_TICK_SETTING_KEY = "openphone_mirror_last_tick"
+
 
 def _uuid() -> uuid.UUID:
     return uuid.uuid4()
