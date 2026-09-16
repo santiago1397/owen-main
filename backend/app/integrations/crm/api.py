@@ -44,7 +44,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, File, HTTPException, Response, UploadFile, status
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -56,13 +56,14 @@ from app.db import get_db
 from app.integrations.crm import binding as crm_binding
 from app.integrations.crm import config as crm_config
 from app.integrations.crm import email_jobs as crm_email_jobs
+from app.integrations.crm import media as crm_media
 from app.integrations.crm import softphone as crm_softphone
 from app.integrations.crm.client import CrmClient
 from app.integrations.crm.events import (CallEventFacts, DeliveryReceiptFacts,
                                          MessageEventFacts, to_crm_delivery_receipt,
                                          to_crm_event, to_crm_message_event,
                                          validate_crm_delivery_receipt, validate_crm_event)
-from app.models import InboundEmail, Number
+from app.models import InboundEmail, Message, Number
 from app.services import queue, sms
 from app.telephony import outbound as outbound_rules
 from app.telephony.credentials import build_webrtc_credentials
@@ -591,6 +592,10 @@ class SendMessageIn(BaseModel):
     from_number: str
     to_number: str
     body: str
+    # Pictures (2026-09-16). Ids from `POST /api/crm-link/media`, never URLs: the CRM has
+    # no way to build a URL a carrier can fetch and must not be given one. Absent or empty
+    # means a plain SMS and the request is byte-for-byte what it always was.
+    media_ids: list[str] = Field(default_factory=list)
 
 
 @router.post("/messages")
@@ -631,8 +636,29 @@ async def send_message(
         raise HTTPException(status.HTTP_409_CONFLICT, gate)
 
     text = (body.body or "").strip()
-    if not text:
+    media_ids = [str(m) for m in (body.media_ids or []) if str(m or "").strip()]
+    # A picture with no words IS a message — it is what most MMS are. Only a request with
+    # neither is empty.
+    if not text and not media_ids:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "message body is empty")
+
+    media_urls: list[str] = []
+    if media_ids:
+        media_cfg = crm_media.current()
+        if not media_cfg.configured:
+            raise HTTPException(status.HTTP_409_CONFLICT, crm_media.REFUSE_NOT_CONFIGURED)
+        if len(media_ids) > media_cfg.max_per_message:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_ENTITY,
+                "a text can carry %d pictures" % media_cfg.max_per_message)
+        for media_id in media_ids:
+            if crm_media.read(media_id, media_cfg) is None:
+                # Refused BEFORE anything is queued: a message whose picture has already
+                # been swept would go out as words the customer cannot make sense of.
+                raise HTTPException(status.HTTP_404_NOT_FOUND,
+                                    "that picture is no longer on the phone system")
+            url, _expires = crm_media.signed_url(media_id, media_cfg)
+            media_urls.append(url)
 
     from app.providers.bulkvs import _to_e164
     from app.services.messages import (enqueue_outbound_message, get_optout_state,
@@ -644,7 +670,8 @@ async def send_message(
     if sms.is_opted_out(await get_optout_state(db, number.id, contact)):
         raise HTTPException(status.HTTP_409_CONFLICT, "this contact has opted out of SMS")
 
-    msg = await enqueue_outbound_message(db, number, contact, text, None)
+    msg = await enqueue_outbound_message(db, number, contact, text, None,
+                                        media_urls=media_urls)
     # Mark the row as the CRM's BEFORE the send job can drain, so a delivery receipt that
     # comes back fast still finds the marker. This is the ONLY thing that distinguishes a
     # message the CRM sent from one an operator (or a flow) sent on the same DID, and
@@ -658,6 +685,95 @@ async def send_message(
     # `message_id` IS the correlation field: the CRM stores it as its ConversationEvent's
     # `provider_ref`, and every delivery receipt for this text comes back carrying it.
     return {"ok": True, "message_id": str(msg.id), "status": "queued"}
+
+
+# --- pictures (2026-09-16) ----------------------------------------------------------------
+#
+# Two routes, one per direction, both `crm_link` scope — the key the CRM already holds, and
+# which already authorises placing a call and sending a text. Serving a picture the CRM sent
+# us, and relaying one addressed to the DID it owns, are both strictly less than that key can
+# already do; a new scope would be a second credential to provision and rotate for nothing.
+# The same argument `integrations/openphone/api.py` makes about its recording stream.
+
+
+@router.post("/media", status_code=status.HTTP_201_CREATED)
+async def upload_media(
+    file: UploadFile = File(...),
+    _key=Depends(require_scope(SCOPE_CRM_LINK)),
+) -> dict:
+    """Take one picture from the CRM so the carrier can fetch it when the text is sent.
+
+    Answers an OPAQUE id, never the URL. The URL is minted at send time by
+    `POST /messages`, lives for `CRM_LINK_MEDIA_TTL_SECONDS` and is never returned to
+    anybody: the fewer systems that hold a credential-free link to a customer's
+    photograph, the smaller the exposure, and one is the fewest that can send an MMS.
+
+    Read with a cap rather than an unbounded `read()`: refusing a 400 MB upload should not
+    cost 400 MB of this process first.
+    """
+    cfg = _require_enabled()
+    media_cfg = crm_media.current()
+    if not media_cfg.configured:
+        raise HTTPException(status.HTTP_409_CONFLICT, crm_media.REFUSE_NOT_CONFIGURED)
+    if not cfg.sms_enabled:
+        # The same dark switch a text obeys. A picture uploaded while texting is switched
+        # off could only ever become a text that cannot be sent.
+        raise HTTPException(status.HTTP_403_FORBIDDEN, crm_config.REFUSE_SMS_DARK)
+
+    data = await file.read(media_cfg.max_bytes + 1)
+    try:
+        media_id, content_type = crm_media.store(data, media_cfg)
+    except ValueError as exc:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from None
+    return {"ok": True, "media_id": media_id, "content_type": content_type,
+            "byte_size": len(data), "ttl_seconds": media_cfg.ttl_seconds}
+
+
+@router.get("/messages/{message_id}/media/{index}")
+async def message_media(
+    message_id: str,
+    index: int,
+    db: AsyncSession = Depends(get_db),
+    _key=Depends(require_scope(SCOPE_CRM_LINK)),
+) -> Response:
+    """Relay ONE inbound picture to the CRM, so the CRM can keep its own copy.
+
+    Inbound media is never published. The carrier's URL, and whatever credential fetching
+    it needs, stay inside OWEN — exactly as the OpenPhone key does behind the recording
+    stream — and the CRM gets bytes over the internal network with its own key.
+
+        CRM --X-OWEN-Key--> OWEN --BulkVS Basic auth--> the carrier's media URL
+
+    404 for a message that is not on a CRM-BOUND DID, is not INBOUND, or has no picture at
+    that index. That is a real access check and not tidiness: `messages` holds every text on
+    every DID this platform runs, and the CRM's key must not be able to read media off a
+    line the CRM has nothing to do with.
+    """
+    _require_enabled()
+    try:
+        row_id = uuid.UUID(str(message_id))
+    except (TypeError, ValueError):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "no such message") from None
+
+    msg = await db.get(Message, row_id)
+    if msg is None or (msg.direction or "").lower() != "inbound":
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "no such message")
+    bound = await crm_binding.resolve(db, msg.to_number or "")
+    if bound is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "no such message")
+    urls = [u for u in (msg.media_urls or []) if u]
+    if index < 0 or index >= len(urls):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "no such picture on that message")
+
+    found = await crm_media.fetch_carrier_media(urls[index])
+    if found is None:
+        # The carrier's link is gone — they expire, which is the whole reason the CRM keeps
+        # its own copy. 404 rather than 502: retrying will not bring it back.
+        raise HTTPException(status.HTTP_404_NOT_FOUND,
+                            "the carrier no longer has that picture")
+    data, content_type = found
+    return Response(content=data, media_type=content_type,
+                    headers={"Cache-Control": "private, no-store"})
 
 
 @router.get("/health")

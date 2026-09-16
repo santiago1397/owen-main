@@ -92,6 +92,32 @@ async def retention_sweep() -> None:
                 removed, settings.RECORDING_RETENTION_DAYS)
 
 
+def crm_media_enabled() -> bool:
+    """True only when outbound CRM pictures are configured AND the link is on."""
+    try:
+        from app.integrations.crm import config as crm_config
+        from app.integrations.crm import media as crm_media
+
+        return bool(crm_config.link_enabled() and crm_media.current().configured)
+    except Exception:  # noqa: BLE001 - unreadable config => do not schedule
+        return False
+
+
+async def crm_media_sweep() -> None:
+    """Delete outbound pictures whose signed URL has expired.
+
+    Belt and braces beside the signature check, not instead of it: `media.verify` already
+    refuses an expired link, and this makes sure the bytes are gone too. Total — a sweep
+    that raised would take the scheduler's job down and leave files accumulating silently.
+    """
+    try:
+        from app.integrations.crm import media as crm_media
+
+        crm_media.sweep()
+    except Exception:  # noqa: BLE001
+        logger.exception("crm media sweep failed")
+
+
 async def observability_sweep() -> None:
     """Trim the AI API's own tables so they cannot grow without bound.
 
@@ -177,6 +203,13 @@ def build_scheduler() -> AsyncIOScheduler:
         )
         logger.info("openphone mirror scheduled every %ss",
                     settings.OPENPHONE_MIRROR_POLL_SECONDS)
+    # Outbound CRM picture sweep (2026-09-16). Deletes the files behind expired media URLs,
+    # so an expired link has nothing behind it as well as an invalid signature. Only
+    # scheduled when outbound pictures are actually configured — otherwise there is no
+    # directory and no point waking up for it.
+    if crm_media_enabled():
+        sched.add_job(crm_media_sweep, "interval", minutes=10, id="crm_media_sweep")
+        logger.info("crm outbound picture sweep scheduled every 10m")
     return sched
 
 

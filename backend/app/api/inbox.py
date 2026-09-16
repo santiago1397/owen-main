@@ -18,7 +18,7 @@ from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -37,6 +37,7 @@ from app.models import (
     User,
 )
 from app.services import queue, sms
+from app.services.dlr_junk import DLR_JUNK_KEY
 from app.services.inbox_threads import (
     DidRef,
     merge_threads,
@@ -81,6 +82,20 @@ def _msg_stmt():
         .join(Caller, Message.caller_id == Caller.id, isouter=True)
         .join(Number, Message.number_id == Number.id, isouter=True)
         .where(Provider.name.in_(PLATFORM_PROVIDERS))
+        # A stored CARRIER DELIVERY RECEIPT is not a message and must never appear in
+        # anybody's thread (2026-09-16). BulkVS posts these to the MO webhook, and until
+        # that was recognised they were stored — and relayed — as inbound texts. New ones
+        # are not stored at all unless they correlate to nothing; the ones already in the
+        # table are marked by `app.scripts.backfill_dlrs`. Excluded HERE, in the one
+        # statement both the thread list and the thread view are built from, so the two
+        # cannot disagree about it. See services/dlr_junk.py for why a marker and not a
+        # delete.
+        #
+        # NULL-SAFE, and that is not decoration: `raw_payload` is NULL on every outbound row
+        # the CRM did not send, and in SQL `NULL ? 'key'` is NULL, so a bare `~has_key(...)`
+        # would filter out every one of them — the whole operator Inbox, silently.
+        .where(or_(Message.raw_payload.is_(None),
+                   ~Message.raw_payload.has_key(DLR_JUNK_KEY)))
     )
 
 

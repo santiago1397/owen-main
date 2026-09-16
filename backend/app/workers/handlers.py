@@ -42,6 +42,7 @@ from app.providers import (
     signalwire_client,
     twilio_client,
 )
+from app.integrations.crm import hook as crm_hook
 from app.services import emails, messages as messages_svc, queue, sms
 
 logger = logging.getLogger("worker.handlers")
@@ -355,15 +356,38 @@ async def handle_message_send(db: AsyncSession, payload: dict) -> None:
             logger.info("message_send: %s blocked — contact %s opted out", msg.id, msg.to_number)
             return
 
-    ref_id = await bulkvs_client.send_message(
+    result = await bulkvs_client.send_result(
         from_number=msg.from_number, to_number=msg.to_number, body=msg.body or "",
         media_urls=(msg.media_urls or None),
     )
+    ref_id = result.ref_id
     if ref_id:
         msg.provider_message_sid = f"bulkvs-{ref_id}"
     msg.status = "sent"
+    # WHAT /messageSend ACTUALLY ANSWERED, kept on the row (2026-09-16). The first live send
+    # logged `ref=None` and threw the body away, so nobody could say whether BulkVS returns
+    # no id, returns one under a name we do not match, or nests it. Written UNDER its own key
+    # beside the CRM-link marker rather than over `raw_payload`, so the marker — the only
+    # thing that says this text was the CRM's — survives, and so does every other reader of
+    # that column.
+    raw = dict(msg.raw_payload or {})
+    raw["bulkvs_send_response"] = {"status_code": result.status_code, "body": result.body}
+    msg.raw_payload = raw
     await db.commit()
-    logger.info("message_send: sent %s (ref=%s)", msg.id, ref_id)
+    logger.info("message_send: sent %s (ref=%s, response=%r)", msg.id, ref_id, result.body)
+
+    # TELL THE CRM IT WENT (2026-09-16). Without this its bubble sits on "queued" for ever
+    # whenever BulkVS gives us no RefId, because the delivery-status webhook matches on
+    # `bulkvs-<RefId>` and has nothing to match. This does not depend on an id at all: OWEN
+    # has just had a 2xx from the carrier for this exact row, which IS the fact "it was
+    # sent", and `messages.id` — the CRM's `provider_ref` — is right here.
+    #
+    # It reports the CARRIER's word "sent", not "delivered": the carrier has accepted it and
+    # nothing yet says it arrived. A real DLR, if one ever correlates, advances it further,
+    # and both sides apply a forward-only ladder so a later or repeated receipt is harmless.
+    # The hook is total and does nothing at all unless this message was the CRM's, so a
+    # failure here cannot cost the send that already happened.
+    await crm_hook.handle_delivery_receipt(message_id=str(msg.id), status="sent")
 
     # Outbound relays to GHL too (reuse the inbound-message relay path; payload carries
     # direction='outbound'). Relayed as its own durable job.

@@ -402,9 +402,15 @@ def message_body(facts: MessageEventFacts) -> str:
     send a crew reads this, and a machine-written prefix on a customer's text is the kind of
     small dishonesty that makes a thread impossible to skim.
 
-    The one addition is an MMS note, because the CRM's event row has no media column and the
-    picture of the roof IS the message. It is appended (never substituted) so the words, if
-    there were any, are still the first thing on the line.
+    The one addition is an MMS note, because the picture of the roof IS the message and a
+    text that reads as blank would be worse than one that says what came with it. It is
+    appended (never substituted) so the words, if there were any, are still first.
+
+    KEPT after the CRM learned to show pictures (2026-09-16). It is now a FALLBACK rather
+    than the whole story: the CRM strips this note when it has the pictures themselves
+    (`lib/mmsNote.ts`) and prints it when it does not — an older CRM deploy, a fetch that
+    failed, or the link switched off. Removing it here would have made a CRM that has not
+    been updated yet show a blank bubble, which is the one outcome worse than a note.
     """
     text = (facts.body or "").strip()
     if facts.num_media > 0:
@@ -436,6 +442,13 @@ def to_crm_message_event(facts: MessageEventFacts,
         # messages.id. The same key a delivery receipt arrives with, so one OWEN row is one
         # CRM row however many ways it is touched.
         "provider_ref": facts.owen_message_id or None,
+        # HOW MANY PICTURES came with it (2026-09-16). The CRM creates one attachment row
+        # per picture and then asks for each by index through
+        # `GET /api/crm-link/messages/{id}/media/{i}`, so it can keep its own copy before
+        # the carrier's link expires. NO MEDIA URL IS SENT: a carrier link is a
+        # credential-free URL to a customer's photograph, and the only system that should
+        # ever hold one is the one that already holds the carrier's key.
+        "num_media": int(facts.num_media or 0),
         # See `to_crm_event`: the line and system every CRM thread row is labelled with.
         "source_system": SOURCE_SYSTEM,
         "source_number": facts.dialed_number or None,

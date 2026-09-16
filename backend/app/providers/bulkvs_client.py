@@ -205,30 +205,91 @@ async def fetch_voice_cdr(start_epoch: int, end_epoch: int, call_type: str = "al
     return [r for r in (data or []) if isinstance(r, dict)]
 
 
-def _extract_ref_id(data) -> str | None:
-    """Pull the BulkVS message reference id out of a /messageSend response. BulkVS returns the
-    ref under one of a few casings depending on the endpoint version — match them all."""
-    if not isinstance(data, dict):
+_REF_KEYS = ("RefId", "RefID", "refId", "refid", "MessageRef", "MessageId", "MessageID",
+             "Id", "id")
+
+
+def _extract_ref_id(data, _depth: int = 0) -> str | None:
+    """Pull the BulkVS message reference id out of a /messageSend response.
+
+    WIDENED 2026-09-16, because the first REAL send — the day texting went live — came back
+    with `ref=None` in the worker log and left the CRM's bubble on "queued" for ever, since
+    the delivery-status webhook matches on `bulkvs-<RefId>` and there was no RefId to match.
+
+    The old version looked only at the TOP LEVEL of a dict. BulkVS's own documentation shows
+    `/messageSend` answering with a per-recipient `Results` list, so a response shaped
+    `{"Results": [{"To": "...", "Status": "SUCCESS", "RefId": "..."}]}` — or a bare list of
+    those — has an id this could not see. It now walks dicts and lists to a bounded depth
+    and takes the first id it finds.
+
+    **What BulkVS actually returns on this account is still not known**, and this function
+    is not where that gets settled: it cannot be, because it only sees what was there. So
+    `send_result` below keeps the WHOLE decoded body, `handle_message_send` stores it on the
+    message row, and the next real send writes the answer down where a person can read it.
+    Until then the CRM's bubble is advanced from OWEN's own knowledge that the send
+    succeeded, which does not depend on an id at all.
+    """
+    if _depth > 4:
         return None
-    for k in ("RefId", "RefID", "refId", "MessageRef", "MessageId", "MessageID", "Id"):
-        v = data.get(k)
-        if v:
-            return str(v)
+    if isinstance(data, dict):
+        for k in _REF_KEYS:
+            v = data.get(k)
+            # A nested object under one of these names is not an id; keep walking.
+            if v and not isinstance(v, (dict, list, tuple)):
+                return str(v)
+        for v in data.values():
+            if isinstance(v, (dict, list, tuple)):
+                found = _extract_ref_id(v, _depth + 1)
+                if found:
+                    return found
+        return None
+    if isinstance(data, (list, tuple)):
+        for v in data:
+            found = _extract_ref_id(v, _depth + 1)
+            if found:
+                return found
     return None
+
+
+@dataclass
+class SendResult:
+    """What one `/messageSend` actually did, including the body it answered with.
+
+    The body is kept because the ref id was missing on the first live send and nobody could
+    say what BulkVS had really returned — the log line printed `ref=None` and threw the
+    evidence away. `handle_message_send` writes this onto `messages.raw_payload`, so the
+    question is answered by the next real text instead of by another guess.
+    """
+
+    ref_id: str | None
+    status_code: int
+    body: object = None
 
 
 async def send_message(
     from_number: str, to_number: str, body: str, media_urls: list[str] | None = None
 ) -> str | None:
-    """POST /messageSend to originate an outbound SMS/MMS from a 10DLC-registered DID and
-    return the BulkVS message RefId (the delivery-status webhook keys on it). Raises on non-2xx
-    so the worker retries with backoff.
+    """`send_result`, keeping only the ref id. The shape every caller before 2026-09-16
+    used; left in place so nothing that only wants the id has to change."""
+    return (await send_result(from_number, to_number, body, media_urls)).ref_id
 
-    ASSUMPTION / UNRUN: BulkVS outbound messaging requires 10DLC brand+campaign registration
-    (a pending HITL step), so this path is GATED (Number.sms_enabled) and has NOT been
-    exercised against the live API. The request shape below follows the BulkVS messageSend
-    docs (From = bare/E.164 DID, To = array of recipients, Message = body); confirm against a
-    live send once 10DLC is approved. HTTP Basic auth reuses the REST creds like /tnRecord."""
+
+async def send_result(
+    from_number: str, to_number: str, body: str, media_urls: list[str] | None = None
+) -> SendResult:
+    """POST /messageSend to originate an outbound SMS/MMS from a 10DLC-registered DID and
+    return what it answered. Raises on non-2xx so the worker retries with backoff.
+
+    UPDATED 2026-09-16, the day texting went live. The request shape IS now exercised: a real
+    text went out and BulkVS answered 2xx, so `From` = the DID, `To` = an array and `Message`
+    = the body are right. What is still NOT known is the RESPONSE shape — `_extract_ref_id`
+    found nothing in it, which is why the whole body is returned now rather than discarded,
+    and why the CRM no longer depends on a RefId to know a text was sent.
+
+    `MediaURLs` makes it an MMS. The URLs are OWEN's own signed, short-lived, single-object
+    links (`integrations/crm/media.py`) — never a third party's. The field name follows the
+    same BulkVS docs as the rest and, like the rest, is confirmed by a send or not at all.
+    HTTP Basic auth reuses the REST creds like /tnRecord."""
     url = f"{settings.BULKVS_API_BASE.rstrip('/')}/messageSend"
     auth = (settings.BULKVS_API_USERNAME, settings.BULKVS_API_PASSWORD)
     payload: dict = {"From": from_number, "To": [to_number], "Message": body}
@@ -238,6 +299,9 @@ async def send_message(
         resp = await client.post(url, json=payload, auth=auth)
         resp.raise_for_status()
         try:
-            return _extract_ref_id(resp.json())
+            data = resp.json()
         except Exception:  # noqa: BLE001 - a 2xx with a non-JSON body still counts as sent
-            return None
+            # The text is recorded verbatim, truncated: an unparseable answer is still the
+            # evidence of what this endpoint does, and it was being discarded.
+            return SendResult(None, resp.status_code, {"_text": resp.text[:2000]})
+        return SendResult(_extract_ref_id(data), resp.status_code, data)

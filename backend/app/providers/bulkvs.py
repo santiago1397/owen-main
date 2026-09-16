@@ -24,6 +24,7 @@ texts would then collapse to one row — acceptable for the inbox).
 
 import hashlib
 import re
+from dataclasses import dataclass, field
 from urllib.parse import unquote_plus
 
 from app.providers.base import NormalizedMessageEvent
@@ -106,6 +107,153 @@ def _decode_body(raw):
         return unquote_plus(raw)
     except Exception:       # noqa: BLE001 - an undecodable body is kept verbatim, never dropped
         return raw
+
+
+# --- DELIVERY RECEIPTS ARRIVE ON THIS SAME WEBHOOK (2026-09-16) ---------------------------
+#
+# MEASURED ON PRODUCTION, the morning after texting went live. BulkVS does not only POST
+# mobile-originated messages to the MO webhook — it posts DELIVERY RECEIPTS there too, as an
+# ordinary-looking inbound message whose `From` is the RECIPIENT and whose `Message` is an
+# SMPP `deliver_sm` receipt:
+#
+#   id:1162999967 sub:001 dlvrd:000 submit date:2609160247 done date:2609160247
+#   stat:UNDELIV err:255 text:Dream Te...
+#
+# Every one of those was stored as an inbound text and relayed onward, so the CRM showed a
+# customer's own thread containing two messages the customer never wrote. That is the bug
+# this block exists to stop, and the receipt is thrown away twice over: once as information
+# we badly wanted (did the text arrive?) and once as noise in a customer's record.
+#
+# THE MATCH IS DELIBERATELY STRICT — all seven fields, in order, anchored at the start. The
+# guard that matters is "a real customer text must never be mistaken for a receipt", and a
+# person cannot type this by accident. `text:` is optional because the field is a truncated
+# echo and a carrier may omit it.
+#
+# WHAT THE RAW PAYLOAD FLAGS IT WITH IS NOT KNOWN. Production could not be read from here,
+# so detection is on the BODY, which is definitive, and `_DLR_FLAG_KEYS` below is a
+# defensive second route for a payload that says so outright. Every receipt we recognise
+# keeps its whole raw payload (see services/dlr.py), so the next live one writes the answer
+# down instead of it being guessed at again.
+
+_DLR = re.compile(
+    r"^\s*id:(?P<id>\S+)"
+    r"\s+sub:(?P<sub>\d+)"
+    r"\s+dlvrd:(?P<dlvrd>\d+)"
+    r"\s+submit\s+date:(?P<submit_date>\d{8,14})"
+    r"\s+done\s+date:(?P<done_date>\d{8,14})"
+    r"\s+stat:(?P<stat>[A-Za-z]+)"
+    r"\s+err:(?P<err>\w+)"
+    r"(?:\s+text:(?P<text>.*))?$",
+    re.DOTALL,
+)
+
+# Looks like a receipt but did not match — a carrier variant we have not seen. Logged rather
+# than silently stored, so an unrecognised shape is visible instead of landing in a
+# customer's thread the way the first one did.
+_DLR_ISH = re.compile(r"^\s*id:\S+.*\bstat:", re.IGNORECASE | re.DOTALL)
+
+# A payload that declares itself. Checked as a SECOND route, never instead of the body: the
+# names are plausible rather than observed, and a wrong guess here must not be able to
+# reclassify a customer's text.
+_DLR_FLAG_KEYS = ("MessageType", "messageType", "Type", "type", "Category", "category",
+                  "EsmClass", "esm_class", "esmClass")
+_DLR_FLAG_VALUES = ("dlr", "receipt", "delivery", "delivery_receipt", "deliveryreceipt",
+                    "status", "deliver_sm")
+
+
+def flagged_as_receipt(params: dict) -> str:
+    """The key that declares this payload a delivery receipt, or "".
+
+    Returns the KEY rather than a bool so the caller can log which field said so — the one
+    fact about this webhook nobody here has been able to observe.
+    """
+    if not isinstance(params, dict):
+        return ""
+    for key in _DLR_FLAG_KEYS:
+        value = params.get(key)
+        if isinstance(value, str) and value.strip().lower() in _DLR_FLAG_VALUES:
+            return key
+    return ""
+
+
+@dataclass(frozen=True)
+class DeliveryReceipt:
+    """One carrier delivery receipt, as the MO webhook delivered it.
+
+    `receipt_id` is the SMPP message id and is **NOT** the RefId `/messageSend` returns —
+    measured: RefId `4551F89F` against DLR id `1162999967`. They are different identifier
+    spaces, so nothing here correlates on it; see `services/dlr.py` for what does.
+    """
+
+    receipt_id: str
+    stat: str                 # DELIVRD | UNDELIV | REJECTD | EXPIRED | DELETED | ...
+    err: str                  # "000" when nothing went wrong
+    submit_date: str          # YYMMDDhhmm[ss], the SMSC's own clock and timezone
+    done_date: str
+    text_prefix: str          # a truncated echo of the message that was sent
+    delivered: int            # the `dlvrd:` counter
+    submitted: int            # the `sub:` counter
+    customer_number: str      # the DLR's From — the RECIPIENT of the original text
+    dialed_number: str        # the DLR's To — our own DID
+    raw: dict = field(default_factory=dict)
+
+    @property
+    def failed(self) -> bool:
+        return self.stat.upper() != "DELIVRD"
+
+
+def parse_delivery_receipt(params: dict) -> "DeliveryReceipt | None":
+    """A `DeliveryReceipt` if this MO payload is one, else None. Pure — no DB, no HTTP.
+
+    None means "treat it as an ordinary inbound message", which is what every real text
+    gets, so a parser that is too shy costs nothing that is not already lost today.
+    """
+    if not isinstance(params, dict):
+        return None
+    raw_body = (
+        params.get("Message") or params.get("Body")
+        or params.get("message") or params.get("body")
+    )
+    body = _decode_body(raw_body)
+    if not isinstance(body, str) or not body:
+        return None
+    m = _DLR.match(body)
+    if m is None:
+        return None
+
+    frm = _first(params.get("From") or params.get("from"))
+    to = _first(params.get("_tracking_number") or params.get("To") or params.get("to"))
+    text = (m.group("text") or "").strip()
+    return DeliveryReceipt(
+        receipt_id=m.group("id"),
+        stat=m.group("stat").upper(),
+        err=m.group("err"),
+        submit_date=m.group("submit_date"),
+        done_date=m.group("done_date"),
+        text_prefix=text,
+        delivered=int(m.group("dlvrd")),
+        submitted=int(m.group("sub")),
+        customer_number=_to_e164(str(frm)) if frm else "",
+        dialed_number=_to_e164(str(to)) if to else "",
+        raw=dict(params),
+    )
+
+
+def looks_like_unparsed_receipt(params: dict) -> bool:
+    """A body shaped like a receipt that `parse_delivery_receipt` could not read.
+
+    Exists to make a carrier variant LOUD. The first one of these cost two junk messages in
+    a customer's CRM thread precisely because nothing was watching for the shape.
+    """
+    if not isinstance(params, dict):
+        return False
+    body = _decode_body(
+        params.get("Message") or params.get("Body")
+        or params.get("message") or params.get("body")
+    )
+    if not isinstance(body, str) or not body:
+        return False
+    return bool(_DLR_ISH.match(body)) and _DLR.match(body) is None
 
 
 class BulkvsAdapter:

@@ -306,6 +306,32 @@ class Settings(BaseSettings):
     # `integrations/crm/email_jobs.py`.
     CRM_LINK_EMAIL_JOBS_ENABLED: bool = False
 
+    # PICTURES ON A CRM TEXT (2026-09-16). BulkVS sends an MMS by FETCHING the media from a
+    # public URL, so an outbound picture has to be published somewhere the carrier can
+    # reach. EMPTY = OUTBOUND PICTURES ARE OFF: `POST /api/crm-link/media` answers 409 with
+    # a sentence and nothing is ever published. Set it to this deployment's own public API
+    # origin — `https://api.<APP_DOMAIN>`, which is already where the BulkVS webhooks land,
+    # so no new Traefik rule and no new public surface is created.
+    #
+    # INBOUND pictures need none of this: they are relayed to the CRM over the internal
+    # network through the API-key-gated route and are never published at all.
+    CRM_LINK_MEDIA_PUBLIC_BASE_URL: str = ""
+    # Where an outbound picture waits for the carrier. Defaults INSIDE the `recordings`
+    # volume, which docker-compose.prod.yml already mounts on both the app and the worker,
+    # so this works on a deploy that changes no compose file and a picture the carrier has
+    # not fetched yet survives a restart.
+    CRM_LINK_MEDIA_DIR: str = "/data/recordings/crm-media"
+    # How long a minted media URL lives. The carrier fetches within seconds; the rest is
+    # slack for a retry. Shorter is safer — see integrations/crm/media.py.
+    CRM_LINK_MEDIA_TTL_SECONDS: int = 1800
+    CRM_LINK_MEDIA_MAX_BYTES: int = 5 * 1024 * 1024
+    CRM_LINK_MEDIA_MAX_PER_MESSAGE: int = 5
+    # The HMAC key the media URL is signed with. Unset falls back to CRM_LINK_TOKEN, which
+    # is already a high-entropy secret scoped to this integration. Set it to separate the
+    # two lifetimes: rotating the CRM's API key would otherwise invalidate every media URL
+    # already handed to the carrier.
+    CRM_LINK_MEDIA_SECRET: str = ""
+
     ANALYSIS_ENGINE: str = "dummy"  # dummy | claude | minimax
     ANTHROPIC_API_KEY: str = ""
     ANALYSIS_MODEL: str = "claude-haiku-4-5-20251001"

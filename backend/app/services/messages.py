@@ -164,11 +164,18 @@ async def apply_inbound_keyword(
 
 
 async def enqueue_outbound_message(
-    db: AsyncSession, number: Number, contact: str, body: str, user_id
+    db: AsyncSession, number: Number, contact: str, body: str, user_id,
+    media_urls: list[str] | None = None,
 ) -> Message:
     """Write an outbound `messages` row (direction='outbound', sent_by_user_id) with a
     synthesized SID and return it. Does NOT send — the caller enqueues a `message_send` job.
-    Gate + opt-out checks are the caller's responsibility (see api/messages.send)."""
+    Gate + opt-out checks are the caller's responsibility (see api/messages.send).
+
+    `media_urls` (2026-09-16) makes the row an MMS. They are SIGNED, SHORT-LIVED OWEN URLs
+    minted by `integrations/crm/media.py`, never a third party's and never the operator's —
+    the columns already exist and have held inbound media since Ticket 09, so this writes a
+    fact where there was a zero and changes nothing about a row that carries no picture.
+    """
     now = datetime.now(timezone.utc)
     caller = await _get_or_create_caller(db, contact, now)
     sid = f"owenout-{uuid.uuid4().hex}"  # replaced with the BulkVS RefId once actually sent
@@ -183,7 +190,8 @@ async def enqueue_outbound_message(
         to_number=contact,
         body=body,
         status="queued",
-        num_media=0,
+        num_media=len(media_urls or []),
+        media_urls=list(media_urls or []),
         sent_by_user_id=user_id,
     )
     db.add(msg)
