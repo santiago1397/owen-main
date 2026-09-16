@@ -378,7 +378,18 @@ def test_the_crm_link_router_gained_exactly_one_route():
     exactly its job -- widen it deliberately, never delete it.
 
     Widened again 2026-09-14 (feature/ahs-email-to-crm): /email-jobs, the worker's hop for an
-    AHS work-order email, scope agent_write like /events. Eight."""
+    AHS work-order email, scope agent_write like /events. Eight.
+
+    Widened again 2026-09-16 (feature/mms-media-relay): pictures on a CRM text. `POST /media`
+    takes one picture from the CRM so the carrier can fetch it at send time, and
+    `GET /messages/{id}/media/{i}` relays an INBOUND picture so the CRM can keep its own copy
+    before the carrier's link expires. Both scope crm_link — the key the CRM already holds,
+    which already authorises placing a call and sending a text. Ten.
+
+    The PUBLIC route this feature needed is deliberately NOT here: `GET /crm-media/{id}` is
+    its own router (`integrations/crm/public_media.py`), with its own fence in
+    `tests/test_crm_media.py`, so that nothing on this key-gated surface can ever be mistaken
+    for something a carrier may reach."""
     print("the crm-link router is exactly the routes we expect:")
     from app.integrations.crm import api as crm_api
 
@@ -392,8 +403,10 @@ def test_the_crm_link_router_gained_exactly_one_route():
         ("/api/crm-link/health", ("GET",)),
         ("/api/crm-link/softphone/credentials", ("POST",)),
         ("/api/crm-link/email-jobs", ("POST",)),
+        ("/api/crm-link/media", ("POST",)),
+        ("/api/crm-link/messages/{message_id}/media/{index}", ("GET",)),
     ])
-    check("the route table is exactly the eight we expect, no more and no fewer",
+    check("the route table is exactly the ten we expect, no more and no fewer",
           paths == expected)
 
 

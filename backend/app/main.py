@@ -26,6 +26,7 @@ from app.api import recordings as recordings_api
 from app.api import settings as settings_api
 from app.api import telephony as telephony_api
 from app.integrations.crm import api as crm_link_api
+from app.integrations.crm import public_media as crm_public_media
 from app.integrations.openphone import api as openphone_mirror_api
 from app.integrations.openphone import webhook as openphone_webhook
 from app.integrations import link_status as link_status_api
@@ -94,6 +95,12 @@ app.include_router(telephony_api.router)
 # Traefik-routed. Every route is API-key-authed AND answers 503 while CRM_LINK_ENABLED
 # is false, so mounting it changes nothing until the kill switch is flipped.
 app.include_router(crm_link_api.router)
+# The ONE public route this integration has (2026-09-16): GET /crm-media/{id}, which is how
+# BulkVS fetches a picture the CRM is sending. Signed, single-object and short-lived; 404 for
+# everything else including while CRM_LINK_ENABLED is false. Mounted OUTSIDE /api-crm-link so
+# a public route can never be mistaken for one of that surface's key-gated ones. The design
+# and the exposure it creates are written out in integrations/crm/media.py.
+app.include_router(crm_public_media.router)
 app.include_router(openphone_mirror_api.router)
 # Quo's webhook: PUBLIC (POST /webhooks/openphone), HMAC-verified, 404 while
 # OPENPHONE_WEBHOOK_ENABLED is false. See integrations/openphone/webhook.py.

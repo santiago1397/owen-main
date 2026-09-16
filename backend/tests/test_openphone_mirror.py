@@ -662,10 +662,12 @@ def test_the_router_is_exactly_these_routes_and_the_crm_link_is_untouched():
 
     crm = sorted({r.path for r in main_mod.app.routes
                   if getattr(r, "path", "").startswith("/api/crm-link")})
-    # Eight since 2026-09-14: /email-jobs (the AHS email hop) was added to the CRM link on
-    # purpose, by feature/ahs-email-to-crm. The mirror still adds none.
-    check(f"the CRM link still has its eight routes, unwidened by the mirror ({len(crm)})",
-          len(crm) == 8 and "/api/crm-link/email-jobs" in crm)
+    # Ten since 2026-09-16: /email-jobs (the AHS email hop, feature/ahs-email-to-crm) and
+    # then /media + /messages/{id}/media/{i} (pictures on a CRM text,
+    # feature/mms-media-relay) were added to the CRM link on purpose. The mirror still
+    # adds none, which is what this line is actually for.
+    check(f"the CRM link still has its ten routes, unwidened by the mirror ({len(crm)})",
+          len(crm) == 10 and "/api/crm-link/email-jobs" in crm)
     check("scopes exist and are the two reused ones",
           bool(SCOPE_AGENT_WRITE) and bool(SCOPE_CRM_LINK))
 
