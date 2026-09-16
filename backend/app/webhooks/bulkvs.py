@@ -22,8 +22,10 @@ from sqlalchemy import select
 from app.db import SessionLocal
 from app.integrations.crm import hook as crm_hook
 from app.models import Message
+from app.providers import bulkvs as bulkvs_provider
 from app.providers.bulkvs import BULKVS_INBOUND_IPS, BulkvsAdapter
-from app.services import queue, sms
+from app.services import dlr, queue, sms
+from app.services.dlr_junk import DLR_JUNK_KEY
 from app.services.messages import apply_inbound_keyword, ingest_message_event
 from app.webhooks.common import verify_request
 
@@ -50,6 +52,29 @@ async def message(request: Request) -> Response:
     tracking_number = request.query_params.get("tracking_number")
     if tracking_number:
         body["_tracking_number"] = tracking_number
+
+    # A DELIVERY RECEIPT, NOT A MESSAGE (2026-09-16). BulkVS posts these to this same
+    # webhook, and until this branch existed every one was stored as an inbound text and
+    # relayed onward — so a customer's CRM thread showed two messages they never wrote.
+    #
+    # Checked FIRST, before the ingest upsert and before the CRM hook is even asked, so a
+    # receipt cannot become a message by any path. The receipt is then used for what it is
+    # actually for: advancing the outbound message it belongs to. See services/dlr.py.
+    receipt = bulkvs_provider.parse_delivery_receipt(body)
+    if receipt is not None:
+        flag = bulkvs_provider.flagged_as_receipt(body)
+        logger.info("bulkvs delivery receipt: id=%s stat=%s err=%s to=%s%s",
+                    receipt.receipt_id, receipt.stat, receipt.err, receipt.customer_number,
+                    (" (payload flagged it with %s)" % flag) if flag else "")
+        await _take_receipt(receipt)
+        return Response(status_code=200)
+    if bulkvs_provider.looks_like_unparsed_receipt(body):
+        # LOUD on purpose. A carrier variant we cannot read is how the first two junk
+        # messages reached a customer's thread, and the only thing worse than not reading it
+        # is not noticing. It still ingests below, exactly as it does today.
+        logger.error("bulkvs: a message looks like a delivery receipt but could not be "
+                     "parsed — it will be stored as an inbound text. Body shape: %r",
+                     str(body.get("Message") or body.get("Body") or "")[:160])
 
     evt = _adapter.parse_message_event(body)
     logger.info("bulkvs message: sid=%s from=%s to=%s num_media=%s",
@@ -80,6 +105,43 @@ async def message(request: Request) -> Response:
     if crm_first_sight:
         await crm_hook.handle_inbound_message(**crm_message)
     return Response(status_code=200)
+
+
+async def _take_receipt(receipt) -> None:
+    """Apply one receipt, and keep it either way.
+
+    TOTAL, like every other hook on this webhook: any failure at all still returns the 200
+    below, because a 500 here makes BulkVS re-deliver the receipt for ever and costs us
+    nothing we did not already have.
+
+    A receipt that correlates to nothing is STORED — as a message row, marked as receipt
+    junk so it is hidden from every thread and never relayed — rather than dropped. Losing
+    it would mean losing the only evidence of a failed text, and the marker is what makes
+    the difference between "kept where somebody can look at it" and "in a customer's
+    conversation".
+    """
+    try:
+        async with SessionLocal() as db:
+            outcome = await dlr.apply(db, receipt)
+            if not outcome["applied"] and outcome["reason"] != "already applied":
+                await _keep_orphan_receipt(db, receipt, outcome["reason"])
+    except Exception:  # noqa: BLE001 - the webhook's 200 is worth more than this receipt
+        logger.exception("bulkvs: applying delivery receipt %s failed", receipt.receipt_id)
+
+
+async def _keep_orphan_receipt(db, receipt, why: str) -> None:
+    """Store a receipt we could not place, marked so nothing ever shows or relays it."""
+    evt = _adapter.parse_message_event(receipt.raw)
+    msg = await ingest_message_event(db, "bulkvs", evt)
+    raw = dict(msg.raw_payload or {})
+    raw[DLR_JUNK_KEY] = {"id": receipt.receipt_id, "stat": receipt.stat,
+                         "err": receipt.err, "uncorrelated": why}
+    msg.raw_payload = raw
+    # Never relayed to GoHighLevel and never to the CRM: it is not a message.
+    msg.relayed_to_ghl = True
+    await db.commit()
+    logger.warning("bulkvs: kept delivery receipt %s as hidden junk — %s",
+                   receipt.receipt_id, why)
 
 
 def _carrier_detail(body: dict) -> str:
