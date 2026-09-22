@@ -42,8 +42,40 @@ TOOLS: dict[str, dict] = {
         "kind": IN_CALL,
         "exit_port": None,
         "description": "Send a follow-up SMS to the caller during the call.",
+        # NOT implemented by owen_voice, which is the engine that answers real calls. Its
+        # registry has three tools and no send_sms, and `enabled_tools` there ignores names
+        # it does not know -- so an agent toggling this on got NO error, NO log line and no
+        # SMS. Saying so here is what lets `validate_agent_config` refuse it at activation
+        # instead of an operator discovering it from a customer who never got their text.
+        "engines": ("openai_realtime", "dummy"),
     },
 }
+
+# Tools with no `engines` key run everywhere. Only a tool that SOME engine cannot honour
+# needs to name the ones that can.
+ALL_ENGINES = "*"
+
+
+def engines_for(name: str) -> tuple[str, ...] | str:
+    """Which engines implement `name`, or ALL_ENGINES."""
+    return TOOLS.get(name, {}).get("engines", ALL_ENGINES)
+
+
+def unsupported_tools(toggles: dict | None, engine: str) -> list[str]:
+    """Toggled-on tools this engine does not implement, in registry order.
+
+    The check that stops a capability being silently dropped between two services that
+    each hold their own copy of the registry.
+    """
+    toggles = toggles or {}
+    out = []
+    for name in TOOLS:
+        if not toggles.get(name):
+            continue
+        engines = engines_for(name)
+        if engines != ALL_ENGINES and engine not in engines:
+            out.append(name)
+    return out
 
 # The ports a session may return. `default` / `failed` are interpreter-level (not tools):
 # `default` = the agent finished with no explicit exit tool; `failed` = the session errored.

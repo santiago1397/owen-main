@@ -11,8 +11,8 @@ Kept pure (no DB/ORM import) so it is unit-testable and reusable from the runtim
 
 from __future__ import annotations
 
-from app.agents.session import AgentSpec, _ENGINES
-from app.agents.tools import TOOLS
+from app.agents.session import AgentSpec, _ENGINES, select_voice_agent_engine
+from app.agents.tools import TOOLS, engines_for, unsupported_tools
 from app.flows.service import next_version_number
 
 __all__ = ["next_version_number", "build_spec", "validate_agent_config",
@@ -88,6 +88,24 @@ def validate_agent_config(config: dict | None) -> tuple[list[str], list[str]]:
     for name in tools:
         if name not in TOOLS:
             errors.append(f"unknown tool '{name}' (not in the fixed tool registry)")
+
+    # ...and a tool this agent's ENGINE cannot honour. The registry lives in two places —
+    # here, and again in owen-voice where the model actually runs — because they are two
+    # services with two images and no shared package. `enabled_tools` on both sides ignores
+    # names it does not recognise, which is right for a stale toggle and wrong for a real
+    # capability gap: `send_sms` is toggleable here, absent there, and was therefore dropped
+    # in silence on every real call. An operator finds out at activation now.
+    # Checked against the EFFECTIVE engine, not the declared one: `VOICE_AGENT_ENGINE` is a
+    # global override, so an agent that declares nothing validates as `dummy` while every
+    # real call runs on owen_voice — which is the exact pair where send_sms goes missing.
+    # `select_voice_agent_engine` falls back to the declared value when settings are not
+    # importable (the dependency-light sandbox), so this stays testable offline.
+    effective = select_voice_agent_engine(cfg.get("engine"))
+    for name in unsupported_tools(tools, effective):
+        errors.append(
+            f"tool '{name}' is not implemented by the '{effective}' engine "
+            f"(implemented by: {', '.join(engines_for(name))})"
+        )
 
     # Custom HTTP tools (AI_AGENT_SPEC D6). Validated at activation so an operator is
     # told their tool is broken here, rather than it failing in front of a caller.
