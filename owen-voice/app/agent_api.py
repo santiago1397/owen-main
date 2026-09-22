@@ -96,6 +96,11 @@ class SessionOut(BaseModel):
     # The bridge recording, if one was made. OWEN registers it: this bridge belongs to
     # owen-voice's Stasis app, so its RecordingFinished never reaches OWEN's consumer.
     recording_name: str = ""
+    # How long the conversation lasted, in seconds. OWEN has always had to report this to
+    # the CRM as `null` because it was measured here and never sent: `MediaSession` has
+    # held the figure all along. A CRM timeline entry that cannot say how long the agent
+    # kept someone on the phone cannot answer the first question asked of a new agent.
+    duration_s: float = 0.0
 
 
 def _auth(key: Optional[str]) -> None:
@@ -145,7 +150,8 @@ async def run_session(
         ok = await attach_media_to_call(session)
         if not ok:
             logger.error("sessions: could not attach media for linkedid=%s", body.linkedid)
-            return SessionOut(port="failed", session_uuid=session.session_uuid)
+            return SessionOut(port="failed", session_uuid=session.session_uuid,
+                              duration_s=session.duration_s)
 
         # Block until the conversation ends: the caller hangs up, a guardrail fires, or the
         # agent takes an exit tool. `done` is set by the connection handler in every case.
@@ -167,10 +173,12 @@ async def run_session(
             metrics=session.agent_metrics(),
             turn_metrics=session.turn_metrics,
             recording_name=session.recording_name or "",
+            duration_s=session.duration_s,
         )
     except Exception:  # noqa: BLE001 - never raise into the flow; `failed` routes to fallback
         logger.exception("sessions: run failed for linkedid=%s", body.linkedid)
-        return SessionOut(port="failed", session_uuid=session.session_uuid)
+        return SessionOut(port="failed", session_uuid=session.session_uuid,
+                          duration_s=session.duration_s)
     finally:
         await teardown_session(session)
         _active -= 1

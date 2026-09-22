@@ -158,7 +158,11 @@ class RemoteVoiceAgentSession:
         # Agent observability. Carried on the same result the transcript rides, so the
         # interpreter can stamp it onto the call's event timeline without a second round trip
         # and without owen-voice needing database access it deliberately does not have (D2).
-        for key in ("metrics", "turn_metrics", "recording_name"):
+        # `duration_s` rides the same way (it is what the CRM report reports as the call's
+        # length; it used to be hardcoded null there because nothing carried it back).
+        # Falsy is skipped like the rest: a session that never connected has nothing to say
+        # about how long it lasted, and 0.0 would read as an instant hang-up.
+        for key in ("metrics", "turn_metrics", "recording_name", "duration_s"):
             if data.get(key):
                 result = dict(result)
                 result[key] = data[key]

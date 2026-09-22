@@ -35,6 +35,7 @@ from app.core.config import settings
 from app.db import SessionLocal
 from app.flows.interpreter import AriControl, FlowInterpreter
 from app.agents.capture import normalise_capture
+from app.agents.report import build_report_body
 from app.services.ai_cost import PROVENANCE_DERIVED, charges_for_session, session_total
 from app.flows.transfer import resolve_transfer_target
 from app.models import (Agent, AgentSlot, AgentVersion, Call, CallCapture, CallCharge,
@@ -387,11 +388,18 @@ def _dial_target_of(event_type: str, payload: dict) -> Optional[str]:
     return str(target) if target else None
 
 
-async def _enqueue_crm_report(spec, lid: str, caller_number, result) -> None:
+async def _enqueue_crm_report(spec, lid: str, caller_number, port: str,
+                              data: dict | None) -> None:
     """Queue a `crm_report` job if this agent has a provider configured (C15).
 
     Resolved to a plain URL here, exactly as the lookup direction is, so the worker never
-    learns which CRM is behind it and a future in-house one needs no code in OWEN."""
+    learns which CRM is behind it and a future in-house one needs no code in OWEN.
+
+    Takes the FINAL `port` and `data` rather than the raw `AgentResult`: a transfer's
+    destination is only known once the caller has been moved, and this used to run before
+    that, so `transfer` was reported as null on every single call. The body itself is built
+    by `agents.report.build_report_body`, which is importable without httpx or sqlalchemy
+    and is where that is now pinned by a test."""
     cfg = spec.config.get("context_provider") if isinstance(spec.config, dict) else None
     if not isinstance(cfg, dict):
         return
@@ -411,10 +419,6 @@ async def _enqueue_crm_report(spec, lid: str, caller_number, result) -> None:
     else:
         return
 
-    data = result.data or {}
-    captures = []
-    if isinstance(data.get("captured"), dict) and data["captured"]:
-        captures.append({"fields": normalise_capture(data["captured"])})
     link = ""
     if settings.OWEN_CALL_URL_TEMPLATE:
         link = settings.OWEN_CALL_URL_TEMPLATE.replace("{linkedid}", lid)
@@ -423,15 +427,10 @@ async def _enqueue_crm_report(spec, lid: str, caller_number, result) -> None:
         await queue.enqueue(db, "crm_report", {
             "url": url,
             "headers": headers,
-            "body": {
-                "linkedid": lid,
-                "caller_number": caller_number or "",
-                "outcome": result.port,
-                "duration_s": None,
-                "captures": captures,
-                "transfer": (data.get("transfer") or {}).get("name"),
-                "owen_url": link or None,
-            },
+            "body": build_report_body(
+                linkedid=lid, caller_number=caller_number, port=port,
+                data=data, owen_url=link,
+            ),
         })
         await db.commit()
 
@@ -640,18 +639,16 @@ async def run_flow_for_stasis(event: dict, ari: AriControl) -> None:
                         "flow runtime: registering agent recording failed (linkedid=%s)", lid
                     )
 
-            # CRM timeline entry (CRM_CONTEXT_SPEC C10). Enqueued, never awaited: the caller
-            # is still on the line and a slow CRM must not hold the flow.
-            try:
-                await _enqueue_crm_report(spec, lid, ctx.caller_number, result)
-            except Exception:  # noqa: BLE001 - reporting must never affect the call
-                logger.exception("flow runtime: queuing the CRM report failed (linkedid=%s)", lid)
-
             # D9: the agent may have named a destination from its OWN declared allowlist. If
             # it did, move the caller there and tell the interpreter to stand down. If it
             # only said "transfer" with no destination, fall through unchanged so the flow
             # author's `transfer` edge still decides — the allowlist adds a capability, it
             # does not take the graph's away.
+            #
+            # This runs BEFORE the CRM report, and that order is the fix for a bug, not a
+            # tidy-up: the destination is only written into `data` here, so a report queued
+            # first said `transfer: null` on every transferred call ever made.
+            port, data = result.port, (result.data or {})
             if result.port == "transfer":
                 chosen = resolve_transfer_target(
                     (version.config or {}).get("transfer_targets"),
@@ -660,7 +657,7 @@ async def run_flow_for_stasis(event: dict, ari: AriControl) -> None:
                 if chosen is not None:
                     moved = await _do_agent_transfer(ari, channel_id, lid, chosen)
                     if moved:
-                        return ("transferred", {**(result.data or {}), "transfer": chosen})
+                        port, data = "transferred", {**(result.data or {}), "transfer": chosen}
                 elif (result.data or {}).get("destination"):
                     # Named something not on its allowlist. Loud, because it is either a
                     # misconfigured agent or a caller talking it into somewhere it may not go.
@@ -669,7 +666,17 @@ async def run_flow_for_stasis(event: dict, ari: AriControl) -> None:
                         "(linkedid=%s); falling back to the graph's transfer edge",
                         (result.data or {}).get("destination"), lid,
                     )
-            return (result.port, result.data)
+
+            # CRM timeline entry (CRM_CONTEXT_SPEC C10). Enqueued, never awaited: the caller
+            # is still on the line — or already with the person they were transferred to —
+            # and a slow CRM must not hold the flow. Queued with the FINAL outcome, so a
+            # transferred call reports where it went.
+            try:
+                await _enqueue_crm_report(spec, lid, ctx.caller_number, port, data)
+            except Exception:  # noqa: BLE001 - reporting must never affect the call
+                logger.exception("flow runtime: queuing the CRM report failed (linkedid=%s)", lid)
+
+            return (port, data)
         except Exception:  # noqa: BLE001 - never dead-air; the node takes `failed`/fallback
             logger.exception("flow runtime: ai_agent run failed (linkedid=%s)", lid)
             return ("failed", {})
