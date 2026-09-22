@@ -21,6 +21,20 @@ bad()  { printf '    FAIL: %s\n' "$1"; fail=1; }
 PY="${PY:-python}"
 [ -x backend/.venv/Scripts/python.exe ] && PY="backend/.venv/Scripts/python.exe"
 [ -x backend/.venv/bin/python ] && PY="backend/.venv/bin/python"
+# ...and make it ABSOLUTE. The test loops below `cd` into backend/ and owen-voice/, so a
+# relative interpreter was prefixed with `../` to compensate. That works for the venv paths
+# and breaks for the fallback: with no venv present, PY is the bare word `python` and every
+# single test ran as `../python` -- "No such file or directory", 30-odd FAILs, and a gate
+# that reports CHECKS FAILED on a tree where nothing is wrong. A gate that cries wolf is a
+# gate that gets skipped with SKIP_CHECKS=1, which is how it would then miss a real failure.
+case "$PY" in
+  /*|[A-Za-z]:[\/]*) ;;                      # already absolute (unix or windows)
+  */*) PY="$PWD/$PY" ;;                      # relative path -> anchor to the repo root
+  *)   PY="$(command -v "$PY" || echo "$PY")" ;;   # bare command -> resolve on PATH
+esac
+[ -x "$PY" ] || { printf "
+    FAIL: no usable python (%s)
+" "$PY"; exit 1; }
 
 step "pyflakes (undefined names, unreachable imports)"
 if "$PY" -m pyflakes --version >/dev/null 2>&1; then
@@ -37,7 +51,7 @@ fi
 step "backend tests"
 for t in backend/tests/test_*.py; do
   name=$(basename "$t" .py)
-  if (cd backend && PYTHONIOENCODING=utf-8 "../$PY" -m "tests.$name" >/tmp/owen-check.$name 2>&1); then
+  if (cd backend && PYTHONIOENCODING=utf-8 "$PY" -m "tests.$name" >/tmp/owen-check.$name 2>&1); then
     printf '    ok   %s\n' "$name"
   else
     printf '    FAIL %s\n' "$name"; tail -5 /tmp/owen-check.$name | sed 's/^/         /'; fail=1
@@ -47,7 +61,7 @@ done
 step "owen-voice tests"
 for t in owen-voice/tests/test_*.py; do
   name=$(basename "$t" .py)
-  if (cd owen-voice && PYTHONIOENCODING=utf-8 "../$PY" -m "tests.$name" >/tmp/owen-check.v.$name 2>&1); then
+  if (cd owen-voice && PYTHONIOENCODING=utf-8 "$PY" -m "tests.$name" >/tmp/owen-check.v.$name 2>&1); then
     printf '    ok   %s\n' "$name"
   else
     printf '    FAIL %s\n' "$name"; tail -5 /tmp/owen-check.v.$name | sed 's/^/         /'; fail=1
