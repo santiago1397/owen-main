@@ -504,6 +504,31 @@ class Conversation:
         self._draft = None
         self._draft_for = ""
 
+    def _limit(self, name: str, fallback: int) -> float:
+        """This agent version's guardrail, or the env default.
+
+        OWEN has always SENT these per agent (`agents/remote.py`, from the pinned
+        version's `guardrails`) and `agent_api` has always accepted them — but only to
+        size the request timeout. The guardrail itself read the env, so an agent
+        configured to hang up after 60s ran until the env's 300s and an operator who
+        tightened a chatty agent watched nothing change. Read the agent first here, which
+        is the one place both values are decided.
+
+        A value of 0 means "no limit" and is honoured as such, so an agent can turn a
+        guardrail off without the env default silently taking over: `or` would read 0 as
+        absent. Anything unparseable falls back rather than disarming the guardrail.
+        """
+        raw = self.agent.get(name)
+        if raw is None or raw == "":
+            return float(fallback or 0)
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            logger.warning("session %s: agent %s=%r is not a number; using %s",
+                           self.session.session_uuid, name, raw, fallback)
+            return float(fallback or 0)
+        return value if value >= 0 else float(fallback or 0)
+
     def _guardrail(self) -> Optional[str]:
         # A dead STT stream ends the call on the NEXT frame rather than waiting for the
         # silence guardrail to notice 30s later. The port was already pinned to `failed` by
@@ -511,11 +536,11 @@ class Conversation:
         if self.session.stt_failed:
             return "stt_stream_failed"
         now = time.monotonic()
-        if settings.AGENT_MAX_CALL_SECONDS and \
-                now - self._started >= settings.AGENT_MAX_CALL_SECONDS:
+        max_call = self._limit("max_call_seconds", settings.AGENT_MAX_CALL_SECONDS)
+        if max_call and now - self._started >= max_call:
             return "max_call_seconds"
-        if settings.AGENT_MAX_SILENCE_SECONDS and \
-                now - self._last_voice >= settings.AGENT_MAX_SILENCE_SECONDS:
+        max_silence = self._limit("max_silence_seconds", settings.AGENT_MAX_SILENCE_SECONDS)
+        if max_silence and now - self._last_voice >= max_silence:
             return "max_silence_seconds"
         return None
 
