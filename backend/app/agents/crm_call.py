@@ -89,7 +89,8 @@ def ai_call_record(*, agent_name: str, version, outcome: str, captured,
 
 
 def report_extra(*, agent_name: str, version, outcome: str, data: dict,
-                 campaign: str = "", owen_call_id: str = "") -> dict:
+                 campaign: str = "", owen_call_id: str = "",
+                 has_recording: bool = False) -> dict:
     """The `extra` blob for `CallEventFacts`, ready for `to_crm_event` to unpack.
 
     Returns {} when there is nothing worth saying — an agent that never ran leaves the
@@ -99,11 +100,15 @@ def report_extra(*, agent_name: str, version, outcome: str, data: dict,
     record = ai_call_record(agent_name=agent_name, version=version, outcome=outcome,
                             captured=data.get("captured"), campaign=campaign)
     text = transcript_text(data.get("transcript"))
-    if not record and not text:
+    if not record and not text and not has_recording:
         return {}
     extra: dict = {"ai_call": record} if record else {}
     if text:
         extra["transcript"] = text
     if owen_call_id:
         extra["dedupe_key"] = dedupe_key(owen_call_id)
+    if has_recording:
+        # Only ever set when a recording row with a file on disk exists. The CRM draws a
+        # player from this and nothing else, and a player over a 404 is worse than none.
+        extra["has_recording"] = True
     return extra

@@ -144,12 +144,53 @@ async def handle_recording_fetch(db: AsyncSession, payload: dict) -> None:
                     logger.warning("recording_fetch: remote delete failed for %s: %s",
                                    rec.provider_recording_sid, exc)
 
+    # The CRM's thread draws a player from `recording_url`, and that is only true once the
+    # audio is ON DISK here — which is now. The call itself was reported the moment the
+    # agent hung up, minutes earlier, so this is a SECOND report carrying the same
+    # dedupe_key: the CRM folds it into the row that is already there rather than writing
+    # a second call. Agent calls only: a call a person handled has no CRM row to enrich.
+    await _tell_crm_the_recording_is_ready(db, rec)
+
     # Next stage: transcribe (unless already done, or the caller asked to skip it —
     # e.g. a raw historical backfill that only wants the audio mirrored locally, no
     # transcription/analysis cost. Leaving transcribed=False also means retention never
     # prunes the file, since the sweep only deletes transcribed recordings).
     if not rec.transcribed and not payload.get("skip_transcribe"):
         await queue.enqueue(db, "transcribe", {"recording_id": str(rec.id)})
+
+
+async def _tell_crm_the_recording_is_ready(db: AsyncSession, rec) -> None:
+    """Re-report an AGENT call to the CRM now that its audio can be played.
+
+    Best-effort in every direction. The recording pipeline's job is to have the audio; a
+    CRM that is switched off, unreachable or simply uninterested must not fail a fetch that
+    already succeeded, so every failure here is logged and swallowed.
+    """
+    try:
+        call = await db.get(Call, rec.call_id) if rec.call_id else None
+        if call is None or call.agent_version_id is None:
+            return                      # not an agent call: the CRM has no row to enrich
+        from app.agents.crm_call import dedupe_key
+        from app.integrations.crm import push as crm_push
+        from app.integrations.crm.events import CallEventFacts
+
+        number = await db.get(Number, call.number_id) if call.number_id else None
+        caller = await db.get(Caller, call.caller_id) if call.caller_id else None
+        await crm_push.enqueue_call_event(CallEventFacts(
+            phase="ended",
+            owen_call_id=str(call.id),
+            linkedid=str(call.provider_call_sid or ""),
+            caller_number=str(getattr(caller, "phone_number", "") or ""),
+            dialed_number=str(getattr(number, "phone_number", "") or ""),
+            direction=str(call.direction or "inbound"),
+            outcome="answered",
+            duration_seconds=call.duration_seconds,
+            # The same key as the first report: this COMPLETES that row, it does not add
+            # another. Everything else the CRM already has is left alone by its merge.
+            extra={"dedupe_key": dedupe_key(str(call.id)), "has_recording": True},
+        ))
+    except Exception:  # noqa: BLE001 - the audio is stored; the CRM is a nice-to-have
+        logger.exception("recording_fetch: telling the CRM about %s failed", rec.id)
 
 
 async def _transcribe_stereo(engine, audio_path: str) -> tuple[str, list] | None:

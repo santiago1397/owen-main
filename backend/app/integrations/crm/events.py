@@ -111,6 +111,19 @@ _OUTCOME_TO_CRM_STATUS = {
 }
 
 
+# The CRM route that plays a call's audio. It proxies `GET /api/crm-link/recordings/{id}`
+# here rather than being handed an OWEN URL, exactly as the Quo mirror does with
+# `openphone.CRM_RECORDING_PATH`. Two repositories agreeing on a string rots silently, so
+# both ends pin it in a test: `test_agent_crm_report.py` here, `test_ai_call_ingest.py`
+# there.
+CRM_RECORDING_PATH = "/api/owen/recordings"
+
+
+def crm_recording_url(owen_call_id: str) -> str:
+    """Where the CRM should fetch this call's audio, or "" when we have no call id."""
+    return "%s/%s" % (CRM_RECORDING_PATH, owen_call_id) if owen_call_id else ""
+
+
 def crm_call_status(outcome: str | None) -> str:
     """Map an OWEN ring outcome onto the CRM's five-value vocabulary.
 
@@ -300,11 +313,17 @@ def to_crm_event(facts: CallEventFacts, contact_id: int | None = None) -> dict[s
             body[key] = value
     if facts.duration_seconds is not None:
         body["duration_seconds"] = max(0, int(facts.duration_seconds))
-    # The CRM's column is a URL, and OWEN's recordings are served behind a short-lived
-    # signed playback token that would be expired by the time anyone clicked it. Sending the
-    # RECORDING ID in the body text (above) and leaving this null is honest; a permanent
-    # unauthenticated media URL is a decision for the owner, not a side effect of this build.
-    body["recording_url"] = None
+    # AMENDED 2026-09-22. This used to be flatly null, and the reason was sound: OWEN's own
+    # playback is a short-lived signed token for a signed-in OWEN user, so a URL written
+    # onto an event would be expired before anyone clicked it, and a permanent
+    # unauthenticated media URL was not this build's decision to make.
+    #
+    # Neither is what happens now. The CRM PROXIES the audio through its own authenticated
+    # route, the way it already plays mirrored Quo calls, so what travels is a path on the
+    # CRM and no credential at all. It is sent only when a recording is known to exist:
+    # a player over a 404 is worse than no player.
+    body["recording_url"] = (crm_recording_url(facts.owen_call_id)
+                             if extra.get("has_recording") else None)
     return body
 
 
