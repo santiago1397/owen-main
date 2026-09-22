@@ -284,6 +284,20 @@ def to_crm_event(facts: CallEventFacts, contact_id: int | None = None) -> dict[s
     body["type"] = CRM_TYPE_CALL
     body["direction"] = direction
     body["call_status"] = crm_call_status(facts.outcome)
+    # What an AI AGENT did on this call (2026-09-22), when one answered it. Carried in
+    # `extra` rather than as new dataclass fields so a job enqueued by an older deploy
+    # still drains against this one, and so a CRM that knows nothing of agents simply
+    # ignores keys it does not declare.
+    #
+    # `dedupe_key` is the important one, and it is not agent-specific in spirit: the
+    # worker retries a delivery five times, and a POST that timed out AFTER the CRM
+    # inserted the row is indistinguishable from one that never arrived. Without a key
+    # the retry writes a SECOND call on the customer's thread.
+    extra = facts.extra if isinstance(facts.extra, dict) else {}
+    for key in ("dedupe_key", "transcript", "ai_call"):
+        value = extra.get(key)
+        if value not in (None, "", {}, []):
+            body[key] = value
     if facts.duration_seconds is not None:
         body["duration_seconds"] = max(0, int(facts.duration_seconds))
     # The CRM's column is a URL, and OWEN's recordings are served behind a short-lived
@@ -325,6 +339,23 @@ def validate_crm_event(body: dict) -> list[str]:
     duration = body.get("duration_seconds")
     if duration is not None and not isinstance(duration, int):
         problems.append("duration_seconds must be an int or absent")
+    # The agent fields (2026-09-22). Checked here for the same reason as everything else
+    # above: the CRM answers a bad shape with a 422, and a 422 inside a retry loop is five
+    # deliveries of the same mistake before anyone sees it.
+    ai_call = body.get("ai_call")
+    if ai_call is not None and not isinstance(ai_call, dict):
+        problems.append("ai_call must be an object or absent")
+    key = body.get("dedupe_key")
+    if key is not None:
+        if not isinstance(key, str):
+            problems.append("dedupe_key must be a string or absent")
+        elif len(key) > 200:
+            # The CRM's column, and a truncated key is worse than none: it would collide
+            # with a DIFFERENT call and silently swallow it as a duplicate.
+            problems.append("dedupe_key is longer than the CRM's 200-character column")
+    transcript = body.get("transcript")
+    if transcript is not None and not isinstance(transcript, str):
+        problems.append("transcript must be a string or absent")
     return problems
 
 
