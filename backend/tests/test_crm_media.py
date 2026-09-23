@@ -574,8 +574,11 @@ def test_the_crm_link_router_gained_exactly_two_routes():
         ("/api/crm-link/email-jobs", ("POST",)),
         ("/api/crm-link/media", ("POST",)),
         ("/api/crm-link/messages/{message_id}/media/{index}", ("GET",)),
+        # The AI agent's call audio (2026-09-22). The CRM proxies it onto the
+        # thread; GET only, and it reads a file this box already recorded.
+        ("/api/crm-link/recordings/{call_id}", ("GET",)),
     ])
-    check("exactly the ten we expect, no more and no fewer", paths == expected)
+    check("exactly the eleven we expect, no more and no fewer", paths == expected)
 
 
 def test_the_crm_event_now_carries_how_many_pictures_and_still_no_urls():

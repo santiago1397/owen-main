@@ -111,6 +111,19 @@ _OUTCOME_TO_CRM_STATUS = {
 }
 
 
+# The CRM route that plays a call's audio. It proxies `GET /api/crm-link/recordings/{id}`
+# here rather than being handed an OWEN URL, exactly as the Quo mirror does with
+# `openphone.CRM_RECORDING_PATH`. Two repositories agreeing on a string rots silently, so
+# both ends pin it in a test: `test_agent_crm_report.py` here, `test_ai_call_ingest.py`
+# there.
+CRM_RECORDING_PATH = "/api/owen/recordings"
+
+
+def crm_recording_url(owen_call_id: str) -> str:
+    """Where the CRM should fetch this call's audio, or "" when we have no call id."""
+    return "%s/%s" % (CRM_RECORDING_PATH, owen_call_id) if owen_call_id else ""
+
+
 def crm_call_status(outcome: str | None) -> str:
     """Map an OWEN ring outcome onto the CRM's five-value vocabulary.
 
@@ -284,13 +297,33 @@ def to_crm_event(facts: CallEventFacts, contact_id: int | None = None) -> dict[s
     body["type"] = CRM_TYPE_CALL
     body["direction"] = direction
     body["call_status"] = crm_call_status(facts.outcome)
+    # What an AI AGENT did on this call (2026-09-22), when one answered it. Carried in
+    # `extra` rather than as new dataclass fields so a job enqueued by an older deploy
+    # still drains against this one, and so a CRM that knows nothing of agents simply
+    # ignores keys it does not declare.
+    #
+    # `dedupe_key` is the important one, and it is not agent-specific in spirit: the
+    # worker retries a delivery five times, and a POST that timed out AFTER the CRM
+    # inserted the row is indistinguishable from one that never arrived. Without a key
+    # the retry writes a SECOND call on the customer's thread.
+    extra = facts.extra if isinstance(facts.extra, dict) else {}
+    for key in ("dedupe_key", "transcript", "ai_call"):
+        value = extra.get(key)
+        if value not in (None, "", {}, []):
+            body[key] = value
     if facts.duration_seconds is not None:
         body["duration_seconds"] = max(0, int(facts.duration_seconds))
-    # The CRM's column is a URL, and OWEN's recordings are served behind a short-lived
-    # signed playback token that would be expired by the time anyone clicked it. Sending the
-    # RECORDING ID in the body text (above) and leaving this null is honest; a permanent
-    # unauthenticated media URL is a decision for the owner, not a side effect of this build.
-    body["recording_url"] = None
+    # AMENDED 2026-09-22. This used to be flatly null, and the reason was sound: OWEN's own
+    # playback is a short-lived signed token for a signed-in OWEN user, so a URL written
+    # onto an event would be expired before anyone clicked it, and a permanent
+    # unauthenticated media URL was not this build's decision to make.
+    #
+    # Neither is what happens now. The CRM PROXIES the audio through its own authenticated
+    # route, the way it already plays mirrored Quo calls, so what travels is a path on the
+    # CRM and no credential at all. It is sent only when a recording is known to exist:
+    # a player over a 404 is worse than no player.
+    body["recording_url"] = (crm_recording_url(facts.owen_call_id)
+                             if extra.get("has_recording") else None)
     return body
 
 
@@ -325,6 +358,23 @@ def validate_crm_event(body: dict) -> list[str]:
     duration = body.get("duration_seconds")
     if duration is not None and not isinstance(duration, int):
         problems.append("duration_seconds must be an int or absent")
+    # The agent fields (2026-09-22). Checked here for the same reason as everything else
+    # above: the CRM answers a bad shape with a 422, and a 422 inside a retry loop is five
+    # deliveries of the same mistake before anyone sees it.
+    ai_call = body.get("ai_call")
+    if ai_call is not None and not isinstance(ai_call, dict):
+        problems.append("ai_call must be an object or absent")
+    key = body.get("dedupe_key")
+    if key is not None:
+        if not isinstance(key, str):
+            problems.append("dedupe_key must be a string or absent")
+        elif len(key) > 200:
+            # The CRM's column, and a truncated key is worse than none: it would collide
+            # with a DIFFERENT call and silently swallow it as a duplicate.
+            problems.append("dedupe_key is longer than the CRM's 200-character column")
+    transcript = body.get("transcript")
+    if transcript is not None and not isinstance(transcript, str):
+        problems.append("transcript must be a string or absent")
     return problems
 
 

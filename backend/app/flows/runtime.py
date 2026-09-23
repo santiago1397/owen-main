@@ -38,8 +38,9 @@ from app.agents.capture import normalise_capture
 from app.agents.report import build_report_body
 from app.services.ai_cost import PROVENANCE_DERIVED, charges_for_session, session_total
 from app.flows.transfer import resolve_transfer_target
+from app.integrations.crm.events import CallEventFacts
 from app.models import (Agent, AgentSlot, AgentVersion, Call, CallCapture, CallCharge,
-                        CallEvent, Flow, FlowVersion, Number, Transcription)
+                        CallEvent, Campaign, Flow, FlowVersion, Number, Transcription)
 from app.providers.asterisk import linkedid as _linkedid
 from app.services import queue, sms
 from app.services.ingestion import _get_or_create_provider
@@ -388,6 +389,70 @@ def _dial_target_of(event_type: str, payload: dict) -> Optional[str]:
     return str(target) if target else None
 
 
+async def _report_agent_call_to_crm(*, lid: str, dialed: str, caller_number: str | None,
+                                    agent_name: str, version, port: str,
+                                    data: dict) -> None:
+    """Tell the CRM that an AI agent answered this call, and what it heard.
+
+    Phase 1 of the CRM's voice-agent amendment (ghl-clone DECISIONS.md, 2026-09-22).
+    Without this the CRM shows nothing for an AI-answered call — the customer's thread has
+    a gap exactly where the company spoke to them.
+
+    It goes through the SAME `crm_report` job, app-side adapter and `POST /api/events` the
+    bound-DID path uses. A second delivery mechanism would mean a second retry policy and a
+    second thing that can quietly stop working.
+
+    Imported lazily and wrapped by its caller: a CRM that is switched off, unreachable or
+    misconfigured must never change what the caller hears.
+    """
+    from app.agents.crm_call import report_extra
+    from app.integrations.crm import push as crm_push
+
+    async with SessionLocal() as db:
+        owen_call_id, _rec, _trans = await crm_push.call_artifacts(db, lid)
+        campaign = await _campaign_name_for(db, dialed)
+
+    extra = report_extra(agent_name=agent_name, version=version, outcome=port,
+                         data=data, campaign=campaign,
+                         owen_call_id=owen_call_id or lid)
+    if not extra:
+        return                      # nothing an agent did; nothing to say
+
+    duration = data.get("duration_s") if isinstance(data, dict) else None
+    await crm_push.enqueue_call_event(CallEventFacts(
+        phase="ended",
+        owen_call_id=owen_call_id or "",
+        linkedid=lid,
+        caller_number=caller_number or "",
+        dialed_number=dialed or "",
+        direction="inbound",
+        # The agent picked up, so the call was ANSWERED whatever port it exited on. The
+        # port is the agent's outcome and rides in `extra`; `outcome` here is the CALL's,
+        # and reporting "failed" would file a completed conversation as a missed call.
+        outcome="answered",
+        duration_seconds=int(duration) if isinstance(duration, (int, float)) else None,
+        extra=extra,
+    ))
+
+
+async def _campaign_name_for(db, dialed: str) -> str:
+    """The campaign that owns the dialled DID, for attribution on a lead made later.
+
+    Best-effort and never raises: a missing campaign is a blank field on a CRM thread, and
+    a failed lookup must not cost the report that carries the transcript.
+    """
+    if not dialed:
+        return ""
+    try:
+        row = (await db.execute(
+            select(Campaign.name).join(Number, Number.campaign_id == Campaign.id)
+            .where(Number.phone_number == dialed).limit(1))).scalar_one_or_none()
+        return str(row or "")
+    except Exception:  # noqa: BLE001 - attribution is a nice-to-have on the timeline entry
+        logger.exception("flow runtime: campaign lookup failed for %s", dialed)
+        return ""
+
+
 async def _enqueue_crm_report(spec, lid: str, caller_number, port: str,
                               data: dict | None) -> None:
     """Queue a `crm_report` job if this agent has a provider configured (C15).
@@ -596,6 +661,12 @@ async def run_flow_for_stasis(event: dict, ari: AriControl) -> None:
                     return ("failed", {})
                 await _pin_agent_version(dba, provider_id, lid, version.id)
                 await dba.commit()
+                # The NAME, for the CRM's thread. The node carries an `agent_name` too, but
+                # that is a label the flow editor wrote when the node was drawn: it goes
+                # stale the moment an agent is renamed, and a CRM row saying which agent
+                # answered is worth a lookup in the session that is already open.
+                agent_row = await dba.get(Agent, version.agent_id)
+                agent_name = str(getattr(agent_row, "name", "") or "")
                 spec = build_spec(str(version.agent_id), str(version.id), version.config)
             session = get_session_for_agent(spec)
             ctx = AgentCallContext(
@@ -675,6 +746,19 @@ async def run_flow_for_stasis(event: dict, ari: AriControl) -> None:
                 await _enqueue_crm_report(spec, lid, ctx.caller_number, port, data)
             except Exception:  # noqa: BLE001 - reporting must never affect the call
                 logger.exception("flow runtime: queuing the CRM report failed (linkedid=%s)", lid)
+
+            # ...and the CRM's own thread (2026-09-22, phase 1). Separate from the report
+            # above on purpose: that one is the configurable `context_provider` contract and
+            # is off unless an agent declares one, while this is the CRM link the company
+            # actually runs. Both are best-effort; neither may reach the caller.
+            try:
+                await _report_agent_call_to_crm(
+                    lid=lid, dialed=str(dialed), caller_number=ctx.caller_number,
+                    agent_name=agent_name, version=version.version, port=port, data=data)
+            except Exception:  # noqa: BLE001 - the CRM never affects the call
+                logger.exception(
+                    "flow runtime: reporting the agent call to the CRM failed "
+                    "(linkedid=%s)", lid)
 
             return (port, data)
         except Exception:  # noqa: BLE001 - never dead-air; the node takes `failed`/fallback

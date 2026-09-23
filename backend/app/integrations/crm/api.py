@@ -63,7 +63,7 @@ from app.integrations.crm.events import (CallEventFacts, DeliveryReceiptFacts,
                                          MessageEventFacts, to_crm_delivery_receipt,
                                          to_crm_event, to_crm_message_event,
                                          validate_crm_delivery_receipt, validate_crm_event)
-from app.models import InboundEmail, Message, Number
+from app.models import InboundEmail, Message, Number, Recording
 from app.services import queue, sms
 from app.telephony import outbound as outbound_rules
 from app.telephony.credentials import build_webrtc_credentials
@@ -815,3 +815,59 @@ async def link_health(
             for link, n in rows
         ],
     }
+
+
+@router.get("/recordings/{call_id}")
+async def stream_call_recording(
+    call_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    _key=Depends(require_scope(SCOPE_CRM_LINK)),
+) -> Response:
+    """Serve one call's recording to the CRM, by `calls.id`.
+
+    The CRM's thread plays AI-agent calls the way it already plays mirrored Quo ones: it
+    proxies the bytes from here rather than being handed a URL into OWEN. That choice is
+    the same one `integrations/openphone/api.py` made and for the same reason — OWEN's own
+    playback is a short-lived signed token for a signed-in OWEN user, and a token minted
+    when the event was written would be long expired by the time a dispatcher clicked it.
+
+    Keyed on the CALL, not the recording id, because the call is what both systems already
+    agree on: the CRM stores it as `provider_ref` / `owen_call_id`, and it is in the URL
+    this integration wrote onto the event.
+
+    Three answers the CRM can tell apart, because each needs something different:
+
+      * **404** — there is no recording for that call. Ordinary (a short call, recording
+        switched off), permanent, not worth a retry.
+      * **409** — the recording exists but has not been fetched to disk yet. The pipeline
+        runs on its own schedule; this one IS worth retrying.
+      * **502** — the file is named in the row and is not readable. That is an incident.
+    """
+    _require_enabled()
+    rec = (
+        await db.execute(
+            select(Recording)
+            .where(Recording.call_id == call_id)
+            .order_by(Recording.id)
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    if rec is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "no recording for that call")
+    path = str(rec.storage_path or "")
+    if not path:
+        raise HTTPException(status.HTTP_409_CONFLICT,
+                            "the recording has not been fetched yet")
+    try:
+        with open(path, "rb") as fh:
+            audio = fh.read()
+    except OSError as exc:
+        logger.warning("crm-link: recording %s is not readable (%s)", rec.id,
+                       type(exc).__name__)
+        raise HTTPException(status.HTTP_502_BAD_GATEWAY,
+                            "the recording could not be read") from None
+
+    # `private`, because this is one customer's call audio and must not sit in a shared
+    # cache anywhere on the path. The CRM adds its own headers for the browser.
+    return Response(content=audio, media_type="audio/wav",
+                    headers={"Cache-Control": "private, max-age=300"})

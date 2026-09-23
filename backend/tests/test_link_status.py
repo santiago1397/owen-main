@@ -11,7 +11,7 @@ The CRM's status dot polls this all day. What matters, in order:
   4. **It names nobody**: no phone number, no token, no secret, however they are configured.
   5. **The heartbeat is written by the scheduled poll, even when the poll raises**, carries
      no number, and a failure to write it never escapes into the worker.
-  6. **Nothing existing moved**: the crm-link router has its ten routes (the AHS email
+  6. **Nothing existing moved**: the crm-link router has its eleven routes (the AHS email
      branch added /email-jobs on purpose; feature/mms-media-relay added /media and
      /messages/{id}/media/{i} for pictures on a CRM text, 2026-09-16).
 
@@ -222,7 +222,7 @@ def test_it_is_mounted_as_one_get_route_and_nothing_else_moved():
     check("mounted on the app", len(mounted) == 1)
     crm = {r.path for r in main_mod.app.routes
            if getattr(r, "path", "").startswith("/api/crm-link")}
-    check(f"the CRM link has its ten routes ({len(crm)})", len(crm) == 10)
+    check(f"the CRM link has its eleven routes ({len(crm)})", len(crm) == 11)
 
 
 # --- 3. answers when things are off -------------------------------------------------------
