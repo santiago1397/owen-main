@@ -14,7 +14,9 @@ route is authenticated anyway.
     credential is needed for the internal hop. All three share one retry contract: 200
     completes the job, 502 makes the queue retry with backoff.
   * **The CRM**, asking OWEN to do something to a phone line: `POST /calls`, `POST /messages`,
-    `POST /softphone/credentials`, `GET /health`, scope `crm_link`. A NEW scope, because
+    `POST /softphone/credentials`, `GET /health`, `GET /live-calls` and
+    `POST /live-calls/{linkedid}/listen|takeover` (supervising an AI-agent call), scope
+    `crm_link`. A NEW scope, because
     `agent_write` is documented as
     "WRITE captures and notes via /api/agent-runtime/*" and using it to authorise placing a
     telephone call would falsify that description — the same objection `api/agent_runtime.py`
@@ -586,6 +588,119 @@ async def softphone_credentials(
     # visible — the CRM shows the slug next to the registration state.
     return {"ok": True, "operator": slug,
             "endpoint": crm_softphone.endpoint_for(slug), **creds}
+
+
+# --- supervising a live AI-agent call (2026-09-23, voice agents phase 1 slice E) ----------
+#
+# The CRM shows "AI is on a call with ..." with Listen / Take over (DECISIONS, 2026-09-22,
+# Q13). OWEN already does both from its own UI (`/api/telephony/monitor/*`), but that door is
+# an OWEN login and a CRM user has none — the same gap `softphone/credentials` closed.
+#
+# Gated by the crm_link key, and on top of it by the OPERATOR ROSTER: the CRM names the
+# signed-in user by email, and an email that is not a provisioned operator is refused by
+# name. That is the check that makes this safe to hand a machine key, because the leg that
+# rings is `PJSIP/operator-<slug>` — the roster is exactly the list of people who have one.
+# The CRM enforces ADMIN / DISPATCHER before it ever calls here; this side does not trust
+# that and would refuse an unrostered email whatever the CRM believed about them.
+#
+# Every live agent call is listed, not only calls on CRM-bound DIDs. That is deliberate and
+# the opposite of the media route's rule: supervision is the CRM's job for EVERY number an
+# agent answers (campaign DIDs, the Quo overflow), and a live call the CRM cannot see is one
+# nobody can take over.
+
+
+def _require_telephony() -> None:
+    if not settings.ASTERISK_ENABLED:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "telephony is not enabled")
+
+
+@router.get("/live-calls")
+async def live_calls(
+    db: AsyncSession = Depends(get_db),
+    _key=Depends(require_scope(SCOPE_CRM_LINK)),
+) -> dict:
+    """The AI-agent calls in progress, from the same owen-voice list `monitor/active` reads,
+    with who rang which number and which agent answered from OWEN's `calls` rows.
+
+    No channel or bridge id leaves here: takeover looks those up server-side, and a channel
+    id is a handle on a live customer call."""
+    _require_enabled()
+    _require_telephony()
+    from app.telephony import supervision, voice_client
+
+    sessions = await voice_client.active_sessions()
+    facts = await supervision.call_facts(
+        db, [str(s.get("linkedid")) for s in sessions if s.get("linkedid")])
+    return {"calls": supervision.describe(sessions, facts)}
+
+
+class LiveCallOperatorIn(BaseModel):
+    """Whose browser line rings. The CRM sends its signed-in user's email and nothing else;
+    there is deliberately no channel id to pass, so a CRM request cannot point a takeover
+    at a leg of its choosing."""
+
+    operator_email: str
+
+
+def _live_call_operator(body: LiveCallOperatorIn, cfg: crm_config.CrmLinkSettings,
+                        action: str) -> str:
+    """The provisioned operator slug for this email, or the softphone path's own refusal —
+    the same resolver, so "may register a softphone" and "may be rung to supervise" can never
+    disagree about who someone is."""
+    slug, refusal = crm_softphone.resolve_operator(body.operator_email, cfg.softphone_operators)
+    if refusal:
+        logger.warning("crm-link: REFUSED live-call %s for %r — %s", action,
+                       slug or "(blank)", refusal)
+        code = (status.HTTP_422_UNPROCESSABLE_ENTITY
+                if refusal == crm_softphone.REFUSE_NO_EMAIL
+                else status.HTTP_403_FORBIDDEN)
+        raise HTTPException(code, refusal)
+    return slug
+
+
+@router.post("/live-calls/{linkedid}/listen")
+async def live_call_listen(
+    linkedid: str,
+    body: LiveCallOperatorIn,
+    db: AsyncSession = Depends(get_db),
+    _key=Depends(require_scope(SCOPE_CRM_LINK)),
+) -> dict:
+    """Ring the CRM user's browser line and bridge it to a snoop of the call — heard by
+    nobody on the call. The same `monitor_listen` job OWEN's own Listen button queues."""
+    cfg = _require_enabled()
+    _require_telephony()
+    slug = _live_call_operator(body, cfg, "listen")
+    from app.telephony import supervision
+
+    try:
+        out = await supervision.queue_listen(db, operator_id=slug, linkedid=linkedid)
+    except supervision.NoLiveSession as exc:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, str(exc)) from None
+    logger.info("crm-link: queued live-call listen on %s for operator %s", linkedid, slug)
+    return {**out, "operator": slug}
+
+
+@router.post("/live-calls/{linkedid}/takeover")
+async def live_call_takeover(
+    linkedid: str,
+    body: LiveCallOperatorIn,
+    db: AsyncSession = Depends(get_db),
+    _key=Depends(require_scope(SCOPE_CRM_LINK)),
+) -> dict:
+    """Stop the agent and put the CRM user on the call with the customer, permanently. The
+    same `monitor_takeover` job OWEN's own Take over button queues, so the agent is ended
+    with the `taken_over` port and the flow stands down instead of playing voicemail."""
+    cfg = _require_enabled()
+    _require_telephony()
+    slug = _live_call_operator(body, cfg, "takeover")
+    from app.telephony import supervision
+
+    try:
+        out = await supervision.queue_takeover(db, operator_id=slug, linkedid=linkedid)
+    except supervision.NoLiveSession as exc:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, str(exc)) from None
+    logger.info("crm-link: queued live-call TAKEOVER of %s by operator %s", linkedid, slug)
+    return {**out, "operator": slug}
 
 
 class SendMessageIn(BaseModel):

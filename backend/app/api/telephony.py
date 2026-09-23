@@ -23,7 +23,7 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import current_user
+from app.api.deps import current_user, require_admin
 from app.core.config import settings
 from app.db import get_db
 from app.models import Caller, Number, User
@@ -278,6 +278,12 @@ async def outbound_call(
 # Listen to a live AI-agent call, and seize it when the agent misbehaves. The stated
 # requirement behind the whole take-over design: "I want a person to listen to the call and
 # be able to take control if the agent is not working properly."
+#
+# active / listen / takeover are `require_admin`, not `current_user`: hearing a customer's
+# live call is not something every login should be able to do (it was, until 2026-09-23).
+# `stop` stays `current_user` on purpose — it can only tear down the caller's OWN snoop and
+# is documented as unable to affect the monitored call, so gating it would only strand a
+# listener whose role changed mid-call.
 
 
 class MonitorIn(BaseModel):
@@ -286,7 +292,7 @@ class MonitorIn(BaseModel):
 
 
 @router.get("/monitor/active")
-async def monitor_active(user: User = Depends(current_user)) -> dict:
+async def monitor_active(user: User = Depends(require_admin)) -> dict:
     """Live AI-agent conversations that can be monitored or seized."""
     _require_enabled()
     from app.telephony import voice_client
@@ -297,27 +303,20 @@ async def monitor_active(user: User = Depends(current_user)) -> dict:
 @router.post("/monitor/listen")
 async def monitor_listen(
     body: MonitorIn,
-    user: User = Depends(current_user),
+    user: User = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
     """Ring this operator and let them listen in, inaudible to both caller and agent."""
     _require_enabled()
-    from app.telephony import voice_client
+    from app.telephony import supervision
 
-    sess = await voice_client.session_for(body.linkedid)
-    channel_id = body.channel_id or (sess or {}).get("call_channel_id")
-    if not channel_id:
-        raise HTTPException(404, "no live agent session for that linkedid")
-
-    operator_channel_id = uuid.uuid4().hex
-    await queue.enqueue(db, "monitor_listen", {
-        "operator_id": user.email,
-        "target_channel_id": channel_id,
-        "linkedid": body.linkedid,
-        "operator_channel_id": operator_channel_id,
-    })
+    try:
+        out = await supervision.queue_listen(db, operator_id=user.email, linkedid=body.linkedid,
+                                             channel_id=body.channel_id)
+    except supervision.NoLiveSession as exc:
+        raise HTTPException(404, str(exc)) from None
     logger.info("call.api.monitor.listen operator=%s linkedid=%s", user.email, body.linkedid)
-    return {"ok": True, "operator_channel": operator_channel_id}
+    return out
 
 
 class TakeoverIn(MonitorIn):
@@ -331,32 +330,23 @@ class TakeoverIn(MonitorIn):
 @router.post("/monitor/takeover")
 async def monitor_takeover(
     body: TakeoverIn,
-    user: User = Depends(current_user),
+    user: User = Depends(require_admin),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
     """Seize a live agent call. The agent stops, the operator is bridged to the caller, and
     the call is marked human-owned so no automated path can touch it again."""
     _require_enabled()
-    from app.telephony import voice_client
+    from app.telephony import supervision
 
-    sess = await voice_client.session_for(body.linkedid)
-    channel_id = body.channel_id or (sess or {}).get("call_channel_id")
-    if not channel_id:
-        raise HTTPException(404, "no live agent session for that linkedid")
-
-    operator_channel_id = body.operator_channel_id or uuid.uuid4().hex
-    await queue.enqueue(db, "monitor_takeover", {
-        "operator_id": user.email,
-        "linkedid": body.linkedid,
-        "target_channel_id": channel_id,
-        "operator_channel_id": operator_channel_id,
-        "call_bridge_id": (sess or {}).get("bridge_id"),
-        "snoop_channel_id": body.snoop_channel_id,
-        "monitor_bridge_id": body.monitor_bridge_id,
-        "agent_channel_id": (sess or {}).get("media_channel_id"),
-    })
+    try:
+        out = await supervision.queue_takeover(
+            db, operator_id=user.email, linkedid=body.linkedid, channel_id=body.channel_id,
+            operator_channel_id=body.operator_channel_id,
+            snoop_channel_id=body.snoop_channel_id, monitor_bridge_id=body.monitor_bridge_id)
+    except supervision.NoLiveSession as exc:
+        raise HTTPException(404, str(exc)) from None
     logger.info("call.api.monitor.takeover operator=%s linkedid=%s", user.email, body.linkedid)
-    return {"ok": True, "operator_channel": operator_channel_id, "owner": user.email}
+    return out
 
 
 class MonitorStopIn(BaseModel):

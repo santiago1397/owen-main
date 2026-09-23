@@ -558,7 +558,9 @@ def test_the_delivery_hook_still_only_relays_the_crms_own_messages():
 def test_the_crm_link_router_gained_exactly_two_routes():
     """The same fence `test_crm_softphone_creds` keeps, widened DELIBERATELY. Both new
     routes are `crm_link` scope and both are about pictures; everything else is where it
-    was, with the same methods."""
+    was, with the same methods. Since then: `/recordings/{call_id}` (2026-09-22) and the
+    three `/live-calls` routes (2026-09-23) that let the CRM supervise a live AI call —
+    see the list below for what each is for."""
     from app.integrations.crm import api as crm_api
 
     print("the crm-link route table:")
@@ -577,8 +579,15 @@ def test_the_crm_link_router_gained_exactly_two_routes():
         # The AI agent's call audio (2026-09-22). The CRM proxies it onto the
         # thread; GET only, and it reads a file this box already recorded.
         ("/api/crm-link/recordings/{call_id}", ("GET",)),
+        # Supervising a live AI-agent call from the CRM (2026-09-23, slice E): the list the
+        # CRM's "AI is on a call" banner draws, and Listen / Take over, which ring the CRM
+        # user's own browser line. Both POSTs refuse an email that is not a provisioned
+        # operator, so the key alone can never ring somebody who has no operator line.
+        ("/api/crm-link/live-calls", ("GET",)),
+        ("/api/crm-link/live-calls/{linkedid}/listen", ("POST",)),
+        ("/api/crm-link/live-calls/{linkedid}/takeover", ("POST",)),
     ])
-    check("exactly the eleven we expect, no more and no fewer", paths == expected)
+    check("exactly the fourteen we expect, no more and no fewer", paths == expected)
 
 
 def test_the_crm_event_now_carries_how_many_pictures_and_still_no_urls():
