@@ -11,9 +11,11 @@ The CRM's status dot polls this all day. What matters, in order:
   4. **It names nobody**: no phone number, no token, no secret, however they are configured.
   5. **The heartbeat is written by the scheduled poll, even when the poll raises**, carries
      no number, and a failure to write it never escapes into the worker.
-  6. **Nothing existing moved**: the crm-link router has its eleven routes (the AHS email
+  6. **Nothing existing moved**: the crm-link router has its fourteen paths (the AHS email
      branch added /email-jobs on purpose; feature/mms-media-relay added /media and
-     /messages/{id}/media/{i} for pictures on a CRM text, 2026-09-16).
+     /messages/{id}/media/{i} for pictures on a CRM text, 2026-09-16; /recordings/{call_id}
+     for an AI call's audio, 2026-09-22; /live-calls, /live-calls/{linkedid}/listen and
+     /takeover so the CRM can supervise a live AI call, 2026-09-23).
 
 Stdlib only apart from the app itself, like every other test here.
 Run: python -m tests.test_link_status
@@ -222,7 +224,9 @@ def test_it_is_mounted_as_one_get_route_and_nothing_else_moved():
     check("mounted on the app", len(mounted) == 1)
     crm = {r.path for r in main_mod.app.routes
            if getattr(r, "path", "").startswith("/api/crm-link")}
-    check(f"the CRM link has its eleven routes ({len(crm)})", len(crm) == 11)
+    # Fourteen since 2026-09-23: /live-calls and /live-calls/{linkedid}/listen|takeover, so
+    # the CRM can show a live AI-agent call and ring its user in to hear or seize it.
+    check(f"the CRM link has its fourteen routes ({len(crm)})", len(crm) == 14)
 
 
 # --- 3. answers when things are off -------------------------------------------------------

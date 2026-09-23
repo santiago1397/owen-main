@@ -662,13 +662,17 @@ def test_the_router_is_exactly_these_routes_and_the_crm_link_is_untouched():
 
     crm = sorted({r.path for r in main_mod.app.routes
                   if getattr(r, "path", "").startswith("/api/crm-link")})
-    # Eleven since 2026-09-22 (eleven since 2026-09-22: /recordings/{call_id} serves an AI-agent call's audio to the CRM, which proxies it onto the thread (phase 1 of the voice-agent amendment)).
+    # Fourteen since 2026-09-23: /live-calls, /live-calls/{linkedid}/listen and /takeover
+    # let the CRM show a live AI-agent call and ring its user in to hear or seize it
+    # (voice agents phase 1, slice E). None of them is the mirror's.
+    # Eleven since 2026-09-22: /recordings/{call_id} serves an AI-agent call's audio to the
+    # CRM, which proxies it onto the thread (phase 1 of the voice-agent amendment).
     # Ten since 2026-09-16: /email-jobs (the AHS email hop, feature/ahs-email-to-crm) and
     # then /media + /messages/{id}/media/{i} (pictures on a CRM text,
     # feature/mms-media-relay) were added to the CRM link on purpose. The mirror still
     # adds none, which is what this line is actually for.
-    check(f"the CRM link still has its eleven routes, unwidened by the mirror ({len(crm)})",
-          len(crm) == 11 and "/api/crm-link/email-jobs" in crm)
+    check(f"the CRM link still has its fourteen routes, unwidened by the mirror ({len(crm)})",
+          len(crm) == 14 and "/api/crm-link/email-jobs" in crm)
     check("scopes exist and are the two reused ones",
           bool(SCOPE_AGENT_WRITE) and bool(SCOPE_CRM_LINK))
 

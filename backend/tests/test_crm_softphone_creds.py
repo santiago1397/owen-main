@@ -386,6 +386,14 @@ def test_the_crm_link_router_gained_exactly_one_route():
     before the carrier's link expires. Both scope crm_link — the key the CRM already holds,
     which already authorises placing a call and sending a text. Ten.
 
+    Eleven 2026-09-22: `GET /recordings/{call_id}`, an AI-agent call's audio for the thread.
+
+    Fourteen 2026-09-23 (feature/live-agent-calls): `GET /live-calls`, and
+    `POST /live-calls/{linkedid}/listen` / `/takeover`, so the CRM can show a live AI call and
+    let an ADMIN or DISPATCHER hear or seize it on their own browser line. Scope crm_link, and
+    the two POSTs go through THIS module's operator roster — the same resolver as
+    /softphone/credentials, so the key cannot ring anybody who has no operator line.
+
     The PUBLIC route this feature needed is deliberately NOT here: `GET /crm-media/{id}` is
     its own router (`integrations/crm/public_media.py`), with its own fence in
     `tests/test_crm_media.py`, so that nothing on this key-gated surface can ever be mistaken
@@ -408,8 +416,15 @@ def test_the_crm_link_router_gained_exactly_one_route():
         # The AI agent's call audio (2026-09-22). The CRM proxies it onto the
         # thread; GET only, and it reads a file this box already recorded.
         ("/api/crm-link/recordings/{call_id}", ("GET",)),
+        # Supervising a live AI-agent call from the CRM (2026-09-23, slice E): the list the
+        # CRM's "AI is on a call" banner draws, and Listen / Take over, which ring the CRM
+        # user's own browser line. Both POSTs refuse an email that is not a provisioned
+        # operator, so the key alone can never ring somebody who has no operator line.
+        ("/api/crm-link/live-calls", ("GET",)),
+        ("/api/crm-link/live-calls/{linkedid}/listen", ("POST",)),
+        ("/api/crm-link/live-calls/{linkedid}/takeover", ("POST",)),
     ])
-    check("the route table is exactly the eleven we expect, no more and no fewer",
+    check("the route table is exactly the fourteen we expect, no more and no fewer",
           paths == expected)
 
 
