@@ -59,6 +59,7 @@ EVENTS_PATH = "/api/events"
 DELIVERY_PATH = "/api/events/delivery"
 CONTACTS_PATH = "/api/contacts"
 HEALTH_PATH = "/api/health"
+AGENT_CONTEXT_PATH = "/api/agent-context"
 
 # How many contacts a lookup will look at per candidate rendering before giving up. The
 # search is a substring ILIKE, so a short candidate can match broadly; the last-ten-digits
@@ -267,6 +268,18 @@ class CrmClient:
         else:
             logger.warning("crm-link: AHS cancellation %s REFUSED by the CRM (%s)",
                            body.get("ahs_job_id"), result.status)
+        return result
+
+    async def agent_context(self, caller_number: str) -> CrmResult:
+        """`POST /api/agent-context` — who this caller is, for a voice agent (2026-09-24).
+
+        The body is the number and NOTHING else; the CRM refuses any other key, so this side
+        can never choose whose brief it reads. Same `events:write` token as the event feed.
+        Logged by status only: the answer is a customer's name and job."""
+        result = await self._request("POST", AGENT_CONTEXT_PATH,
+                                     json={"caller_number": str(caller_number or "")})
+        if not result.ok:
+            logger.warning("crm-link: agent context REFUSED or unreachable (%s)", result.status)
         return result
 
     async def post_event(self, body: dict) -> CrmResult:

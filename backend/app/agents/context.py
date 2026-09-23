@@ -125,7 +125,9 @@ def render_blob(local, remote, allowlist) -> tuple[str, list]:
 
 # --- provider configuration (C14/C16) ---------------------------------------------------
 
-PROVIDER_KINDS = ("none", "ghl", "http")
+# `crm_link` (2026-09-24): the CRM this platform is linked to (`ghl-clone`), asked through
+# OWEN's own adapter so its token stays in OWEN's environment — see `agents/remote.py`.
+PROVIDER_KINDS = ("none", "ghl", "http", "crm_link")
 
 
 def validate_provider(config) -> list:
@@ -154,6 +156,9 @@ def validate_provider(config) -> list:
     allow = config.get("allowlist")
     if allow is not None and not isinstance(allow, (list, tuple)):
         errors.append("context_provider.allowlist must be a list of field names")
+    # `crm_link` needs no allowlist: its answer is a fixed four-fact brief that OWEN renders
+    # into the summary itself (`integrations/crm/caller_brief.py`), and its `facts` are always
+    # empty, so there is nothing for an allowlist to admit or refuse.
     if kind in ("ghl", "http") and not allow:
         # Not an error: an agent may legitimately want only the name and the local history.
         # But silence here would be indistinguishable from a typo, so it is worth saying.

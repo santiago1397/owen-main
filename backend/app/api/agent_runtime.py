@@ -235,6 +235,47 @@ async def crm_lookup(
     }
 
 
+@router.post("/crm-link/lookup")
+async def crm_link_lookup(
+    body: LookupIn,
+    _key=Depends(require_scope(SCOPE_AGENT_WRITE)),
+) -> dict:
+    """The linked CRM (`ghl-clone`), in provider shape — `context_provider.kind: crm_link`.
+
+    The replacement for `crm_lookup` above, which reads the real GoHighLevel account this CRM
+    replaces. Asks `POST /api/agent-context` with the caller's number and nothing else, using
+    OWEN's own CRM_LINK_TOKEN — the token never reaches owen-voice or an agent version.
+
+    DEGRADES, never delays. owen-voice waits at most VOICE_CONTEXT_TIMEOUT_S (1.2s) for this
+    whole hop, so the CRM request gets CRM_LINK_CONTEXT_TIMEOUT_SECONDS (0.8s) as its entire
+    budget. Three outcomes, and in none of them is the caller kept waiting:
+      * a known caller -> `{display_name, summary, facts: {}}` (`caller_brief.to_provider`);
+      * `known: false` -> empty fields: nothing about anybody, and not a failure;
+      * the link off, the CRM unreachable, slow, or refusing -> `{}` and a WARNING. An empty
+        body is what owen-voice records as `context_degraded` (C13), so an agent that has
+        quietly stopped recognising anyone shows up in /api/ai/errors instead of nowhere.
+    """
+    from app.core.config import settings
+    from app.integrations.crm import caller_brief
+    from app.integrations.crm import config as crm_config
+    from app.integrations.crm.client import CrmClient
+
+    link = crm_config.current()
+    refusal = link.delivery_refusal() or ("" if link.base_url else "no CRM_LINK_BASE_URL")
+    if refusal:
+        logger.warning("agent-runtime: crm-link lookup skipped (%s)", refusal)
+        return {}
+    budget = float(getattr(settings, "CRM_LINK_CONTEXT_TIMEOUT_SECONDS", 0.8) or 0.8)
+    result = await CrmClient(link.base_url, link.token, timeout_s=budget,
+                             budget_s=budget).agent_context(body.caller_number)
+    if not result.ok:
+        # Status only: the reason can echo the request, which is a customer's number.
+        logger.warning("agent-runtime: crm-link lookup failed (status %s); the agent will "
+                       "greet without customer context", result.status or "unreachable")
+        return {}
+    return caller_brief.to_provider(result.data)
+
+
 class ReportIn(BaseModel):
     linkedid: str
     caller_number: str = ""

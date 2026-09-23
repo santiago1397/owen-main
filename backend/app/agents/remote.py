@@ -217,8 +217,9 @@ async def _build_context(spec: AgentSpec, ctx: AgentCallContext) -> tuple[dict, 
     """(local_context, provider_descriptor) for this call.
 
     The provider is flattened to `{url, headers, allowlist}` HERE rather than passed as a
-    kind. `kind: ghl` resolves to OWEN's own adapter endpoint, so owen-voice has exactly one
-    code path and a future in-house CRM is indistinguishable from the built-in one (C16).
+    kind. `kind: ghl` and `kind: crm_link` resolve to OWEN's own adapter endpoints, so
+    owen-voice has exactly one code path and a future in-house CRM is indistinguishable from
+    the built-in one (C16).
     """
     from app.agents.context import validate_provider
     from app.core.config import settings
@@ -247,6 +248,27 @@ async def _build_context(spec: AgentSpec, ctx: AgentCallContext) -> tuple[dict, 
             "url": f"{settings.OWEN_INTERNAL_URL.rstrip('/')}/api/agent-runtime/crm/lookup",
             "headers": {"X-OWEN-Key": settings.AGENT_RUNTIME_KEY},
             "allowlist": allowlist,
+        }
+    if kind == "crm_link":
+        # The linked CRM (2026-09-24). Resolved to OWEN's OWN adapter, exactly like `ghl`, so the
+        # CRM token (CRM_LINK_TOKEN) never leaves OWEN's environment: it is not in the agent
+        # version's config, not in this payload, not in owen-voice. Checked here as well as in
+        # the adapter so a link that is off costs owen-voice no request at all.
+        from app.integrations.crm import config as crm_config
+
+        link = crm_config.current()
+        refusal = link.delivery_refusal() or ("" if link.base_url else "no CRM_LINK_BASE_URL")
+        if refusal or not settings.AGENT_RUNTIME_KEY:
+            logger.warning(
+                "owen_voice: context_provider kind 'crm_link' unavailable (%s); "
+                "falling back to local context only",
+                refusal or "AGENT_RUNTIME_KEY is not set",
+            )
+            return local, {}
+        return local, {
+            "url": f"{settings.OWEN_INTERNAL_URL.rstrip('/')}/api/agent-runtime/crm-link/lookup",
+            "headers": {"X-OWEN-Key": settings.AGENT_RUNTIME_KEY},
+            "allowlist": [],
         }
     if kind == "http":
         return local, {

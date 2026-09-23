@@ -285,6 +285,12 @@ class Settings(BaseSettings):
     # INSERTs; it has no dedupe key).
     CRM_LINK_HTTP_TIMEOUT_SECONDS: float = 5.0
     CRM_LINK_HTTP_BUDGET_SECONDS: float = 15.0
+    # The voice agent's customer brief (`context_provider.kind: crm_link`, 2026-09-24): the ONE
+    # request to the CRM's POST /api/agent-context, made while a caller waits to be greeted.
+    # It must sit INSIDE owen-voice's VOICE_CONTEXT_TIMEOUT_S (1.2s), which bounds the whole
+    # owen-voice -> OWEN -> CRM hop: past that owen-voice greets without context anyway, so a
+    # slower CRM answer would be thrown away after holding a connection for nothing.
+    CRM_LINK_CONTEXT_TIMEOUT_SECONDS: float = 0.8
     # WHICH CRM USERS MAY HOLD A BROWSER SOFTPHONE. Comma/semicolon/newline-separated
     # emails; each is mapped to an operator by the SAME `telephony.credentials.operator_slug`
     # rule every other operator path uses, so the slug here is the slug `ring.py` dials and
