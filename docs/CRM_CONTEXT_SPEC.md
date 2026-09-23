@@ -4,6 +4,14 @@
 > **Nothing here is built yet.** Companion: [`AI_AGENT_SPEC.md`](AI_AGENT_SPEC.md) (the agent
 > platform this plugs into), [`GHL_SYNC_SPEC.md`](GHL_SYNC_SPEC.md) (GHL API behaviour).
 
+> **Update (2026-09-24): `kind: crm_link` is built** — the in-house CRM the question below
+> anticipated. `context_provider: {"kind": "crm_link"}` resolves (like `ghl`) to OWEN's adapter
+> `POST /api/agent-runtime/crm-link/lookup`, which asks ghl-clone's `POST /api/agent-context`
+> with `CRM_LINK_TOKEN` inside a `CRM_LINK_CONTEXT_TIMEOUT_SECONDS` (0.8s) budget and renders
+> the answer with `integrations/crm/caller_brief.py` (C7 shape, `facts` always empty, times in
+> America/New_York). Down, slow or refusing → `{}` (degraded, C13); unknown → empty fields.
+> Not yet exercised on a real call.
+
 ## The question this answers
 
 > "If I want to integrate another CRM or system, where it has all the information or current
