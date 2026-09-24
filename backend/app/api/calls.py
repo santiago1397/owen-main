@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import SHORT_CALL_MAX_DURATION_SECONDS, current_user
 from app.api.junk import NOT_JUNK
+from app.api.provider_groups import provider_group_names
 from app.db import get_db
 from app.models import (
     Call,
@@ -34,21 +35,12 @@ from app.schemas.api import (
 
 router = APIRouter(prefix="/api/calls", tags=["calls"])
 
-# Operator platform UX (Ticket 06): let the Calls page split calls into "Attribution"
-# (legacy Twilio/SignalWire) vs "Platform" (BulkVS/Asterisk) via a single optional query
-# param. Additive — omitting provider_group preserves the pre-existing default behavior.
-PROVIDER_GROUPS: dict[str, tuple[str, ...]] = {
-    "attribution": ("twilio", "signalwire"),
-    "platform": ("bulkvs", "asterisk"),
-}
-
-
 def _apply_filters(stmt, provider, provider_group, number_id, campaign_id, caller, status_,
                    date_from, date_to, include_short, hide_junk):
     if provider:
         stmt = stmt.where(Provider.name == provider)
     if provider_group:
-        names = PROVIDER_GROUPS.get(provider_group)
+        names = provider_group_names(provider_group)
         if names:
             stmt = stmt.where(Provider.name.in_(names))
     if number_id:

@@ -15,6 +15,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import current_user
+from app.api.provider_groups import provider_group_names
 from app.db import get_db
 from app.models import Caller, Campaign, Message, Number, Provider, User
 from app.services import queue, sms
@@ -23,12 +24,6 @@ from app.services.messages import enqueue_outbound_message, get_optout_state
 from app.services.number_sync import is_carrier_active
 
 router = APIRouter(prefix="/api/messages", tags=["messages"])
-
-# Same provider buckets the Calls page uses (Ticket 06): omit for all providers.
-PROVIDER_GROUPS: dict[str, tuple[str, ...]] = {
-    "attribution": ("twilio", "signalwire"),
-    "platform": ("bulkvs", "asterisk"),
-}
 
 # Cap the rows scanned to build the thread list — an SMS inbox is small, and threads are
 # derived in-process from newest-first rows.
@@ -71,7 +66,7 @@ async def list_threads(
     db: AsyncSession = Depends(get_db),
 ) -> list[dict]:
     stmt = _joined(select(*_msg_columns()))
-    names = PROVIDER_GROUPS.get(provider_group) if provider_group else None
+    names = provider_group_names(provider_group)
     if names:
         stmt = stmt.where(Provider.name.in_(names))
     stmt = stmt.order_by(Message.received_at.desc()).limit(_THREADS_SCAN_LIMIT)
