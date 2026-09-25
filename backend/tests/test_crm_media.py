@@ -586,8 +586,15 @@ def test_the_crm_link_router_gained_exactly_two_routes():
         ("/api/crm-link/live-calls", ("GET",)),
         ("/api/crm-link/live-calls/{linkedid}/listen", ("POST",)),
         ("/api/crm-link/live-calls/{linkedid}/takeover", ("POST",)),
+        # A voice agent edited in the CRM (phase 2b, 2026-09-25): POST appends a published
+        # CRM version to an EXISTING agent (validated as activation is, idempotent on the
+        # CRM version, never creates an agent); GET lists the active configs so the CRM
+        # can import the live agent once. One path, two methods — so the path count is
+        # fifteen and the route count sixteen.
+        ("/api/crm-link/agent-versions", ("POST",)),
+        ("/api/crm-link/agent-versions", ("GET",)),
     ])
-    check("exactly the fourteen we expect, no more and no fewer", paths == expected)
+    check("exactly the sixteen we expect, no more and no fewer", paths == expected)
 
 
 def test_the_crm_event_now_carries_how_many_pictures_and_still_no_urls():
