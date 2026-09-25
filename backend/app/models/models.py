@@ -53,6 +53,19 @@ class Campaign(Base):
     active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
+    # --- An agent per campaign (phase 3, 2026-09-25) ------------------------------------
+    # The AI agent that answers this campaign's numbers when nothing more specific names one.
+    # It FILLS A GAP and never overrides: an `ai_agent` node's explicit `agent_id` wins, then
+    # its `slot`, then this (flows/runtime.py::_agent_id_for_node). So adding a number to a
+    # campaign needs no new flow, and a flow that pins an agent keeps pinning it. NULL = the
+    # campaign names no agent, and every number in it behaves exactly as before.
+    agent_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("agents.id"))
+    # One short paragraph an operator writes about the campaign — the offer, the service
+    # area. It reaches the agent as CONTEXT (facts about the line the caller rang), never as
+    # instructions, and never mixed into what is known about the caller. Capped when sent
+    # (agents/campaign.py). NULL = only the campaign's name is passed.
+    agent_brief: Mapped[str | None] = mapped_column(Text)
+
 
 class Number(Base):
     __tablename__ = "numbers"
@@ -500,7 +513,8 @@ class Agent(Base):
     """A reusable AI voice agent (name + pointer to its currently active version). Ticket 11,
     mirrors `Flow`: the row is an append-only ENVELOPE — only the `active_version_id` pointer
     is mutated (on activation). Config lives in immutable `agent_versions` rows. An agent is
-    NEVER bound to a number; it is only REFERENCED from a flow's `ai_agent` node, and the
+    NEVER bound to a number; it is REFERENCED from a flow's `ai_agent` node, or named by a
+    CAMPAIGN (`campaigns.agent_id`, phase 3) that fills in for a node naming none, and the
     interpreter PINS the specific `agent_version_id` onto the call on node entry (like flows
     pin `flow_version_id`).
     """

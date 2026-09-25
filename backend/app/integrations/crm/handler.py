@@ -19,18 +19,20 @@ The only thing that differs is the middle: the ring group also rings up to two P
   * It never runs when `CRM_LINK_ENABLED` is false, or when the DID has no enabled
     `crm_links` row. `hook.handle_bound_inbound` returns False before this is reached.
 
-## The AI-agent seam
+## The AI-agent seam (wired in phase 3, 2026-09-25 — OFF by default)
 
-`_ai_agent_seam` is where an `ai_agent` node drops in on a later phase, between "nobody
-answered" and "take a voicemail". It is a function that returns False, with the exact
-information an agent hand-off needs already in scope. It is NOT wired: the agent platform
-is live, and connecting it to a real business line is its own change with its own review.
+`_ai_agent_seam` sits between "nobody answered" and "take a voicemail". With
+`CRM_LINK_AGENT_ANSWERS` false (the default) it returns before touching anything and the
+call takes the voicemail exactly as it always has. With it true, the call is handed to the
+AI agent of the bound number's CAMPAIGN, through the same runtime a flow's `ai_agent` node
+uses (`flows/runtime.py::run_agent_on_call`). Its docstring says what happens in each case.
 """
 
 from __future__ import annotations
 
 import logging
 import time
+from dataclasses import dataclass, field
 from typing import Optional
 
 from app.core.calllog import clog
@@ -64,27 +66,111 @@ async def _resolve_operators(ari, binding: CrmBinding) -> tuple[list[str], bool]
         return [], True
 
 
+@dataclass
+class AgentHandoff:
+    """What happened when the CRM line handed an unanswered call to an agent.
+
+    `claimed` — the agent dealt with the call; the handler takes no voicemail.
+    `hang_up` — and the channel is still ours to end (False after a transfer or a take-over,
+                when somebody else owns it now).
+    `extra`   — the agent's part of the call for the handler's ONE `ended` event (transcript,
+                `ai_call`, `dedupe_key`), so the CRM files one call row, not two.
+    """
+
+    claimed: bool
+    port: str = ""
+    hang_up: bool = False
+    extra: dict = field(default_factory=dict)
+
+
 async def _ai_agent_seam(
     ari, channel_id: str, lid: str, binding: CrmBinding, caller_number: str,
-) -> bool:
-    """SEAM — NOT WIRED. Where the AI agent answers a call nobody picked up.
+    *, dialed: str = "", notice_played: bool = False,
+) -> Optional[AgentHandoff]:
+    """The AI agent answers a CRM-line call that nobody picked up — ONLY when switched on.
 
-    Return True to claim the call (this handler then does nothing further and does not take
-    a voicemail); return False to fall through to voicemail. It returns False today.
+    Returns None when no agent ran (the handler then takes the voicemail, as it always did),
+    or an `AgentHandoff` when one did.
 
-    To wire it, this is the shape the rest of the platform already expects: resolve an agent
-    (directly, or through an `AgentSlot` as `flows/runtime.py::_agent_id_for_node` does),
-    pin its version onto the call, run a `VoiceAgentSession` with an `AgentCallContext`
-    carrying `channel_id` / `linkedid` / `caller_number`, persist its captures and
-    transcript, and map its exit port. All of that machinery exists and is live; what does
-    not exist is a decision that a real customer calling a real roofing business should
-    reach it, and that decision is not this module's to make.
+    OFF (`CRM_LINK_AGENT_ANSWERS` false, the default): returns None immediately, before any
+    database read. Nobody answers -> voicemail, byte for byte the behaviour before phase 3.
 
-    The arguments are taken (and named) now so wiring it later is an edit to this function
-    and nothing else.
+    ON: after the ring group has failed (no answer, busy, everyone declined, or nothing to
+    ring), in this order —
+      1. the recording-consent notice must already have played on this call (the handler
+         plays it right after answering, before the ring). If it did not — no
+         INBOUND_CONSENT_MEDIA configured — NO agent: an agent's call is
+         recorded, Florida is all-party consent, and the notice is not skippable on this path.
+      2. the agent is the CAMPAIGN's: the bound number's `campaigns.agent_id`, the same
+         pointer every campaign number uses (step 3 of `_agent_id_for_node`). Chosen over a
+         per-binding agent column because the binding already carries the number's
+         `campaign_id`, a second pointer could disagree with the first, and it keeps ONE rule
+         for "which agent answers this DID". No campaign, an inactive campaign, a campaign
+         with no agent, or an agent with no ACTIVE version -> None -> voicemail.
+      3. the agent runs through `run_agent_on_call`, the flow node's own runtime: version
+         pinned on the call, captures/transcript/cost stored, the transfer allowlist
+         honoured, the campaign's facts passed as context. Then by its exit port:
+           * `failed` (capacity, spend cap, service down, no version) -> None -> voicemail;
+           * `transfer` with no destination it may use -> NOT claimed: there is no flow edge
+             here and the people were already rung, so the caller leaves a voicemail — and
+             the agent's transcript still rides the `ended` event;
+           * `transferred` / `taken_over` -> claimed, and the channel is left alone;
+           * anything else (`default`, `end_call`) -> claimed, and the handler hangs up.
+    Every failure inside returns None: this seam can only ever ADD an agent in front of the
+    voicemail, never take the voicemail away.
     """
-    del ari, channel_id, lid, binding, caller_number  # documented seam; intentionally unused
-    return False
+    if not bool(getattr(settings, "CRM_LINK_AGENT_ANSWERS", False)):
+        return None
+    if not notice_played:
+        logger.warning(
+            "crm-link: CRM_LINK_AGENT_ANSWERS is on but the recording-consent notice did not "
+            "play on this call (INBOUND_CONSENT_MEDIA is unset); taking the "
+            "voicemail instead of an agent (linkedid=%s)", lid,
+        )
+        return None
+    try:
+        # Lazy: the flow runtime imports this package lazily too, and a CRM link that is off
+        # must not pay for the agent stack.
+        from app.agents.crm_call import report_extra
+        from app.db import SessionLocal
+        from app.flows import runtime as flow_runtime
+        from app.flows.interpreter import STAND_DOWN_PORTS
+        from app.integrations.crm import push as crm_push
+        from app.services.ingestion import _get_or_create_provider
+
+        async with SessionLocal() as db:
+            campaign = await flow_runtime._campaign_facts(db, binding.campaign_id)
+            if campaign is None or not campaign.agent_id:
+                clog(logger, "crmlink.agent.none", linkedid=lid,
+                     campaign=binding.campaign_id, next="voicemail")
+                return None
+            provider = await _get_or_create_provider(db, flow_runtime.PROVIDER_NAME)
+            provider_id = provider.id
+            await db.commit()
+            owen_call_id, _rec, _trans = await crm_push.call_artifacts(db, lid)
+
+        clog(logger, "crmlink.agent.start", linkedid=lid, agent=campaign.agent_id,
+             campaign=campaign.campaign_id)
+        run = await flow_runtime.run_agent_on_call(
+            ari=ari, channel_id=channel_id, lid=lid,
+            dialed=dialed or binding.phone_number, caller_number=caller_number,
+            provider_id=provider_id, agent_id=campaign.agent_id, campaign=campaign,
+            report_to_crm=False,
+        )
+    except Exception:  # noqa: BLE001 - the voicemail is always still there
+        logger.exception("crm-link: handing the call to an agent failed (linkedid=%s)", lid)
+        return None
+
+    clog(logger, "crmlink.agent.end", linkedid=lid, port=run.port)
+    if run.port == "failed":
+        return None
+    extra = report_extra(agent_name=run.agent_name, version=run.version, outcome=run.port,
+                         data=run.data, campaign=campaign.name,
+                         owen_call_id=owen_call_id or "")
+    if run.port == "transfer":
+        return AgentHandoff(claimed=False, port=run.port, extra=extra)
+    return AgentHandoff(claimed=True, port=run.port,
+                        hang_up=run.port not in STAND_DOWN_PORTS, extra=extra)
 
 
 async def handle_bound_inbound(
@@ -101,6 +187,8 @@ async def handle_bound_inbound(
     outcome = "failed"
     winner_dest: Optional[str] = None
     winner_kind: Optional[str] = None
+    notice_played = False
+    agent_extra: dict = {}
 
     clog(logger, "crmlink.call.begin", linkedid=lid, channel=channel_id, dialed=dialed,
          caller=caller_number or None, link=binding.link_id)
@@ -121,6 +209,10 @@ async def handle_bound_inbound(
         if consent:
             clog(logger, "crmlink.consent", linkedid=lid, channel=channel_id)
             await ari.play_and_wait(channel_id, consent)
+            # The agent hand-off below requires this. `play_and_wait` reports nothing back
+            # (an unplayable prompt returns quietly), so "played" means "configured and
+            # played to completion or its cap" — the same standard the recorded bridge uses.
+            notice_played = True
 
         operators, are_endpoints = await _resolve_operators(ari, binding)
         allowed_pstn, refused_pstn = cfg.filter_pstn(binding.pstn_numbers)
@@ -183,9 +275,15 @@ async def handle_bound_inbound(
             )
 
         # --- nobody answered -------------------------------------------------------------
-        if await _ai_agent_seam(ari, channel_id, lid, binding, caller_number):
-            outcome = "agent"
-            return
+        handoff = await _ai_agent_seam(ari, channel_id, lid, binding, caller_number,
+                                       dialed=dialed, notice_played=notice_played)
+        if handoff is not None:
+            agent_extra = dict(handoff.extra or {})
+            if handoff.claimed:
+                outcome = "agent"
+                if handoff.hang_up:
+                    await ari.hangup(channel_id)
+                return
 
         clog(logger, "crmlink.voicemail", linkedid=lid, channel=channel_id)
         await ari.voicemail(
@@ -216,4 +314,7 @@ async def handle_bound_inbound(
             caller_number=caller_number, dialed_number=dialed,
             outcome=outcome, duration_seconds=duration,
             winning_destination=winner_dest, winning_kind=winner_kind,
+            # The agent's transcript / ai_call / dedupe_key when one answered (phase 3):
+            # ONE ended event per call, so the CRM files one call row, not two.
+            extra=agent_extra or None,
         )

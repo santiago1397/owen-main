@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import logging
 
+from app.agents.campaign import knowledge_with_campaign
 from app.agents.session import AgentCallContext, AgentResult, AgentSpec
 
 logger = logging.getLogger("agents.remote")
@@ -91,7 +92,10 @@ class RemoteVoiceAgentSession:
                 # PINNED version so "which vendor ran that call" stays answerable afterwards.
                 "stt_provider": str(spec.config.get("stt_provider") or ""),
                 "tts_provider": str(spec.config.get("tts_provider") or ""),
-                "knowledge": spec.knowledge,
+                # The agent's own knowledge, then — when the dialled number belongs to a
+                # campaign — the campaign's facts as a separate, labelled block
+                # (agents/campaign.py says why they ride here as well as in `context`).
+                "knowledge": knowledge_with_campaign(spec.knowledge, getattr(ctx, "campaign", None)),
                 "tools": spec.tools or {},
                 "max_call_seconds": guard.get("max_call_seconds"),
                 "max_silence_seconds": guard.get("max_silence_seconds"),
@@ -232,6 +236,11 @@ async def _build_context(spec: AgentSpec, ctx: AgentCallContext) -> tuple[dict, 
     if ctx.caller_number:
         async with SessionLocal() as db:
             local = await local_context(db, ctx.caller_number)
+    # The campaign of the number the caller RANG (phase 3). Its own key, beside the caller's
+    # facts and never merged into them: it describes the line, not the person.
+    campaign = getattr(ctx, "campaign", None)
+    if isinstance(campaign, dict) and campaign:
+        local = {**local, "campaign": dict(campaign)}
 
     cfg = spec.config.get("context_provider") if isinstance(spec.config, dict) else None
     if not isinstance(cfg, dict) or validate_provider(cfg):

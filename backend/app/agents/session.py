@@ -59,6 +59,9 @@ class AgentCallContext:
     linkedid: str
     caller_number: str | None = None
     ari: object | None = None
+    # The dialled number's campaign as `{"name", "brief"}` (agents/campaign.py), or None.
+    # Facts about the LINE, carried separately from anything known about the caller.
+    campaign: dict | None = None
 
 
 @dataclass

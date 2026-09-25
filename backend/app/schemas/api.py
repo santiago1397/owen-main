@@ -134,6 +134,11 @@ class CampaignOut(BaseModel):
     id: uuid.UUID
     name: str
     active: bool
+    # Phase 3: the agent that answers this campaign's numbers when no flow node names one,
+    # and the operator's brief it is given as context. Read-only here; set with
+    # `python -m app.scripts.manage set-campaign-agent`.
+    agent_id: uuid.UUID | None = None
+    agent_brief: str | None = None
 
 
 class CallerOut(BaseModel):
