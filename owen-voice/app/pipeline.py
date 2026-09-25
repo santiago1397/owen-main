@@ -26,11 +26,12 @@ from typing import Optional
 
 from app.audiosocket import AUDIO_FRAME_BYTES, encode_audio
 from app.config import settings
-from app.dsp import (TurnDetector, chunk_frames, looks_like_english, rms_of,
+from app.dsp import (TurnDetector, chunk_frames, looks_like_latin_script, rms_of,
                      split_speakable)
 from app.providers import (get_llm, get_stt, get_streaming_stt, get_tts,
                            streaming_stt_available)
 from app.context import render_blob
+from app.custom_tools import DEFAULT_FILLER, DEFAULT_FILLER_ES
 from app.custom_tools import find as find_custom
 from app.custom_tools import normalise as normalise_custom
 from app.custom_tools import openai_schema as custom_schema
@@ -40,6 +41,10 @@ from app.session import MediaSession
 logger = logging.getLogger("voice.pipeline")
 
 FRAME_PERIOD_S = 0.02
+
+# How a detected language is named to the model. Codes outside this map are passed through as
+# they came; the language rule already forbids replying in anything but English or Spanish.
+LANGUAGE_NAMES = {"en": "English", "es": "Spanish"}
 
 # Frames buffered before playback starts (x20ms). 400ms comfortably covers the gap between
 # streamed TTS chunks; it is added to time-to-first-audio, so it is the direct trade between
@@ -201,6 +206,11 @@ class Conversation:
         self._tool_calls: dict = {}
         # Custom tools chosen this turn, run after dispatch so an exit port is decided first.
         self._pending_custom: list = []
+        # The language the caller is SPEAKING, as the recogniser last reported it (phase 4).
+        # Empty until a turn reports one, so the greeting and every turn on a model that
+        # reports no language use the English voice. A turn with no report keeps the previous
+        # value rather than snapping back to English mid-conversation.
+        self.language: str = ""
 
     # --- lifecycle ---
 
@@ -212,6 +222,13 @@ class Conversation:
         if self.session.context_blob:
             parts.append(self.session.context_blob)
         parts.append(str(self.agent.get("persona") or settings.AGENT_SYSTEM_PROMPT).strip())
+        # The language rule is appended HERE, once, after whichever of persona / default was
+        # used -- so the company's own agent (which has a persona) and a bare one get the same
+        # instruction and there is no second copy to drift.
+        parts.append(settings.AGENT_LANGUAGE_RULE.strip())
+        if self.language:
+            name = LANGUAGE_NAMES.get(self.language, self.language)
+            parts.append(f"The speech recogniser detected that the caller is speaking {name}.")
         knowledge = str(self.agent.get("knowledge") or "").strip()
         if knowledge:
             parts.append("Reference knowledge:" + chr(10) + knowledge)
@@ -463,7 +480,8 @@ class Conversation:
                     if ev.transcript and self._draft is None:
                         self._draft_for = ev.transcript
                         self._commit.clear()
-                        self._draft = self._begin_turn(ev.transcript, drafted=True)
+                        self._draft = self._begin_turn(ev.transcript, drafted=True,
+                                                       language=ev.language)
 
                 elif ev.kind == "resumed":
                     # The prediction was wrong -- the caller kept talking. Nothing was spoken,
@@ -487,14 +505,15 @@ class Conversation:
                             continue
                         self._cancel_turn("draft transcript did not match")
                     self._commit.set()
-                    self._begin_turn(ev.transcript)
+                    self._begin_turn(ev.transcript, language=ev.language)
         except asyncio.CancelledError:
             raise
         except Exception:  # noqa: BLE001 - the pump must never take the call down
             logger.exception("session %s: turn pump failed", self.session.session_uuid)
 
-    def _begin_turn(self, text: str, drafted: bool = False) -> asyncio.Task:
-        self._turn = asyncio.create_task(self._handle_turn(b"", text=text, drafted=drafted))
+    def _begin_turn(self, text: str, drafted: bool = False, language: str = "") -> asyncio.Task:
+        self._turn = asyncio.create_task(
+            self._handle_turn(b"", text=text, drafted=drafted, language=language))
         return self._turn
 
     def _cancel_turn(self, why: str) -> None:
@@ -546,7 +565,8 @@ class Conversation:
 
     # --- one turn ---
 
-    async def _handle_turn(self, audio: bytes, text: str = "", drafted: bool = False) -> None:
+    async def _handle_turn(self, audio: bytes, text: str = "", drafted: bool = False,
+                           language: str = "") -> None:
         """STT -> LLM -> TTS for one caller utterance. Cancellable at any point: a barge-in
         mid-turn should abandon the answer, not queue it up behind the caller's new question.
 
@@ -575,15 +595,23 @@ class Conversation:
                 logger.info("session %s: empty transcript, ignoring turn",
                             self.session.session_uuid)
                 return
-            if not looks_like_english(text):
+            if not looks_like_latin_script(text):
                 self.session.noise_utterances += 1
-                logger.info("session %s: discarding non-English transcript %r as a "
+                logger.info("session %s: discarding non-Latin transcript %r as a "
                             "hallucination", self.session.session_uuid, text[:40])
                 return
             t_stt = time.monotonic()
+            if language:
+                # Set BEFORE the model is asked, so this turn's prompt names the language and
+                # this turn's reply is spoken in the matching voice.
+                if language != self.language:
+                    logger.info("session %s: caller language %s -> %s",
+                                self.session.session_uuid, self.language or "-", language)
+                self.language = language
             self.session.turns += 1
-            self.session.transcript.append({"speaker": "caller", "text": text})
-            logger.info("session %s: caller: %s", self.session.session_uuid, text)
+            self.session.transcript.append(self._segment("caller", text, language))
+            logger.info("session %s: caller [%s]: %s", self.session.session_uuid,
+                        language or "-", text)
 
             self.history.append({"role": "user", "content": text})
 
@@ -659,7 +687,7 @@ class Conversation:
             await self._run_custom_tools()
             t_done = time.monotonic()
             self.history.append({"role": "assistant", "content": reply})
-            self.session.transcript.append({"speaker": "agent", "text": reply})
+            self.session.transcript.append(self._segment("agent", reply, self.language))
             logger.info("session %s: agent: %s", self.session.session_uuid, reply)
 
             # `first_audio` is the number the CALLER experiences — how long they waited in
@@ -695,6 +723,8 @@ class Conversation:
                 "frames": frames,
                 "reply_chars": len(reply),
                 "drafted": bool(drafted),
+                # Per turn, so latency can be split by language once Spanish calls exist.
+                "language": language or "",
             })
 
             if exit_port:
@@ -709,6 +739,39 @@ class Conversation:
             raise
         except Exception:  # noqa: BLE001 - a failed turn leaves the caller able to try again
             logger.exception("session %s: turn failed", self.session.session_uuid)
+
+    @staticmethod
+    def _segment(speaker: str, text: str, language: str) -> dict:
+        """A transcript entry. `language` is only present when the recogniser reported one,
+        so a transcript from a model that reports nothing keeps its old two-key shape."""
+        seg = {"speaker": speaker, "text": text}
+        if language:
+            seg["language"] = language
+        return seg
+
+    def _voice_for(self, language: str) -> str:
+        """The voice for a reply in `language` (phase 4).
+
+        Deepgram's Aura-2 voices are one language each, so a Spanish turn needs a `-es` voice:
+        the agent's own `voice_es` if it is one, else the configured Spanish default. OpenAI's
+        voices are multilingual -- the same voice reads Spanish text -- so there an agent with
+        no Spanish voice simply keeps its own. Nothing here fails: a bad `voice_es` costs the
+        default Spanish voice and a warning, never a silent reply (activation warns too)."""
+        english = self.session.tts_voice or settings.TTS_VOICE
+        if language != "es":
+            return english
+        chosen = (self.session.tts_voice_es or "").strip()
+        if getattr(self.tts, "name", "") == "deepgram":
+            if chosen.startswith("aura-") and chosen.endswith("-es"):
+                return chosen
+            if chosen:
+                logger.warning("session %s: voice_es %r is not a Deepgram Spanish voice; "
+                               "using %s", self.session.session_uuid, chosen,
+                               settings.DG_TTS_VOICE_ES)
+            return settings.DG_TTS_VOICE_ES
+        if chosen and not chosen.startswith("aura-"):
+            return chosen
+        return english
 
     # --- tools -------------------------------------------------------------------------
 
@@ -802,8 +865,11 @@ class Conversation:
                             self.session.session_uuid, name)
                 continue
 
-            if tool.get("filler"):
-                await self._speak(tool["filler"])
+            filler = tool.get("filler") or ""
+            if filler == DEFAULT_FILLER and self.language == "es":
+                filler = DEFAULT_FILLER_ES
+            if filler:
+                await self._speak(filler)
             status, body = await call_custom_tool(tool, args)
             self.session.tool_calls += 1
             snippet = str(body)[:800] if body is not None else "no response"
@@ -838,7 +904,7 @@ class Conversation:
         synthesized, so time-to-first-audio stops depending on sentence length. Falls back
         to the blocking call if streaming yields nothing, so a provider without streaming
         support is slower rather than mute."""
-        voice = self.session.tts_voice or settings.TTS_VOICE
+        voice = self._voice_for(self.language)
         instructions = self.session.tts_instructions or ""
         model = self.session.tts_model or ""
         self.playout.begin_utterance()

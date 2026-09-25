@@ -53,6 +53,9 @@ class MediaSession:
     # laptop speakers — the document's §3 warning is that 8kHz destroys much of what premium
     # TTS charges for, and the only honest test is down the actual phone.
     tts_voice: str | None = None
+    # The agent's voice for turns the caller speaks in Spanish (phase 4). None = the provider
+    # default Spanish voice; see pipeline.Conversation._voice_for.
+    tts_voice_es: str | None = None
     tts_instructions: str | None = None
     tts_model: str | None = None
 
@@ -142,6 +145,18 @@ class MediaSession:
     _writer: Optional[asyncio.StreamWriter] = field(default=None, repr=False)
     # Set when the conversation has ended, so POST /sessions can block on it.
     done: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
+
+    @property
+    def language(self) -> str:
+        """The call's language: the one most caller turns were detected in, "" if the
+        recogniser reported none. A tie goes to whichever was heard first, so a caller who
+        says one word of English and one of Spanish is filed as they opened."""
+        counts: dict = {}
+        for seg in self.transcript:
+            lang = seg.get("language") if isinstance(seg, dict) else None
+            if lang and seg.get("speaker") == "caller":
+                counts[lang] = counts.get(lang, 0) + 1
+        return max(counts, key=counts.get) if counts else ""
 
     @property
     def connected(self) -> bool:

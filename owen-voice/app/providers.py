@@ -60,7 +60,10 @@ class OpenAISTT:
         if not settings.OPENAI_API_KEY or not pcm8k:
             return ""
         files = {"file": ("turn.wav", wav_wrap(pcm8k), "audio/wav")}
-        data = {"model": settings.STT_MODEL, "language": settings.STT_LANGUAGE}
+        data = {"model": settings.STT_MODEL}
+        if settings.STT_LANGUAGE:
+            # Empty means auto-detect. Sending "en" makes the model render Spanish as English.
+            data["language"] = settings.STT_LANGUAGE
         try:
             async with httpx.AsyncClient(timeout=_STT_TIMEOUT) as c:
                 r = await c.post(
@@ -491,6 +494,26 @@ class TurnEvent:
     kind: str
     transcript: str = ""
     confidence: float = 0.0
+    # The turn's PRIMARY language as the vendor reported it, base code only ("es", not
+    # "es-419"). Empty when the model reports none (flux-general-en, or a turn with no words).
+    language: str = ""
+
+
+def primary_language(languages) -> str:
+    """The first entry of a vendor's language list, reduced to its base code.
+
+    Flux Multilingual sends `languages` sorted by how much of the turn was in each, primary
+    first. This only READS that report; it never infers a language from the text."""
+    if not isinstance(languages, (list, tuple)) or not languages:
+        return ""
+    first = str(languages[0] or "").strip().lower()
+    return first.split("-")[0].split("_")[0]
+
+
+def is_multilingual_stt(model: str) -> bool:
+    """Flux models that accept `language_hint` and report `languages`. Sending a hint to any
+    other model (flux-general-en included) is a 400 that would fail every call."""
+    return "multi" in str(model or "").lower()
 
 
 class StreamingSpeechToText(Protocol):
@@ -552,7 +575,11 @@ class DeepgramFluxSTT:
         }
         if settings.DG_EAGER_EOT_THRESHOLD > 0:
             q["eager_eot_threshold"] = f"{settings.DG_EAGER_EOT_THRESHOLD:.2f}"
-        return f"{settings.DG_STT_URL}?{urlencode(q)}"
+        hints = [h.strip() for h in settings.DG_STT_LANGUAGE_HINTS.split(",") if h.strip()]
+        if hints and is_multilingual_stt(settings.DG_STT_MODEL):
+            # Repeatable parameter: language_hint=en&language_hint=es.
+            q["language_hint"] = hints
+        return f"{settings.DG_STT_URL}?{urlencode(q, doseq=True)}"
 
     async def start(self) -> bool:
         if not settings.DEEPGRAM_API_KEY:
@@ -585,8 +612,10 @@ class DeepgramFluxSTT:
             logger.warning("dg stt: connect failed: %r", exc)
             return False
         self._reader = asyncio.create_task(self._read_loop())
-        logger.info("dg stt: connected model=%s eager=%s",
-                    settings.DG_STT_MODEL, settings.DG_EAGER_EOT_THRESHOLD or "off")
+        logger.info("dg stt: connected model=%s eager=%s hints=%s",
+                    settings.DG_STT_MODEL, settings.DG_EAGER_EOT_THRESHOLD or "off",
+                    settings.DG_STT_LANGUAGE_HINTS
+                    if is_multilingual_stt(settings.DG_STT_MODEL) else "-")
         return True
 
     # Deepgram's `event` values -> our vocabulary. Anything absent (Update, and any value a
@@ -627,6 +656,7 @@ class DeepgramFluxSTT:
                     kind=kind,
                     transcript=str(msg.get("transcript") or "").strip(),
                     confidence=conf,
+                    language=primary_language(msg.get("languages")),
                 ))
         except asyncio.CancelledError:
             raise

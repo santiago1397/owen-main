@@ -84,6 +84,7 @@ class RemoteVoiceAgentSession:
                 "persona": spec.persona,
                 "greeting": spec.greeting,
                 "voice": spec.voice,
+                "voice_es": spec.voice_es,
                 "model": spec.model,
                 "llm_base_url": str(spec.config.get("llm_base_url") or ""),
                 # Per-agent provider pins (VOICE_STACK_MIGRATION M4). Normally EMPTY, so the
@@ -164,7 +165,9 @@ class RemoteVoiceAgentSession:
         # length; it used to be hardcoded null there because nothing carried it back).
         # Falsy is skipped like the rest: a session that never connected has nothing to say
         # about how long it lasted, and 0.0 would read as an instant hang-up.
-        for key in ("metrics", "turn_metrics", "recording_name", "duration_s"):
+        # `language` (phase 4) is the call's language as the recogniser reported it; the
+        # transcript row should store it instead of assuming "en".
+        for key in ("metrics", "turn_metrics", "recording_name", "duration_s", "language"):
             if data.get(key):
                 result = dict(result)
                 result[key] = data[key]

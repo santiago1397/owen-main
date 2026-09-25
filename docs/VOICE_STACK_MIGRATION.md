@@ -352,3 +352,84 @@ token-billed model stays `unrated`, so the wrong rate cannot be helpfully added 
 | Aura-2 voice quality at 8 kHz | Vendor demos are 24 kHz studio audio. Judge down a real phone, never on laptop speakers |
 | Whether 6k `knowledge` is enough | A guess. One agent must cover every situation (M11) |
 | The clone's endpoints | Do not exist yet. M13 is a contract to build against |
+
+---
+
+# Phase 4 — Spanish (2026-09-25)
+
+Amendment decision 8 (the CRM's 2026-09-22 voice-agent amendment): a Spanish-speaking caller
+is answered in Spanish, automatically — no menu, nothing to press. Branch
+`feature/spanish-voice`; not merged, not deployed.
+
+## What changed
+
+| Where | Was | Now |
+|---|---|---|
+| STT model (`VOICE_DG_STT_MODEL`) | `flux-general-en` | **`flux-general-multi`** (Flux Multilingual), hinted `language_hint=en&language_hint=es` (`VOICE_DG_STT_LANGUAGE_HINTS`). Hints are sent ONLY to a multi model — `flux-general-en` answers a hint with 400 |
+| Language detection | none | Flux's own per-turn `TurnInfo.languages` (primary first). `providers.primary_language` reads it; **nothing guesses a language from text** |
+| Voice | one string | `voice` (English) + per-agent **`voice_es`**; default Spanish voice `VOICE_DG_TTS_VOICE_ES=aura-2-celeste-es`. `pipeline._voice_for` picks per turn from the detected language. OpenAI voices are multilingual, so on OpenAI an agent with no `voice_es` keeps its own voice |
+| System prompt | "ALWAYS reply in English" in the default prompt only | `AGENT_LANGUAGE_RULE`, appended in `Conversation.system_prompt` — the ONE place a prompt is assembled — after persona *or* default, plus "the caller is speaking Spanish" when detected |
+| Noise filter | `looks_like_english` counted `isascii()`: **"Sí." scored 1/2 and was dropped** | `looks_like_latin_script`: Latin letters incl. á é í ó ú ñ ü. Arabic/Cyrillic/CJK are still dropped |
+| Batch STT (`VOICE_STT_LANGUAGE`) | `"en"` forced | empty = auto-detect. This path reports no language, so its voice stays English; the reply still follows the caller's words |
+| Transcript | `{"speaker","text"}` | plus `"language"` when the recogniser reported one; `SessionOut.language` = the call's majority language; `turn_metrics[].language` |
+| Default tool filler | English | Spanish on a Spanish call (`DEFAULT_FILLER_ES`); an operator-written filler is spoken as written |
+| Backend | — | `AgentSpec.voice_es`, `build_spec`, `voice_warning(provider, voice, language)` (an `-en` voice in the Spanish slot warns, never blocks — M5), `remote.py` sends `voice_es` and carries `language` back; editor has a "Spanish voice" select |
+
+**Rule on prices, warranty, legal (decision 8):** the language rule tells the model that, in
+Spanish, it states a price, warranty term or anything legal only if the knowledge gives it in
+Spanish, else says a team member will confirm. The human-written Spanish FAQs themselves are
+CRM content and are not part of this branch.
+
+## The greeting: stays English (decided, owner may overrule)
+
+The greeting is spoken before the caller has said a word, so there is nothing to detect. The
+agent switches on the caller's **first words** — a Spanish "Hola" is a Spanish turn, answered
+in the Spanish voice. A per-agent Spanish greeting was not built: it would need the language
+BEFORE any speech, which means a menu or a guess, both of which the owner ruled out. If real
+calls show Spanish speakers hanging up at the English greeting, the cheap overrule is a
+bilingual tail on the English greeting ("…How can I help? ¿Prefiere hablar en español?") —
+a greeting text change on the agent, no code.
+
+## Latency — NOT measured on the model, and why
+
+No Deepgram credential exists on this machine, and no test may reach Deepgram, so **the
+latency of `flux-general-multi` versus `flux-general-en` is unmeasured.** Deepgram's docs give
+no comparison. Measured offline (100k iterations, this host) — the code this branch adds per
+turn:
+
+| Step | Cost |
+|---|---|
+| script filter, 82-char Spanish sentence | 8.8 µs (was 8.2 µs) |
+| `primary_language` | 0.7 µs |
+| `_voice_for` | 0.6 µs |
+| `system_prompt` incl. 6k knowledge | 2.8 µs |
+| Flux URL build (once per call, not per turn) | 32 µs |
+
+So the code adds ~1 µs per turn; the prompt grows by the language rule (~70 tokens), which is
+noise against a 6k-character knowledge block. **The real risk is the model**, and the gate
+before trusting it is real calls in each language. `turn_metrics[].stt_ms` is 0 by
+construction on Flux, so compare **`first_audio_ms` p50/p95 and `eager_hits`** across a day on
+`flux-general-multi` against the same on `flux-general-en`. `turn_metrics[].language` lets the
+two languages be compared separately. **If it is slower, `VOICE_DG_STT_MODEL=flux-general-en`
+and a restart restores English-only**, with hints automatically not sent.
+
+Also unverified: Deepgram documents 16 kHz examples for Flux Multilingual and does not state
+8 kHz linear16 for it. If the multi model rejects 8 kHz, the socket errors and the call goes to
+voicemail (M6) — so **one test call is required before deploy**, not after.
+
+## Left English, deliberately
+
+* `backend/app/flows/runtime.py` writes the agent transcript with `language="en"`. owen-voice
+  now sends `language`; the fix is `language=data.get("language") or "en"` — but `flows/` was
+  being edited by another agent concurrently, so it is left for that owner.
+* `backend/app/agents/openai_realtime.py` stores `language="en"`: a different engine, not the
+  one that answers calls.
+* `backend/app/analysis/transcription.py` (post-call): its `language="en"` is a LABEL on the
+  result, not a setting — the OpenAI request sends no language already. Making it true would
+  mean reading `verbose_json`'s language, which is more than a one-line setting. Agent calls
+  skip it anyway (their transcript comes from owen-voice).
+* Model-facing text (tool descriptions, the caller-context preamble, the English persona the
+  default uses) stays English: the model reads it, the caller never hears it.
+* `services/ai_cost.py` rates `stt.flux-general-multi` at `0.00012833`/s ($0.0077/min, the
+  English rate). Deepgram's pricing page (2026-09-25) lists Flux Multilingual at
+  **$0.0078/min = 0.00013/s** — ~1.3% under. Outside this branch's scope; flagged.

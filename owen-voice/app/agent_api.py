@@ -46,6 +46,8 @@ class AgentConfig(BaseModel):
     persona: str = ""
     greeting: str = ""
     voice: str = ""
+    # Phase 4: the voice for Spanish turns. Empty = the provider's default Spanish voice.
+    voice_es: str = ""
     model: str = ""
     llm_base_url: str = ""
     # Per-agent provider pins (M4). Empty = follow the env default; a lock in .env.prod
@@ -101,6 +103,9 @@ class SessionOut(BaseModel):
     # held the figure all along. A CRM timeline entry that cannot say how long the agent
     # kept someone on the phone cannot answer the first question asked of a new agent.
     duration_s: float = 0.0
+    # The call's language as the recogniser reported it ("en", "es"), "" when it reported
+    # none. OWEN stores it on the transcript, which has said "en" for every call until now.
+    language: str = ""
 
 
 def _auth(key: Optional[str]) -> None:
@@ -140,6 +145,8 @@ async def run_session(
         session.half_duplex = body.agent.half_duplex
     if body.agent.voice:
         session.tts_voice = body.agent.voice
+    if body.agent.voice_es:
+        session.tts_voice_es = body.agent.voice_es
     if body.agent.tts_instructions:
         session.tts_instructions = body.agent.tts_instructions
 
@@ -174,6 +181,7 @@ async def run_session(
             turn_metrics=session.turn_metrics,
             recording_name=session.recording_name or "",
             duration_s=session.duration_s,
+            language=session.language,
         )
     except Exception:  # noqa: BLE001 - never raise into the flow; `failed` routes to fallback
         logger.exception("sessions: run failed for linkedid=%s", body.linkedid)

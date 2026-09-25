@@ -50,24 +50,34 @@ def _capped_knowledge(raw, agent_id: str = "") -> str:
     return text[:KNOWLEDGE_MAX_CHARS]
 
 
-def voice_warning(provider: str, voice: str) -> str | None:
+def voice_warning(provider: str, voice: str, language: str = "en") -> str | None:
     """A wrong voice is a WARNING, never an error (M5).
 
     Changing TTS vendor invalidates every stored voice string at once. Refusing to activate
     agents that were fine yesterday is a worse outcome than one call in the default voice, so
     an unknown voice resolves to the provider default and says so. Returns None when fine.
+
+    `language="es"` checks the Spanish voice (phase 4). Aura-2 voices are one language each,
+    so the Spanish slot must hold an `-es` voice: an English one there would read Spanish in
+    an English accent. OpenAI voices are multilingual, so for them the list is the same.
     """
     voice = str(voice or "").strip()
     if not voice:
         return None
     provider = str(provider or "").strip().lower()
+    spanish = str(language or "").strip().lower() == "es"
+    field = "voice_es" if spanish else "voice"
     if provider == "deepgram":
         if not voice.startswith("aura-"):
-            return (f"voice '{voice}' is not a Deepgram voice (expected aura-2-<name>-en); "
+            expected = "aura-2-<name>-es" if spanish else "aura-2-<name>-en"
+            return (f"{field} '{voice}' is not a Deepgram voice (expected {expected}); "
                     "the provider default will be used")
+        if spanish and not voice.endswith("-es"):
+            return (f"voice_es '{voice}' is not a Spanish Aura-2 voice (expected "
+                    "aura-2-<name>-es); the default Spanish voice will be used")
     elif provider in ("openai", ""):
         if voice not in _OPENAI_VOICES:
-            return (f"voice '{voice}' is not an OpenAI voice; the provider default will be "
+            return (f"{field} '{voice}' is not an OpenAI voice; the provider default will be "
                     "used")
     return None
 
@@ -164,6 +174,9 @@ def validate_agent_config(config: dict | None) -> tuple[list[str], list[str]]:
     warn = voice_warning(str(cfg.get("tts_provider") or ""), cfg.get("voice"))
     if warn:
         warnings.append(warn)
+    warn = voice_warning(str(cfg.get("tts_provider") or ""), cfg.get("voice_es"), "es")
+    if warn:
+        warnings.append(warn)
 
     if not str(cfg.get("greeting") or "").strip():
         warnings.append("no greeting set — the agent will open with nothing scripted")
@@ -184,6 +197,7 @@ def build_spec(agent_id: str, version_id: str | None, config: dict | None) -> Ag
         version_id=str(version_id) if version_id is not None else None,
         persona=str(cfg.get("persona") or ""),
         voice=str(cfg.get("voice") or ""),
+        voice_es=str(cfg.get("voice_es") or ""),
         greeting=str(cfg.get("greeting") or ""),
         model=str(cfg.get("model") or ""),
         engine=str(cfg.get("engine") or "dummy"),

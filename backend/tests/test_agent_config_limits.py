@@ -94,6 +94,32 @@ def test_deepgram_voices_are_matched_by_family_not_enumeration():
           "an OpenAI voice under Deepgram still warns")
 
 
+def test_spanish_voice_is_validated_not_bypassed():
+    print("\ntest_spanish_voice_is_validated_not_bypassed")
+    # Phase 4. Aura-2 voices are one language each, so the Spanish slot needs an -es voice.
+    check(voice_warning("deepgram", "aura-2-celeste-es", "es") is None,
+          "a Spanish Aura-2 voice is fine in the Spanish slot")
+    check(voice_warning("deepgram", "aura-2-thalia-en", "es") is not None,
+          "an ENGLISH Aura-2 voice in the Spanish slot warns")
+    check(voice_warning("deepgram", "alloy", "es") is not None,
+          "an OpenAI voice in the Deepgram Spanish slot warns")
+    check(voice_warning("openai", "nova", "es") is None,
+          "OpenAI voices are multilingual: the same list serves Spanish")
+    check(voice_warning("deepgram", "", "es") is None,
+          "no Spanish voice is not an error — the runtime default applies")
+    _, warnings = validate_agent_config({**BASE, "tts_provider": "deepgram",
+                                         "voice_es": "aura-2-thalia-en"})
+    check(any("voice_es" in w for w in warnings),
+          "activation surfaces a wrong voice_es as a warning")
+    errors, _ = validate_agent_config({**BASE, "tts_provider": "deepgram",
+                                       "voice_es": "aura-2-thalia-en"})
+    check(errors == [], "a wrong voice_es never blocks activation (M5)")
+    spec = build_spec("a1", "v1", {**BASE, "voice_es": "aura-2-selena-es"})
+    check(spec.voice_es == "aura-2-selena-es", "voice_es reaches the spec")
+    check(build_spec("a1", "v1", BASE).voice_es == "",
+          "an agent without voice_es builds with an empty one")
+
+
 def test_provider_pins_are_optional():
     print("\ntest_provider_pins_are_optional")
     errors, _ = validate_agent_config(BASE)

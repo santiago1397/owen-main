@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import math
 import struct
+import unicodedata
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -256,20 +257,30 @@ def wav_unwrap(data: bytes) -> bytes:
     return b""
 
 
-def looks_like_english(text: str, *, min_ratio: float = 0.6) -> bool:
-    """Reject a transcript that is mostly non-Latin.
+def looks_like_latin_script(text: str, *, min_ratio: float = 0.6) -> bool:
+    """Reject a transcript that is mostly non-Latin script.
 
     Whisper-family models do not return "I heard nothing" — on noise they emit fluent text,
     often in another language entirely. A live call produced Chinese and Arabic replies
     because the model hallucinated a token, the LLM answered in kind, and the caller was
     left listening to a language they do not speak. Cheaper to drop it here than to explain
     it downstream.
+
+    LATIN, not ASCII (phase 4). This was `looks_like_english` and counted `isascii()`, so every
+    accented letter was "foreign": "Sí." scored 1/2 and was thrown away as a hallucination, as
+    was any short Spanish answer heavy in á/é/ñ. English and Spanish are both Latin script,
+    which is what this can honestly test; it says nothing about WHICH language — that comes
+    from the recogniser, never from here.
     """
     letters = [c for c in text if c.isalpha()]
     if not letters:
         return False
-    latin = sum(1 for c in letters if c.isascii())
+    latin = sum(1 for c in letters if c.isascii() or _is_latin_letter(c))
     return (latin / len(letters)) >= min_ratio
+
+
+def _is_latin_letter(c: str) -> bool:
+    return unicodedata.name(c, "").startswith("LATIN ")
 
 
 def apply_gain(pcm: bytes, gain: float) -> bytes:

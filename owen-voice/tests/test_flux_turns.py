@@ -97,7 +97,7 @@ def build_convo(stt: FakeSTT):
 
     convo.playout = FakePlayout()
 
-    def _begin_turn(text: str, drafted: bool = False):
+    def _begin_turn(text: str, drafted: bool = False, language: str = ""):
         # Signature must track Conversation._begin_turn: the pump passes drafted=True on the
         # eager path, and a fake that cannot accept it raises inside the pump's broad except,
         # which shows up as "the turn never started" rather than as a TypeError.
