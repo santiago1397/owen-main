@@ -73,6 +73,13 @@ class RemoteVoiceAgentSession:
             "channel_id": ctx.channel_id,
             "linkedid": ctx.linkedid,
             "caller_number": ctx.caller_number or "",
+            # TOP LEVEL, because that is where `SessionIn` declares them. They used to be
+            # sent inside `agent`, where `AgentConfig` does not declare them — so pydantic
+            # dropped both, every call, silently. owen-voice then had no provider to call
+            # and no local facts to render, which is why an agent never knew a caller no
+            # matter what `context_provider` said. The lookup worked; the door was shut.
+            "context": local_ctx,
+            "context_provider": provider,
             "agent": {
                 "persona": spec.persona,
                 "greeting": spec.greeting,
@@ -94,11 +101,6 @@ class RemoteVoiceAgentSession:
                 # Declared verbatim: the model sees names and schemas, and the URL
                 # set is fixed in the pinned version an operator wrote (D6).
                 "custom_tools": spec.config.get("custom_tools") or [],
-                # Already resolved: names, history and prior captures OWEN knows locally.
-                "context": local_ctx,
-                # {url, headers, allowlist} or {} -- owen-voice POSTs to the url and filters
-                # the response to the allowlist. It never learns which CRM answered.
-                "context_provider": provider,
                 "transfer_targets": {
                     k: {"kind": (v or {}).get("kind", "number")}
                     for k, v in (spec.config.get("transfer_targets") or {}).items()
