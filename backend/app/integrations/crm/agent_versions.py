@@ -4,7 +4,9 @@ The CRM is where the owner edits an agent's persona now; owen-main is where it r
 Publish becomes ONE `agent_versions` row, appended exactly as `api/agents.py` saves one and
 gated exactly as it activates one (`validate_agent_config`). Two routes use this module:
 
-  * `POST /api/crm-link/agent-versions` — append (and activate) a published CRM version.
+  * `POST /api/crm-link/agent-versions` — append (and activate) a published CRM version;
+    or, with `{"agent_name", "deactivate": true}`, stop the agent answering (2026-09-25,
+    phase 2c — see "Answering calls" below).
   * `GET  /api/crm-link/agent-versions` — every agent's ACTIVE config, so the CRM's
     `python -m app.ai.import_voice_agent` can copy the live agent instead of the owner
     retyping it. Read-only.
@@ -21,6 +23,27 @@ Rules, each one a test in `tests/test_crm_agent_versions.py`:
     two rows. The same CRM version with DIFFERENT content is refused (409): CRM versions are
     immutable, so that is a second CRM database or a bug, and silently choosing either copy
     would be wrong.
+
+Answering calls is the CRM's own switch (phase 2c, 2026-09-25), separate from what the
+agent may WRITE in the CRM (Off / Suggest / Auto-pilot). It reaches this module as:
+
+  * `activate: true` — make this CRM version the active one. When the CRM version is ALREADY
+    stored (the CRM switched answering back on, or retried), the stored row is activated and
+    NO new version is created: that is the idempotency above, applied to the pointer.
+  * `activate: false` — store it; the live pointer stays where it is (whatever was answering
+    keeps answering — the answer's `answering` / `active_version` say what that is).
+  * `deactivate: true` (no config, no version) — clear `agents.active_version_id`.
+
+**What "deactivated" means on a call.** Nothing fails. The flow's `ai_agent` node resolves the
+agent's active version at node entry (`flows/runtime.py` `_resolve_active_agent_version`);
+with none, `run_agent` returns the `failed` port, and an unwired `failed` port falls through to
+the flow's `default_fallback` — voicemail on this deployment. So a caller who reaches a
+deactivated agent is answered by the flow's fallback exactly as if the agent had errored,
+which is the intended behaviour of "this agent is not answering calls". It does not end the
+call, and it does not delete or edit any version: switching answering back on re-activates the
+stored version by its CRM version number. Every answer carries `answering` (the agent has an
+active version) and `active_version` (its number, or null) so the CRM reports reality, not
+what it asked for.
 
 Pure kernel (`plan`) + thin async glue, so the decision is testable with no database.
 """
@@ -166,13 +189,8 @@ class Refused(Exception):
         self.warnings = warnings or []
 
 
-async def publish(db, *, agent_name: str, config: dict, crm_version: int,
-                  crm_agent_id: int | None = None, activate: bool = True) -> dict:
-    """Append (or recognise) one CRM version. Raises `Refused`; commits on success."""
-    from sqlalchemy.exc import IntegrityError
-
-    from app.models import AgentVersion
-
+async def the_agent(db, agent_name: str):
+    """The ONE agent with this name, or `Refused` (404 none — never created; 409 several)."""
     name = (agent_name or "").strip()
     found = await agents_named(db, name)
     if not found:
@@ -181,13 +199,24 @@ async def publish(db, *, agent_name: str, config: dict, crm_version: int,
         ids = ", ".join(str(a.id) for a in found)
         raise Refused(409, f"the phone system has {len(found)} agents named '{name}' "
                            f"({ids}); rename one so the CRM can tell them apart")
-    agent = found[0]
+    return found[0]
+
+
+async def publish(db, *, agent_name: str, config: dict, crm_version: int,
+                  crm_agent_id: int | None = None, activate: bool = True) -> dict:
+    """Append (or recognise) one CRM version. Raises `Refused`; commits on success."""
+    from sqlalchemy.exc import IntegrityError
+
+    from app.models import AgentVersion
+
+    agent = await the_agent(db, agent_name)
 
     # Two tries: a concurrent push of the next version can take the number we planned
     # (uq_agent_version). The second plan sees that row — and if it was THIS crm_version,
     # answers "existing" rather than appending a duplicate.
     for attempt in (1, 2):
-        p = plan(await versions_of(db, agent.id), config, crm_version, crm_agent_id)
+        existing = await versions_of(db, agent.id)
+        p = plan(existing, config, crm_version, crm_agent_id)
         if p.action == "refuse":
             raise Refused(422, refusal_message(p.errors), p.errors, p.warnings)
         if p.action == "conflict":
@@ -209,6 +238,8 @@ async def publish(db, *, agent_name: str, config: dict, crm_version: int,
         if activate:
             agent.active_version_id = version_id
         await db.commit()
+        numbers = {vid: n for vid, n, _ in existing}
+        numbers[version_id] = version
         return {
             "ok": True,
             "agent_id": str(agent.id),
@@ -217,6 +248,34 @@ async def publish(db, *, agent_name: str, config: dict, crm_version: int,
             "crm_version": crm_version,
             "created": created,
             "active": agent.active_version_id == version_id,
+            "answering": agent.active_version_id is not None,
+            "active_version": numbers.get(agent.active_version_id),
             "warnings": p.warnings,
         }
     raise AssertionError("unreachable")
+
+
+async def deactivate(db, *, agent_name: str) -> dict:
+    """Stop an agent answering: clear its active version. Idempotent (already off answers
+    `deactivated: false`). Never deletes or edits a version. Raises `Refused` (404 / 409 by
+    name, exactly as `publish`); commits on success.
+
+    A call that reaches the agent afterwards takes its flow node's `failed` port, i.e. the
+    flow's fallback (voicemail) — see the module docstring. That is "not answering", not a
+    failed call."""
+    agent = await the_agent(db, agent_name)
+    previous = agent.active_version_id
+    previous_number = None
+    if previous is not None:
+        previous_number = {vid: n for vid, n, _ in await versions_of(db, agent.id)} \
+            .get(previous)
+        agent.active_version_id = None
+        await db.commit()
+    return {
+        "ok": True,
+        "agent_id": str(agent.id),
+        "deactivated": previous is not None,
+        "previous_version": previous_number,
+        "answering": False,
+        "active_version": None,
+    }

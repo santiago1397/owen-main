@@ -12,6 +12,14 @@ Asserted by behaviour, against a fake database that records every row written:
   5. **Same CRM version, different content** is refused rather than silently picking one.
   6. **Gated like the module**: scope `crm_link`, and the kill switch refuses before a read.
   7. **The GET is read-only** and returns each agent's ACTIVE config.
+  8. **Answering calls** (phase 2c, 2026-09-25) — the CRM's own switch:
+     * `activate: true` for a CRM version ALREADY stored activates that row and appends none;
+     * `{"agent_name", "deactivate": true}` clears the active pointer, deletes nothing, and
+       says what was answering; the two forms cannot be mixed;
+     * every answer says what is answering NOW (`answering`, `active_version`);
+     * the route's docstring says a deactivated agent sends the caller to the flow's
+       fallback (the `failed` port), not a failed call — pinned, because the word
+       "deactivate" invites the wrong reading.
 
 Run: python -m tests.test_crm_agent_versions
 """
@@ -359,6 +367,140 @@ def test_the_get_returns_each_agents_active_config_and_writes_nothing():
     check("nothing written", db.commits == 0 and db.flushes == 0 and db.pending == [])
 
 
+# --- 7. answering calls: activate a stored version, deactivate -------------------------------
+
+def deactivate(db, name="Intake"):
+    from app.integrations.crm import agent_versions as av
+
+    return asyncio.run(av.deactivate(db, agent_name=name))
+
+
+def test_activating_a_stored_crm_version_moves_the_pointer_and_appends_nothing():
+    print("stored while not answering, then switched on:")
+    a = agent()
+    db = FakeDB([a])
+    stored = publish(db, activate=False)
+    check("stored as version 1", stored["created"] and stored["version"] == 1)
+    check("...not active", stored["active"] is False and a.active_version_id is None)
+    check("...and it says nothing is answering",
+          stored["answering"] is False and stored["active_version"] is None)
+    rows = len(db.versions)
+    on = publish(db, activate=True)
+    check("switching on appends NOTHING", len(db.versions) == rows == 1)
+    check("it answers created: false with the same version",
+          on["created"] is False and on["version_id"] == stored["version_id"])
+    check("the stored row is now the active one",
+          a.active_version_id == uuid.UUID(stored["version_id"]) and on["active"] is True)
+    check("...and it says so", on["answering"] is True and on["active_version"] == 1)
+
+
+def test_storing_a_new_version_says_what_is_still_answering():
+    print("a new version stored while an older one answers:")
+    a = agent()
+    db = FakeDB([a])
+    publish(db)                                        # CRM v7 → version 1, active
+    out = publish(db, crm_version=8, config={**GOOD, "greeting": "Hi."}, activate=False)
+    check("stored as version 2, not active", out["version"] == 2 and out["active"] is False)
+    check("version 1 is still answering and the answer names it",
+          out["answering"] is True and out["active_version"] == 1)
+
+
+def test_deactivate_clears_the_pointer_and_deletes_nothing():
+    print("deactivate:")
+    a = agent()
+    db = FakeDB([a])
+    first = publish(db)
+    rows = [(v.id, v.version, dict(v.config)) for v in db.versions]
+    out = deactivate(db)
+    check("no active version any more", a.active_version_id is None)
+    check("it says what was answering", out["deactivated"] is True
+          and out["previous_version"] == 1)
+    check("and that nothing is now", out["answering"] is False and out["active_version"] is None)
+    check("no version deleted or changed",
+          [(v.id, v.version, dict(v.config)) for v in db.versions] == rows)
+    again = deactivate(db)
+    check("deactivating again is harmless", again["deactivated"] is False
+          and a.active_version_id is None)
+    on = publish(db, activate=True)
+    check("switching back on re-activates the SAME stored row",
+          on["created"] is False and on["version_id"] == first["version_id"]
+          and a.active_version_id == uuid.UUID(first["version_id"]))
+
+
+def test_deactivate_finds_the_agent_by_name_like_publish():
+    print("deactivate an agent owen-main does not have, or has twice:")
+    from app.integrations.crm import agent_versions as av
+
+    for agents, status in (([agent("Other")], 404), ([agent(), agent()], 409)):
+        db = FakeDB(agents)
+        try:
+            deactivate(db)
+            r = None
+        except av.Refused as e:
+            r = e
+        check(f"{status}", r is not None and r.status == status)
+        check("nothing written", db.commits == 0
+              and all(x.active_version_id is None for x in agents))
+
+
+def test_the_two_forms_cannot_be_mixed():
+    print("the route's two body forms:")
+    from app.integrations.crm import api as crm_api
+
+    def refused_body(**kw):
+        try:
+            crm_api.AgentVersionIn(**kw)
+        except Exception:  # noqa: BLE001 - pydantic's ValidationError
+            return True
+        return False
+
+    check("deactivate with only the name is accepted",
+          not refused_body(agent_name="Intake", deactivate=True))
+    check("deactivate with a config is refused",
+          refused_body(agent_name="Intake", deactivate=True, config=GOOD))
+    check("deactivate with a version is refused",
+          refused_body(agent_name="Intake", deactivate=True, crm_version=3))
+    check("deactivate with activate is refused",
+          refused_body(agent_name="Intake", deactivate=True, activate=True))
+    check("a publish without a config is refused",
+          refused_body(agent_name="Intake", crm_version=3))
+    check("a publish without a version is refused",
+          refused_body(agent_name="Intake", config=GOOD))
+
+
+def test_the_route_deactivates_and_says_the_caller_goes_to_the_fallback():
+    print("the route, deactivating:")
+    from app.core.config import settings
+    from app.integrations.crm import api as crm_api
+
+    saved = settings.CRM_LINK_ENABLED
+    settings.CRM_LINK_ENABLED = True
+    try:
+        a = agent()
+        db = FakeDB([a])
+        publish(db)
+        out = asyncio.run(crm_api.publish_agent_version(
+            crm_api.AgentVersionIn(agent_name="Intake", deactivate=True), db=db, _key=None))
+        check("through the route", out["deactivated"] is True and a.active_version_id is None)
+    finally:
+        settings.CRM_LINK_ENABLED = saved
+    doc = " ".join((crm_api.publish_agent_version.__doc__ or "").split())
+    check("the docstring says the `failed` port", "`failed` port" in doc)
+    check("...and the fallback (voicemail)", "fallback" in doc and "voicemail" in doc)
+    check("...and that calls do not fail", "does not make calls fail" in doc)
+
+
+def test_a_deactivated_agent_is_what_the_runtime_treats_as_no_active_version():
+    """The docstring's claim, checked against the code it describes."""
+    print("the runtime's reading of 'no active version':")
+    import app.flows.runtime as rt
+
+    src = inspect.getsource(rt)
+    check("the runtime resolves the ACTIVE version", "agent.active_version_id is None" in src)
+    check("...and with none, takes the failed port",
+          'has no active version' in src and 'return ("failed", {})' in src)
+
+
 def main():
     test_a_second_push_of_the_same_crm_version_makes_no_second_version()
     test_a_retry_after_the_live_pointer_moved_does_not_resurrect_by_accident()
@@ -370,6 +512,13 @@ def main():
     test_both_routes_are_crm_link_scoped_and_refuse_while_the_link_is_off()
     test_the_route_answers_refusals_as_a_sentence_the_crm_can_show()
     test_the_get_returns_each_agents_active_config_and_writes_nothing()
+    test_activating_a_stored_crm_version_moves_the_pointer_and_appends_nothing()
+    test_storing_a_new_version_says_what_is_still_answering()
+    test_deactivate_clears_the_pointer_and_deletes_nothing()
+    test_deactivate_finds_the_agent_by_name_like_publish()
+    test_the_two_forms_cannot_be_mixed()
+    test_the_route_deactivates_and_says_the_caller_goes_to_the_fallback()
+    test_a_deactivated_agent_is_what_the_runtime_treats_as_no_active_version()
     print("\nALL PASS")
 
 

@@ -428,6 +428,10 @@ def test_the_crm_link_router_gained_exactly_one_route():
         # CRM version, never creates an agent); GET lists the active configs so the CRM
         # can import the live agent once. One path, two methods — so the path count is
         # fifteen and the route count sixteen.
+        # Phase 2c (2026-09-25): NO new route. The same POST now also takes
+        # `{"agent_name", "deactivate": true}` (the CRM's "Answering calls" switch off), and
+        # `activate: true` for a CRM version already stored activates that row without
+        # appending one. Deliberately one route, so this fence still counts sixteen.
         ("/api/crm-link/agent-versions", ("POST",)),
         ("/api/crm-link/agent-versions", ("GET",)),
     ])

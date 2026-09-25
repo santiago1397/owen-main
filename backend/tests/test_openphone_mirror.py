@@ -662,6 +662,8 @@ def test_the_router_is_exactly_these_routes_and_the_crm_link_is_untouched():
 
     crm = sorted({r.path for r in main_mod.app.routes
                   if getattr(r, "path", "").startswith("/api/crm-link")})
+    # Still fifteen after phase 2c (2026-09-25): the CRM's "Answering calls" switch rides the
+    # same POST /agent-versions as a body form (`deactivate: true`), so no path was added.
     # Fifteen paths since 2026-09-25: /agent-versions (GET + POST on one path) lets the CRM
     # import the live voice agent and publish the versions it edits. Not the mirror's either.
     # Fourteen since 2026-09-23: /live-calls, /live-calls/{linkedid}/listen and /takeover

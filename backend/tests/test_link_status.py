@@ -226,6 +226,9 @@ def test_it_is_mounted_as_one_get_route_and_nothing_else_moved():
     check("mounted on the app", len(mounted) == 1)
     crm = {r.path for r in main_mod.app.routes
            if getattr(r, "path", "").startswith("/api/crm-link")}
+    # Still fifteen after phase 2c (2026-09-25): answering on/off for a voice agent rides the
+    # SAME POST /agent-versions (`deactivate: true`, or `activate` of a stored CRM version) —
+    # a body form, not a path, so nothing here moved.
     # Fifteen PATHS since 2026-09-25: /agent-versions (GET and POST on one path — sixteen
     # routes) lets the CRM publish the voice agent it edits and import the live one.
     # Fourteen since 2026-09-23: /live-calls and /live-calls/{linkedid}/listen|takeover, so
