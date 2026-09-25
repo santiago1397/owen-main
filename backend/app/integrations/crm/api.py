@@ -15,8 +15,9 @@ route is authenticated anyway.
     completes the job, 502 makes the queue retry with backoff.
   * **The CRM**, asking OWEN to do something to a phone line: `POST /calls`, `POST /messages`,
     `POST /softphone/credentials`, `GET /health`, `GET /live-calls` and
-    `POST /live-calls/{linkedid}/listen|takeover` (supervising an AI-agent call), scope
-    `crm_link`. A NEW scope, because
+    `POST /live-calls/{linkedid}/listen|takeover` (supervising an AI-agent call), and
+    `GET|POST /agent-versions` (the CRM publishes a voice agent it edits; see
+    `agent_versions.py`), scope `crm_link`. A NEW scope, because
     `agent_write` is documented as
     "WRITE captures and notes via /api/agent-runtime/*" and using it to authorise placing a
     telephone call would falsify that description — the same objection `api/agent_runtime.py`
@@ -47,7 +48,7 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from fastapi import APIRouter, Depends, File, HTTPException, Response, UploadFile, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -55,6 +56,7 @@ from app.api.ai.deps import require_scope
 from app.core.apikeys import SCOPE_AGENT_WRITE, SCOPE_CRM_LINK
 from app.core.config import settings
 from app.db import get_db
+from app.integrations.crm import agent_versions as crm_agent_versions
 from app.integrations.crm import binding as crm_binding
 from app.integrations.crm import config as crm_config
 from app.integrations.crm import email_jobs as crm_email_jobs
@@ -986,3 +988,89 @@ async def stream_call_recording(
     # cache anywhere on the path. The CRM adds its own headers for the browser.
     return Response(content=audio, media_type="audio/wav",
                     headers={"Cache-Control": "private, max-age=300"})
+
+
+# --- voice agents edited in the CRM (phase 2b, 2026-09-25) ------------------------------------
+
+
+class AgentVersionIn(BaseModel):
+    """One published CRM version — or, with `deactivate: true`, "stop answering".
+
+    Publish form: `{agent_name, config, crm_version, crm_agent_id?, activate}`. `config` is
+    owen-main's `agent_versions.config` shape, already mapped by the CRM (`app/ai/voice.py`
+    there); this side adds only `crm_version` and `crm_agent_id` to it.
+
+    Deactivate form (phase 2c, 2026-09-25): `{agent_name, deactivate: true}` and nothing
+    else — no config, no version, no `activate`. Mixing the two is refused (422) rather than
+    guessed: "activate and deactivate" has no meaning."""
+
+    model_config = {"extra": "forbid"}
+
+    agent_name: str = Field(min_length=1, max_length=200)
+    config: Optional[dict] = None
+    crm_version: Optional[int] = Field(default=None, ge=1)
+    crm_agent_id: Optional[int] = Field(default=None, ge=1)
+    activate: bool = True
+    deactivate: bool = False
+
+    @model_validator(mode="after")
+    def _one_form(self):
+        if self.deactivate:
+            extra = sorted({"config", "crm_version", "crm_agent_id", "activate"}
+                           & self.model_fields_set)
+            if extra:
+                raise ValueError("deactivate takes only agent_name, not " + ", ".join(extra))
+        elif self.config is None or self.crm_version is None:
+            raise ValueError("a published version needs config and crm_version "
+                             "(or send deactivate: true)")
+        return self
+
+
+@router.post("/agent-versions")
+async def publish_agent_version(
+    body: AgentVersionIn,
+    db: AsyncSession = Depends(get_db),
+    _key=Depends(require_scope(SCOPE_CRM_LINK)),
+) -> dict:
+    """Append a CRM-published version to an EXISTING agent, validated as activation is — or
+    activate / deactivate it: the CRM's "Answering calls" switch (phase 2c, 2026-09-25).
+
+    * `activate: true` for a CRM version already stored activates THAT row and creates no
+      new version (`created: false`).
+    * `{"agent_name", "deactivate": true}` clears the agent's active version. **This does not
+      make calls fail.** The flow's `ai_agent` node finds no active version, takes its
+      `failed` port, and the caller goes to the flow's fallback (`default_fallback` —
+      voicemail here), exactly as the flow already handles an agent that errors. That is
+      what "not answering calls" means. No version is deleted or changed; switching back on
+      re-activates the stored one.
+
+    Every 200 carries `answering` and `active_version` — what is answering NOW, so the CRM
+    shows reality rather than what it asked for.
+
+    404 unknown agent (never created here) · 409 two agents with the name, or this CRM
+    version already stored with other content · 422 validation errors, all of them, in
+    `detail.errors` with the sentence in `detail.message` · 200 otherwise, `created` false
+    when this CRM version was already stored (idempotent: nothing appended)."""
+    _require_enabled()
+    try:
+        if body.deactivate:
+            return await crm_agent_versions.deactivate(db, agent_name=body.agent_name)
+        return await crm_agent_versions.publish(
+            db, agent_name=body.agent_name, config=body.config,
+            crm_version=body.crm_version, crm_agent_id=body.crm_agent_id,
+            activate=body.activate)
+    except crm_agent_versions.Refused as r:
+        logger.info("crm-link: agent version refused (%d): %s", r.status, r.message)
+        raise HTTPException(r.status, detail={"message": r.message, "errors": r.errors,
+                                              "warnings": r.warnings}) from None
+
+
+@router.get("/agent-versions")
+async def list_active_agent_versions(
+    db: AsyncSession = Depends(get_db),
+    _key=Depends(require_scope(SCOPE_CRM_LINK)),
+) -> dict:
+    """Every agent and its ACTIVE config, for the CRM's one-off import of the live agent.
+    Read-only: executes SELECTs and nothing else."""
+    _require_enabled()
+    return {"agents": await crm_agent_versions.active_agents(db)}

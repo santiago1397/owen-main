@@ -423,8 +423,19 @@ def test_the_crm_link_router_gained_exactly_one_route():
         ("/api/crm-link/live-calls", ("GET",)),
         ("/api/crm-link/live-calls/{linkedid}/listen", ("POST",)),
         ("/api/crm-link/live-calls/{linkedid}/takeover", ("POST",)),
+        # A voice agent edited in the CRM (phase 2b, 2026-09-25): POST appends a published
+        # CRM version to an EXISTING agent (validated as activation is, idempotent on the
+        # CRM version, never creates an agent); GET lists the active configs so the CRM
+        # can import the live agent once. One path, two methods — so the path count is
+        # fifteen and the route count sixteen.
+        # Phase 2c (2026-09-25): NO new route. The same POST now also takes
+        # `{"agent_name", "deactivate": true}` (the CRM's "Answering calls" switch off), and
+        # `activate: true` for a CRM version already stored activates that row without
+        # appending one. Deliberately one route, so this fence still counts sixteen.
+        ("/api/crm-link/agent-versions", ("POST",)),
+        ("/api/crm-link/agent-versions", ("GET",)),
     ])
-    check("the route table is exactly the fourteen we expect, no more and no fewer",
+    check("the route table is exactly the sixteen we expect, no more and no fewer",
           paths == expected)
 
 
