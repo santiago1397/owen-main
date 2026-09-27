@@ -311,6 +311,14 @@ class Settings(BaseSettings):
     # an email stored before this was switched on is never sent — see
     # `integrations/crm/email_jobs.py`.
     CRM_LINK_EMAIL_JOBS_ENABLED: bool = False
+    # THE CRM LINE RINGS PEOPLE FIRST, THEN AN AI AGENT (phase 3, 2026-09-25). OFF BY DEFAULT,
+    # because the CRM-bound DID is the company's main line and nobody should discover this
+    # change by hearing a robot. False = a call nobody answers takes a voicemail, exactly as
+    # before. True = it is handed to the agent of the bound number's CAMPAIGN
+    # (`campaigns.agent_id`) — only when that campaign is active and names an agent with an
+    # ACTIVE version, and only after the recording-consent notice has played; any failure on
+    # the way still takes the voicemail. See `integrations/crm/handler.py::_ai_agent_seam`.
+    CRM_LINK_AGENT_ANSWERS: bool = False
 
     # PICTURES ON A CRM TEXT (2026-09-16). BulkVS sends an MMS by FETCHING the media from a
     # public URL, so an outbound picture has to be published somewhere the carrier can

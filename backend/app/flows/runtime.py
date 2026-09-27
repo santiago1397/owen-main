@@ -22,12 +22,14 @@ import logging
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Optional
+from dataclasses import dataclass, field
 from zoneinfo import ZoneInfo
 
 import httpx
 from sqlalchemy import select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
+from app.agents.campaign import CampaignFacts, context_for as campaign_context
 from app.agents.service import build_spec
 from app.agents.session import AgentCallContext, get_session_for_agent
 from app.core.calllog import clog
@@ -211,24 +213,78 @@ async def _pin_forwarded_to(db, provider_id: int, provider_call_sid: str, target
     )
 
 
-async def _agent_id_for_node(db, node: dict) -> Optional[str]:
-    """The agent an `ai_agent` node runs: a direct `agent_id`, or a SLOT (D12).
+async def _campaign_for_number(db, dialed_number: str) -> Optional[CampaignFacts]:
+    """The campaign of the dialled DID, flattened, or None (phase 3, 2026-09-25).
 
-    A slot is a mutable pointer, so swapping which agent answers is a data edit rather than a
-    new flow version. Explicit `agent_id` still wins where a flow deliberately pins one."""
+    Keyed exactly as `_resolve_active_flow_version` keys the number — phone_number +
+    media_provider — so "which flow answers" and "which campaign answers" can never be
+    answered from two different rows of the same DID. An INACTIVE campaign is treated as no
+    campaign: switching a campaign off must not leave its agent answering its numbers.
+    """
+    if not dialed_number:
+        return None
+    number = (
+        await db.execute(
+            select(Number).where(
+                Number.phone_number == dialed_number,
+                Number.media_provider == settings.BULKVS_MEDIA_PROVIDER,
+            ).limit(1)
+        )
+    ).scalar_one_or_none()
+    if number is None or number.campaign_id is None:
+        return None
+    return await _campaign_facts(db, number.campaign_id)
+
+
+async def _campaign_facts(db, campaign_id) -> Optional[CampaignFacts]:
+    """One campaign row as `CampaignFacts`, or None if it is missing or switched off."""
+    if not campaign_id:
+        return None
+    camp = (
+        await db.execute(select(Campaign).where(Campaign.id == campaign_id))
+    ).scalar_one_or_none()
+    if camp is None or camp.active is False:
+        return None
+    return CampaignFacts(
+        campaign_id=str(camp.id),
+        name=str(camp.name or ""),
+        brief=str(getattr(camp, "agent_brief", None) or ""),
+        agent_id=str(camp.agent_id) if getattr(camp, "agent_id", None) else None,
+    )
+
+
+async def _agent_id_for_node(db, node: dict,
+                             campaign: Optional[CampaignFacts] = None) -> Optional[str]:
+    """The agent an `ai_agent` node runs. Resolution order, first hit wins:
+
+      1. the node's explicit `agent_id` (or legacy `agent`) — a flow that deliberately pins
+         an agent keeps it, whatever its number's campaign says;
+      2. the node's `slot` (D12), when the slot exists AND points at an agent — a mutable
+         pointer, so swapping which agent answers is a data edit, not a new flow version;
+      3. the CAMPAIGN of the dialled number (`campaigns.agent_id`, phase 3) — so adding a
+         number to a campaign needs no new or edited flow. `campaign` is resolved by the
+         caller (`_campaign_for_number`), because the same lookup also supplies the
+         campaign's facts to the agent;
+      4. none — the node takes its `failed` port, then the flow's fallback, exactly as before.
+
+    Step 3 only ever FILLS A GAP: it is consulted when the node names no agent, or names a
+    slot that is missing or unassigned. A number with no campaign, or a campaign with no
+    agent, resolves exactly as it did before phase 3.
+    """
     direct = node.get("agent_id") or node.get("agent")
     if direct:
         return str(direct)
     slot = node.get("slot")
-    if not slot:
-        return None
-    row = (
-        await db.execute(select(AgentSlot).where(AgentSlot.name == str(slot)))
-    ).scalar_one_or_none()
-    if row is None or row.agent_id is None:
+    if slot:
+        row = (
+            await db.execute(select(AgentSlot).where(AgentSlot.name == str(slot)))
+        ).scalar_one_or_none()
+        if row is not None and row.agent_id is not None:
+            return str(row.agent_id)
         logger.warning("flow runtime: agent slot %r is unassigned", slot)
-        return None
-    return str(row.agent_id)
+    if campaign is not None and campaign.agent_id:
+        return str(campaign.agent_id)
+    return None
 
 
 async def _resolve_active_agent_version(db, agent_id) -> Optional[AgentVersion]:
@@ -560,6 +616,155 @@ async def _noop_emit(event_type: str, provider_sequence: str, payload: dict) -> 
     return None
 
 
+@dataclass
+class AgentRun:
+    """What one agent session on a live channel came to."""
+
+    port: str
+    data: dict = field(default_factory=dict)
+    agent_name: str = ""
+    version: Optional[int] = None
+
+
+async def run_agent_on_call(
+    *, ari, channel_id: str, lid: str, dialed: str, caller_number: str, provider_id: int,
+    agent_id: str, campaign: Optional[CampaignFacts] = None, report_to_crm: bool = True,
+) -> AgentRun:
+    """Run `agent_id`'s ACTIVE version on a channel that is already answered and in Stasis.
+
+    The body of the flow's `ai_agent` node, lifted out so the CRM line's no-answer seam
+    (`integrations/crm/handler.py::_ai_agent_seam`) runs an agent through EXACTLY the same
+    machinery: resolve + pin the version, run the session, persist captures/transcript/cost,
+    register the recording, honour the agent's transfer allowlist, and report. One agent
+    runtime, not two.
+
+    `campaign` is the dialled number's campaign; its facts reach the agent as context
+    (agents/campaign.py). `report_to_crm=False` skips the CRM thread report here, for a
+    caller that files the call itself (the CRM line reports its own `ended` event, and two
+    would be two call rows on the customer's thread).
+
+    Never raises: any failure is `AgentRun(port="failed")`, and the caller routes to its
+    fallback (the flow's, or voicemail on the CRM line).
+    """
+    agent_name = ""
+    try:
+        async with SessionLocal() as dba:
+            version = await _resolve_active_agent_version(dba, agent_id)
+            if version is None:
+                logger.info("flow runtime: agent %s has no active version (linkedid=%s)", agent_id, lid)
+                return AgentRun(port="failed")
+            await _pin_agent_version(dba, provider_id, lid, version.id)
+            await dba.commit()
+            # The NAME, for the CRM's thread. The node carries an `agent_name` too, but
+            # that is a label the flow editor wrote when the node was drawn: it goes
+            # stale the moment an agent is renamed, and a CRM row saying which agent
+            # answered is worth a lookup in the session that is already open.
+            agent_row = await dba.get(Agent, version.agent_id)
+            agent_name = str(getattr(agent_row, "name", "") or "")
+            spec = build_spec(str(version.agent_id), str(version.id), version.config)
+        session = get_session_for_agent(spec)
+        ctx = AgentCallContext(
+            channel_id=channel_id, linkedid=lid, ari=ari,
+            # The agent needs to know WHO is calling: it is the caller's identity for a
+            # capture, and the default recipient for an in-call SMS.
+            caller_number=caller_number or None,
+            # The dialled number's campaign — facts about the LINE, kept apart from the
+            # caller's own (phase 3; agents/campaign.py).
+            campaign=campaign_context(campaign) or None,
+        )
+        result = await session.run(spec, ctx)
+        # Persist BEFORE returning the port: the interpreter may route straight into a
+        # terminal node, and a lead captured at minute two must survive a call that ends
+        # at minute four. Own short session, like every other write on this path.
+        try:
+            async with SessionLocal() as dbw:
+                await _persist_agent_output(
+                    dbw, provider_id, lid, version.id, result.data or {}
+                )
+                await dbw.commit()
+        except Exception:  # noqa: BLE001 - never dead-air a caller over a failed write
+            logger.exception("flow runtime: storing agent output failed (linkedid=%s)", lid)
+
+        # Register the agent's bridge recording (agent observability).
+        #
+        # BELT AND BRACES, not the primary path. I assumed OWEN's consumer could not see
+        # this recording, because owen-voice records a bridge belonging to its OWN Stasis
+        # app. That assumption was wrong: on the first real call the worker logged
+        # `ingest_recording_event sid=...-agent-1` four seconds after the hangup and the
+        # fetch/transcribe chain ran on its own. ARI delivered RecordingFinished to OWEN's
+        # app as well, presumably because the bridge held a channel that app owns.
+        #
+        # This stays because it costs nothing and closes the gap if that ever stops being
+        # true (a bridge with no OWEN-owned channel, an ARI version change). It is
+        # idempotent on the recording SID, so the two paths cannot double-register.
+        rec_name = str((result.data or {}).get("recording_name") or "")
+        if rec_name:
+            try:
+                await _register_agent_recording(provider_id, lid, rec_name)
+            except Exception:  # noqa: BLE001 - a lost recording is a lost diagnostic,
+                # never a lost call. It must not touch the port the caller is routed on.
+                logger.exception(
+                    "flow runtime: registering agent recording failed (linkedid=%s)", lid
+                )
+
+        # D9: the agent may have named a destination from its OWN declared allowlist. If
+        # it did, move the caller there and tell the interpreter to stand down. If it
+        # only said "transfer" with no destination, fall through unchanged so the flow
+        # author's `transfer` edge still decides — the allowlist adds a capability, it
+        # does not take the graph's away.
+        #
+        # This runs BEFORE the CRM report, and that order is the fix for a bug, not a
+        # tidy-up: the destination is only written into `data` here, so a report queued
+        # first said `transfer: null` on every transferred call ever made.
+        port, data = result.port, (result.data or {})
+        if result.port == "transfer":
+            chosen = resolve_transfer_target(
+                (version.config or {}).get("transfer_targets"),
+                str((result.data or {}).get("destination") or ""),
+            )
+            if chosen is not None:
+                moved = await _do_agent_transfer(ari, channel_id, lid, chosen)
+                if moved:
+                    port, data = "transferred", {**(result.data or {}), "transfer": chosen}
+            elif (result.data or {}).get("destination"):
+                # Named something not on its allowlist. Loud, because it is either a
+                # misconfigured agent or a caller talking it into somewhere it may not go.
+                logger.warning(
+                    "flow runtime: agent asked for undeclared destination %r "
+                    "(linkedid=%s); falling back to the graph's transfer edge",
+                    (result.data or {}).get("destination"), lid,
+                )
+
+        # CRM timeline entry (CRM_CONTEXT_SPEC C10). Enqueued, never awaited: the caller
+        # is still on the line — or already with the person they were transferred to —
+        # and a slow CRM must not hold the flow. Queued with the FINAL outcome, so a
+        # transferred call reports where it went.
+        try:
+            await _enqueue_crm_report(spec, lid, ctx.caller_number, port, data)
+        except Exception:  # noqa: BLE001 - reporting must never affect the call
+            logger.exception("flow runtime: queuing the CRM report failed (linkedid=%s)", lid)
+
+        # ...and the CRM's own thread (2026-09-22, phase 1). Separate from the report
+        # above on purpose: that one is the configurable `context_provider` contract and
+        # is off unless an agent declares one, while this is the CRM link the company
+        # actually runs. Both are best-effort; neither may reach the caller.
+        try:
+            if report_to_crm:
+                await _report_agent_call_to_crm(
+                    lid=lid, dialed=str(dialed), caller_number=ctx.caller_number,
+                    agent_name=agent_name, version=version.version, port=port, data=data)
+        except Exception:  # noqa: BLE001 - the CRM never affects the call
+            logger.exception(
+                "flow runtime: reporting the agent call to the CRM failed "
+                "(linkedid=%s)", lid)
+
+        return AgentRun(port=port, data=data, agent_name=agent_name,
+                        version=version.version)
+    except Exception:  # noqa: BLE001 - never dead-air; the node takes `failed`/fallback
+        logger.exception("flow runtime: ai_agent run failed (linkedid=%s)", lid)
+        return AgentRun(port="failed")
+
+
 async def run_flow_for_stasis(event: dict, ari: AriControl) -> None:
     """Entry point the consumer calls on an entry-channel StasisStart. Best-effort: any
     failure is logged, never raised into the WS loop (the consumer also guards this)."""
@@ -638,13 +843,19 @@ async def run_flow_for_stasis(event: dict, ari: AriControl) -> None:
             await db2.commit()
 
     async def run_agent(node: dict) -> tuple[str, dict]:
-        # ai_agent node entry (Ticket 11): resolve + PIN the node's agent version, run a
-        # VoiceAgentSession (dummy by default; kill-switch/per-agent engine), return its exit
-        # PORT + tool data. The agent never bridges — the interpreter routes by the port.
-        # Any failure -> ("failed", {}) so the node takes its `failed` port (then fallback).
+        # ai_agent node entry (Ticket 11): resolve the node's agent — explicit id, slot, then
+        # the dialled number's CAMPAIGN (phase 3; `_agent_id_for_node` has the order) — and
+        # run it on this channel. Any failure -> ("failed", {}) so the node takes its
+        # `failed` port (then fallback).
+        campaign: Optional[CampaignFacts] = None
         try:
             async with SessionLocal() as dbs:
-                agent_id = await _agent_id_for_node(dbs, node)
+                try:
+                    campaign = await _campaign_for_number(dbs, str(dialed))
+                except Exception:  # noqa: BLE001 - a campaign is context; never cost the call
+                    logger.exception("flow runtime: campaign lookup failed (linkedid=%s)", lid)
+                    campaign = None
+                agent_id = await _agent_id_for_node(dbs, node, campaign)
         except Exception:  # noqa: BLE001 - a DB hiccup takes the `failed` port, not dead air
             logger.exception("flow runtime: agent lookup failed (linkedid=%s)", lid)
             return ("failed", {})
@@ -653,117 +864,12 @@ async def run_flow_for_stasis(event: dict, ari: AriControl) -> None:
                 "flow runtime: ai_agent node resolves to no agent (linkedid=%s)", lid
             )
             return ("failed", {})
-        try:
-            async with SessionLocal() as dba:
-                version = await _resolve_active_agent_version(dba, agent_id)
-                if version is None:
-                    logger.info("flow runtime: agent %s has no active version (linkedid=%s)", agent_id, lid)
-                    return ("failed", {})
-                await _pin_agent_version(dba, provider_id, lid, version.id)
-                await dba.commit()
-                # The NAME, for the CRM's thread. The node carries an `agent_name` too, but
-                # that is a label the flow editor wrote when the node was drawn: it goes
-                # stale the moment an agent is renamed, and a CRM row saying which agent
-                # answered is worth a lookup in the session that is already open.
-                agent_row = await dba.get(Agent, version.agent_id)
-                agent_name = str(getattr(agent_row, "name", "") or "")
-                spec = build_spec(str(version.agent_id), str(version.id), version.config)
-            session = get_session_for_agent(spec)
-            ctx = AgentCallContext(
-                channel_id=channel_id, linkedid=lid, ari=ari,
-                # The agent needs to know WHO is calling: it is the caller's identity for a
-                # capture, and the default recipient for an in-call SMS.
-                caller_number=caller_number or None,
-            )
-            result = await session.run(spec, ctx)
-            # Persist BEFORE returning the port: the interpreter may route straight into a
-            # terminal node, and a lead captured at minute two must survive a call that ends
-            # at minute four. Own short session, like every other write on this path.
-            try:
-                async with SessionLocal() as dbw:
-                    await _persist_agent_output(
-                        dbw, provider_id, lid, version.id, result.data or {}
-                    )
-                    await dbw.commit()
-            except Exception:  # noqa: BLE001 - never dead-air a caller over a failed write
-                logger.exception("flow runtime: storing agent output failed (linkedid=%s)", lid)
-
-            # Register the agent's bridge recording (agent observability).
-            #
-            # BELT AND BRACES, not the primary path. I assumed OWEN's consumer could not see
-            # this recording, because owen-voice records a bridge belonging to its OWN Stasis
-            # app. That assumption was wrong: on the first real call the worker logged
-            # `ingest_recording_event sid=...-agent-1` four seconds after the hangup and the
-            # fetch/transcribe chain ran on its own. ARI delivered RecordingFinished to OWEN's
-            # app as well, presumably because the bridge held a channel that app owns.
-            #
-            # This stays because it costs nothing and closes the gap if that ever stops being
-            # true (a bridge with no OWEN-owned channel, an ARI version change). It is
-            # idempotent on the recording SID, so the two paths cannot double-register.
-            rec_name = str((result.data or {}).get("recording_name") or "")
-            if rec_name:
-                try:
-                    await _register_agent_recording(provider_id, lid, rec_name)
-                except Exception:  # noqa: BLE001 - a lost recording is a lost diagnostic,
-                    # never a lost call. It must not touch the port the caller is routed on.
-                    logger.exception(
-                        "flow runtime: registering agent recording failed (linkedid=%s)", lid
-                    )
-
-            # D9: the agent may have named a destination from its OWN declared allowlist. If
-            # it did, move the caller there and tell the interpreter to stand down. If it
-            # only said "transfer" with no destination, fall through unchanged so the flow
-            # author's `transfer` edge still decides — the allowlist adds a capability, it
-            # does not take the graph's away.
-            #
-            # This runs BEFORE the CRM report, and that order is the fix for a bug, not a
-            # tidy-up: the destination is only written into `data` here, so a report queued
-            # first said `transfer: null` on every transferred call ever made.
-            port, data = result.port, (result.data or {})
-            if result.port == "transfer":
-                chosen = resolve_transfer_target(
-                    (version.config or {}).get("transfer_targets"),
-                    str((result.data or {}).get("destination") or ""),
-                )
-                if chosen is not None:
-                    moved = await _do_agent_transfer(ari, channel_id, lid, chosen)
-                    if moved:
-                        port, data = "transferred", {**(result.data or {}), "transfer": chosen}
-                elif (result.data or {}).get("destination"):
-                    # Named something not on its allowlist. Loud, because it is either a
-                    # misconfigured agent or a caller talking it into somewhere it may not go.
-                    logger.warning(
-                        "flow runtime: agent asked for undeclared destination %r "
-                        "(linkedid=%s); falling back to the graph's transfer edge",
-                        (result.data or {}).get("destination"), lid,
-                    )
-
-            # CRM timeline entry (CRM_CONTEXT_SPEC C10). Enqueued, never awaited: the caller
-            # is still on the line — or already with the person they were transferred to —
-            # and a slow CRM must not hold the flow. Queued with the FINAL outcome, so a
-            # transferred call reports where it went.
-            try:
-                await _enqueue_crm_report(spec, lid, ctx.caller_number, port, data)
-            except Exception:  # noqa: BLE001 - reporting must never affect the call
-                logger.exception("flow runtime: queuing the CRM report failed (linkedid=%s)", lid)
-
-            # ...and the CRM's own thread (2026-09-22, phase 1). Separate from the report
-            # above on purpose: that one is the configurable `context_provider` contract and
-            # is off unless an agent declares one, while this is the CRM link the company
-            # actually runs. Both are best-effort; neither may reach the caller.
-            try:
-                await _report_agent_call_to_crm(
-                    lid=lid, dialed=str(dialed), caller_number=ctx.caller_number,
-                    agent_name=agent_name, version=version.version, port=port, data=data)
-            except Exception:  # noqa: BLE001 - the CRM never affects the call
-                logger.exception(
-                    "flow runtime: reporting the agent call to the CRM failed "
-                    "(linkedid=%s)", lid)
-
-            return (port, data)
-        except Exception:  # noqa: BLE001 - never dead-air; the node takes `failed`/fallback
-            logger.exception("flow runtime: ai_agent run failed (linkedid=%s)", lid)
-            return ("failed", {})
+        run = await run_agent_on_call(
+            ari=ari, channel_id=channel_id, lid=lid, dialed=str(dialed),
+            caller_number=caller_number, provider_id=provider_id, agent_id=agent_id,
+            campaign=campaign,
+        )
+        return (run.port, run.data)
 
     async def send_sms(to: str, body: str) -> bool:
         # send_sms node (Ticket 17): fire-and-forget. Schedule the gated enqueue on its own

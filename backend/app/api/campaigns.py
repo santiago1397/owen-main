@@ -18,4 +18,5 @@ async def list_campaigns(
     rows = (
         await db.execute(select(Campaign).order_by(Campaign.name))
     ).scalars().all()
-    return [CampaignOut(id=c.id, name=c.name, active=c.active) for c in rows]
+    return [CampaignOut(id=c.id, name=c.name, active=c.active, agent_id=c.agent_id,
+                        agent_brief=c.agent_brief) for c in rows]

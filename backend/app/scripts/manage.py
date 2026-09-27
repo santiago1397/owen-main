@@ -5,6 +5,8 @@ Examples (inside the app container, or locally via the venv):
     python -m app.scripts.manage add-number --phone +13055559999 --campaign "CL Ads 2" \
         --friendly "CL Ads 2" --forwards-to +13055550000
     python -m app.scripts.manage list
+    python -m app.scripts.manage set-campaign-agent --campaign "CL Ads 2" --agent "Receptionist" \
+        --brief "Free roof inspections this month; Manatee and Sarasota counties."
 """
 
 import argparse
@@ -46,6 +48,47 @@ async def add_campaign(name: str, source: str | None) -> None:
         db.add(Campaign(name=name, source=source))
         await db.commit()
         print(f"campaign added: {name} ({source})")
+
+
+async def set_campaign_agent(campaign: str, agent: str | None, clear_agent: bool,
+                             brief: str | None, clear_brief: bool) -> None:
+    """Point a campaign at the AI agent that answers its numbers, and/or set its brief.
+
+    Phase 3 (2026-09-25). The agent is found by NAME, exactly once — an unknown or ambiguous
+    name changes nothing. `--none` clears it (the campaign's numbers then resolve exactly as
+    before). The brief is one short paragraph of facts about the campaign — the offer, the
+    service area — passed to the agent as context, never as instructions.
+    """
+    from app.agents.campaign import BRIEF_MAX_CHARS
+    from app.models import Agent
+
+    async with SessionLocal() as db:
+        camp = (await db.execute(select(Campaign).where(Campaign.name == campaign))).scalar_one_or_none()
+        if not camp:
+            raise SystemExit(f"campaign not found: {campaign!r}")
+        if agent is not None:
+            rows = (await db.execute(select(Agent).where(Agent.name == agent))).scalars().all()
+            if not rows:
+                raise SystemExit(f"agent not found: {agent!r} (nothing changed)")
+            if len(rows) > 1:
+                ids = ", ".join(str(r.id) for r in rows)
+                raise SystemExit(f"{len(rows)} agents are called {agent!r} ({ids}); nothing changed")
+            if rows[0].active_version_id is None:
+                print(f"note: agent {agent!r} has no active version yet — the campaign's "
+                      "calls take their fallback until it has one")
+            camp.agent_id = rows[0].id
+        elif clear_agent:
+            camp.agent_id = None
+        if brief is not None:
+            text = " ".join(brief.split())
+            if len(text) > BRIEF_MAX_CHARS:
+                raise SystemExit(f"the brief is {len(text)} characters; the agent takes at most "
+                                 f"{BRIEF_MAX_CHARS}. Cut {len(text) - BRIEF_MAX_CHARS}. Nothing changed.")
+            camp.agent_brief = text or None
+        elif clear_brief:
+            camp.agent_brief = None
+        await db.commit()
+        print(f"campaign {campaign}: agent_id={camp.agent_id} brief={len(camp.agent_brief or '')} chars")
 
 
 async def add_number(phone: str, campaign: str, friendly: str | None,
@@ -600,6 +643,16 @@ def main() -> None:
     c.add_argument("--name", required=True)
     c.add_argument("--source")
 
+    ca = sub.add_parser("set-campaign-agent",
+                        help="Which AI agent answers a campaign's numbers, and its brief")
+    ca.add_argument("--campaign", required=True)
+    who = ca.add_mutually_exclusive_group()
+    who.add_argument("--agent", help="the agent's name (exactly one must match)")
+    who.add_argument("--none", action="store_true", help="the campaign names no agent")
+    what = ca.add_mutually_exclusive_group()
+    what.add_argument("--brief", help="one short paragraph: the offer, the service area")
+    what.add_argument("--clear-brief", action="store_true")
+
     n = sub.add_parser("add-number")
     n.add_argument("--phone", required=True, help="E.164, e.g. +13055559999")
     n.add_argument("--campaign", required=True, help="campaign name")
@@ -661,6 +714,9 @@ def main() -> None:
     args = p.parse_args()
     if args.cmd == "add-campaign":
         asyncio.run(add_campaign(args.name, args.source))
+    elif args.cmd == "set-campaign-agent":
+        asyncio.run(set_campaign_agent(args.campaign, args.agent, args.none,
+                                       args.brief, args.clear_brief))
     elif args.cmd == "add-number":
         asyncio.run(add_number(args.phone, args.campaign, args.friendly, args.forwards_to, args.provider))
     elif args.cmd == "list":
