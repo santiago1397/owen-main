@@ -43,6 +43,16 @@ const VOICES_BY_PROVIDER: Record<string, string[]> = {
     "aura-2-helena-en", "aura-2-zeus-en",
   ],
 };
+// Phase 4: the voice for turns the caller speaks in Spanish. Aura-2 voices are one language
+// each, so Deepgram needs an -es voice here; OpenAI's voices are multilingual, so its list is
+// the same as above. Blank = the server's default Spanish voice (aura-2-celeste-es).
+const SPANISH_VOICES_BY_PROVIDER: Record<string, string[]> = {
+  openai: VOICES_BY_PROVIDER.openai,
+  deepgram: [
+    "aura-2-celeste-es", "aura-2-selena-es", "aura-2-estrella-es", "aura-2-gloria-es",
+    "aura-2-olivia-es", "aura-2-aquila-es", "aura-2-javier-es", "aura-2-sirio-es",
+  ],
+};
 const TTS_PROVIDERS = [
   { value: "", label: "(server default)" },
   { value: "deepgram", label: "deepgram — Aura-2, native 8 kHz" },
@@ -64,6 +74,7 @@ const TRANSFER_KINDS = ["number", "operator", "flow", "agent"];
 const EMPTY_CONFIG = {
   persona: "",
   voice: "",
+  voice_es: "",
   // Blank = follow the server default (M4). A per-agent pin is the exception, not the norm:
   // pinning here means a vendor incident cannot be ended from .env.prod without re-versioning
   // this agent, since versions are immutable.
@@ -282,6 +293,22 @@ function AgentEditor({ agentId, onClose }: { agentId: string; onClose: () => voi
               return (cur && !list.includes(cur) ? [cur, ...list] : list).map((v) => (
                 <option key={v} value={v}>
                   {v === cur && !list.includes(v) ? `${v} (not a ${provider} voice)` : v}
+                </option>
+              ));
+            })()}
+          </select>
+        </label>
+        <label>Spanish voice
+          <select value={config.voice_es || ""} onChange={(e) => set("voice_es", e.target.value)} style={{ width: "100%" }}>
+            {/* Used when the caller speaks Spanish; the agent switches automatically. */}
+            <option value="">(server default)</option>
+            {(() => {
+              const provider = config.tts_provider || "openai";
+              const list = SPANISH_VOICES_BY_PROVIDER[provider] || [];
+              const cur = config.voice_es || "";
+              return (cur && !list.includes(cur) ? [cur, ...list] : list).map((v) => (
+                <option key={v} value={v}>
+                  {v === cur && !list.includes(v) ? `${v} (not a ${provider} Spanish voice)` : v}
                 </option>
               ));
             })()}

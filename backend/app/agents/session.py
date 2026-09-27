@@ -41,6 +41,9 @@ class AgentSpec:
     version_id: str | None = None
     persona: str = ""
     voice: str = ""
+    # Phase 4: the voice for turns the caller speaks in Spanish. Empty = the runtime's default
+    # Spanish voice (owen-voice VOICE_DG_TTS_VOICE_ES), so an agent never needs one to work.
+    voice_es: str = ""
     greeting: str = ""
     model: str = ""
     engine: str = "dummy"

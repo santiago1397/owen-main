@@ -36,6 +36,9 @@ logger = logging.getLogger("voice.custom_tools")
 SYNC_BUDGET_S = 0.8
 # What the agent says while a sync tool runs, so the silence is explained rather than dead.
 DEFAULT_FILLER = "Let me check that for you."
+# The same, for a caller speaking Spanish (phase 4). Only the DEFAULT has a translation: a
+# filler an operator wrote is theirs, and is spoken as written.
+DEFAULT_FILLER_ES = "Permítame verificarlo."
 
 ALLOWED_METHODS = ("GET", "POST", "PUT", "PATCH", "DELETE")
 ALLOWED_MODES = ("sync", "async")

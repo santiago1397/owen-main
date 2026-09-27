@@ -60,7 +60,12 @@ class Settings:
     # 3s utterance — the same API, the same key, 3x faster. STT was the largest single term in
     # the turn budget, so this is the cheapest latency win available.
     STT_MODEL: str = _s("VOICE_STT_MODEL", "gpt-4o-mini-transcribe")
-    STT_LANGUAGE: str = _s("VOICE_STT_LANGUAGE", "en")
+    # EMPTY = let the model detect it (phase 4: a Spanish caller must be heard as Spanish).
+    # This used to be "en", which on the batch path made the recogniser force Spanish speech
+    # into English words. Set "en" to restore that. Note the batch path REPORTS no language
+    # (gpt-4o-mini-transcribe's json has none), so on it the reply language follows the text
+    # and the voice stays the English one; language-aware voice needs Flux Multilingual.
+    STT_LANGUAGE: str = _s("VOICE_STT_LANGUAGE", "")
 
     # Any OpenAI-compatible endpoint: OpenAI, MiniMax, DeepSeek, Kimi, or an aggregator.
     # Defaults to OpenAI because that key is already present; point LLM_BASE_URL at MiniMax
@@ -103,7 +108,19 @@ class Settings:
 
     # STT. `flux-general-en` speaks linear16@8000 natively -- the AudioSocket format exactly,
     # so caller bytes reach Deepgram with NO resampling in the hot path.
-    DG_STT_MODEL: str = _s("VOICE_DG_STT_MODEL", "flux-general-en")
+    #
+    # PHASE 4: `flux-general-multi` (Flux Multilingual) hears English AND Spanish on one stream
+    # and reports the language of every turn (TurnInfo `languages`), which is the ONLY language
+    # detection in this service -- nothing here guesses a language from text. Set
+    # VOICE_DG_STT_MODEL=flux-general-en to go back to English-only in one setting (that model
+    # rejects `language_hint` with a 400, so the hints below are only sent to a multi model).
+    # Its latency and its 8 kHz behaviour are NOT yet measured on a real call -- see
+    # docs/VOICE_STACK_MIGRATION.md, "Phase 4 -- Spanish", before trusting the default.
+    DG_STT_MODEL: str = _s("VOICE_DG_STT_MODEL", "flux-general-multi")
+    # Languages to bias Flux Multilingual toward (comma-separated BCP-47). South Florida is
+    # English and Spanish; hinting both keeps accuracy on par with the monolingual models and
+    # makes a noise burst far less likely to come back as French or Hindi. Empty = no hints.
+    DG_STT_LANGUAGE_HINTS: str = _s("VOICE_DG_STT_LANGUAGE_HINTS", "en,es")
     DG_STT_URL: str = _s("VOICE_DG_STT_URL", "wss://api.deepgram.com/v2/listen")
     # Confidence required to call a turn ENDED (0.5-1.0, Deepgram default 0.7). Lower = faster
     # and more false turn-ends; higher = slower and safer. The knob to reach for when the p90
@@ -125,6 +142,11 @@ class Settings:
     # dsp.Downsampler24to8 from the hot path, and with it a whole class of resampler bug the
     # project has already paid for once (the 3-tap box filter heard as metallic).
     DG_TTS_MODEL: str = _s("VOICE_DG_TTS_MODEL", "aura-2-thalia-en")
+    # The voice for a turn the caller spoke in Spanish, when the agent sets no `voice_es` of
+    # its own. Aura-2 voices are one language each (aura-2-<name>-es), so an English voice
+    # reading Spanish text is an English accent mangling it. Celeste (Colombian, feminine) is
+    # the owner's starting point (2026-09-22 amendment, decision 8), to be judged by ear.
+    DG_TTS_VOICE_ES: str = _s("VOICE_DG_TTS_VOICE_ES", "aura-2-celeste-es")
     # OUTPUT LEVEL. The caller's inbound audio peaked at 32124 (full scale) on the first live
     # call while Aura-2 comes back quieter, so the caller hears themselves loud and the agent
     # further away. Loudness reads as presence, so closing that gap helps -- but only to a
@@ -205,11 +227,27 @@ class Settings:
         "You are a friendly receptionist for a Florida roofing company. Keep every reply "
         "under two short sentences, because it is spoken aloud on a phone call. Ask one "
         "question at a time. Collect the caller's name, service address and what is wrong "
-        "with their roof. If they ask for a human, tell them you will pass them along. "
-        "ALWAYS reply in English, whatever language you think you heard — the speech "
-        "recogniser sometimes mis-hears noise as another language, and following it strands "
-        "the caller in a language they do not speak.",
+        "with their roof. If they ask for a human, tell them you will pass them along.",
     )
+    # Appended to EVERY system prompt -- the default above AND an agent's own persona -- by
+    # pipeline.Conversation.system_prompt, the one place a prompt is assembled. It replaces
+    # "ALWAYS reply in English", which existed because the recogniser once turned noise into
+    # Arabic and the model followed it. That risk is now handled where it arises: Flux is hinted
+    # to English/Spanish and the script filter drops non-Latin text, so the rule can name the
+    # two languages instead of banning one. Prices, warranty and legal wording are held back in
+    # Spanish until a person has written them (amendment decision 8), not machine-translated.
+    AGENT_LANGUAGE_RULE: str = _s(
+        "VOICE_AGENT_LANGUAGE_RULE",
+        "Reply in the language the caller is speaking: English or Spanish. If they switch "
+        "language, switch with them. If you cannot tell, reply in English. Never reply in any "
+        "other language. When speaking Spanish, only state a price, warranty term or anything "
+        "legal if the reference knowledge gives it in Spanish; otherwise say a team member "
+        "will confirm it.",
+    )
+    # ONE greeting, in English, deliberately (phase 4). It is spoken before the caller has said
+    # a word, so there is no language to detect yet; the agent switches on the caller's first
+    # words instead. A per-agent Spanish greeting was considered and not built -- see
+    # docs/VOICE_STACK_MIGRATION.md "Phase 4 -- Spanish" for the reasoning and how to overrule.
     AGENT_GREETING: str = _s(
         "VOICE_AGENT_GREETING",
         "Hi, thanks for calling. You're speaking with an AI assistant. How can I help?",
