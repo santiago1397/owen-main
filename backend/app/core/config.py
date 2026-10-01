@@ -311,6 +311,15 @@ class Settings(BaseSettings):
     # an email stored before this was switched on is never sent — see
     # `integrations/crm/email_jobs.py`.
     CRM_LINK_EMAIL_JOBS_ENABLED: bool = False
+    # AHS AUTHORIZATION NOTES -> THE CRM (2026-10-01). OFF BY DEFAULT. A Dispatch note email
+    # whose body reads "... NCC $n Net Total $n AUTHO # nnnnRNCL ..." means AHS approved the
+    # repair (parse_status 'authorization'); "items to service have been updated" MIGHT
+    # (parse_status 'authorization_possible'). True = each NEWLY-INSERTED one gets an
+    # `email_relay_crm` job that posts it to the CRM's `POST /api/ahs-jobs/authorizations`
+    # (a bell + a Dispatch item there; nothing reaches Zuper or GoHighLevel). Independent of
+    # CRM_LINK_EMAIL_JOBS_ENABLED; needs CRM_LINK_ENABLED, a token and AGENT_RUNTIME_KEY.
+    # Built from ONE real sample — watch the first few. See providers/dispatch_email.py.
+    CRM_LINK_AHS_AUTHORIZATIONS_ENABLED: bool = False
     # THE CRM LINE RINGS PEOPLE FIRST, THEN AN AI AGENT (phase 3, 2026-09-25). OFF BY DEFAULT,
     # because the CRM-bound DID is the company's main line and nobody should discover this
     # change by hearing a robot. False = a call nobody answers takes a voicemail, exactly as

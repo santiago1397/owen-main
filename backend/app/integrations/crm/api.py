@@ -397,9 +397,6 @@ async def deliver_email_job(
     a CRM that is down or answered 5xx (recorded 'failed', and the queue retries).
     """
     cfg = _require_enabled()
-    reason = crm_email_jobs.refusal(settings)
-    if reason:
-        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, reason)
     try:
         email_id = uuid.UUID(str(body.email_id))
     except ValueError:
@@ -407,6 +404,11 @@ async def deliver_email_job(
     em = await db.get(InboundEmail, email_id)
     if em is None:
         return {"ok": False, "reason": "email not found", "email_id": body.email_id}
+    # Each kind answers to its own switch (an authorization to
+    # CRM_LINK_AHS_AUTHORIZATIONS_ENABLED, 2026-10-01), checked before anything is posted.
+    reason = crm_email_jobs.refusal(settings, em.parse_status)
+    if reason:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, reason)
     # THE NO-BACKFILL GUARD. Only a row the poller stamped when it inserted it.
     if em.crm_status not in crm_email_jobs.ACTIONABLE:
         return {"ok": True, "skipped": True, "crm_status": em.crm_status,
@@ -423,6 +425,8 @@ async def deliver_email_job(
                        budget_s=cfg.http_budget_seconds)
     if kind == crm_email_jobs.CANCELLATION:
         result = await client.post_ahs_cancellation(crm_email_jobs.cancellation_body(em))
+    elif kind in crm_email_jobs.AUTHORIZATION_KINDS:
+        result = await client.post_ahs_authorization(crm_email_jobs.authorization_body(em))
     else:
         result = await client.post_ahs_job(crm_email_jobs.job_body(em))
 

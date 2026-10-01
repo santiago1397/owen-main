@@ -38,6 +38,17 @@ does not reach the CRM either.
 `CRM_LINK_EMAIL_JOBS_ENABLED` (default False) AND `CRM_LINK_ENABLED` AND a token. Off, the
 poller enqueues nothing and stamps nothing; a job already queued when it is switched off
 records 'skipped_disabled' and posts nothing.
+
+## AHS authorizations ride the same job (2026-10-01)
+
+A note email that says AHS approved a repair (`parse_status='authorization'`) or may have
+changed the items (`'authorization_possible'`) goes through the SAME queued job, handler and
+adapter, to `POST /api/ahs-jobs/authorizations` — behind its OWN switch,
+`CRM_LINK_AHS_AUTHORIZATIONS_ENABLED` (default False), which is independent of
+`CRM_LINK_EMAIL_JOBS_ENABLED` in both directions. Never relayed to GoHighLevel. The body
+carries `dedupe_key` "ahs_auth:<job>:<autho>" (or "ahs_auth_possible:<job>:<message-id>"),
+which is what the CRM is idempotent on: the same AUTHO arriving twice is one bell. Only ONE
+real authorization email has ever been seen — see `providers/dispatch_email.py`.
 """
 
 from __future__ import annotations
@@ -53,9 +64,13 @@ JOB_TYPE = "email_relay_crm"
 ADAPTER_PATH = "/api/crm-link/email-jobs"
 CRM_JOB_PATH = "/api/ahs-jobs"
 CRM_CANCELLATION_PATH = "/api/ahs-jobs/cancellations"
+CRM_AUTHORIZATION_PATH = "/api/ahs-jobs/authorizations"
 
 PARSED = "parsed"
 CANCELLATION = "cancellation"
+AUTHORIZATION = "authorization"
+AUTHORIZATION_POSSIBLE = "authorization_possible"
+AUTHORIZATION_KINDS = frozenset({AUTHORIZATION, AUTHORIZATION_POSSIBLE})
 
 QUEUED = "queued"
 FAILED = "failed"
@@ -63,6 +78,8 @@ FAILED = "failed"
 ACTIONABLE = frozenset({QUEUED, FAILED})
 
 REFUSE_SWITCH = "AHS email jobs are off (CRM_LINK_EMAIL_JOBS_ENABLED=false)"
+REFUSE_AUTH_SWITCH = ("AHS authorizations are off "
+                      "(CRM_LINK_AHS_AUTHORIZATIONS_ENABLED=false)")
 
 
 # --- pure helpers ---------------------------------------------------------------------------
@@ -82,11 +99,16 @@ def to_cents(total) -> int:
     return int((value * 100).to_integral_value())
 
 
-def refusal(settings) -> Optional[str]:
-    """Why a CRM delivery may not be queued or sent right now, or None."""
+def refusal(settings, kind: Optional[str] = None) -> Optional[str]:
+    """Why a CRM delivery of this KIND (a `parse_status`) may not be queued or sent right
+    now, or None. An authorization answers to its own switch; everything else to
+    CRM_LINK_EMAIL_JOBS_ENABLED, exactly as before."""
     from app.integrations.crm import config as crm_config
 
-    if not bool(getattr(settings, "CRM_LINK_EMAIL_JOBS_ENABLED", False)):
+    if kind in AUTHORIZATION_KINDS:
+        if not bool(getattr(settings, "CRM_LINK_AHS_AUTHORIZATIONS_ENABLED", False)):
+            return REFUSE_AUTH_SWITCH
+    elif not bool(getattr(settings, "CRM_LINK_EMAIL_JOBS_ENABLED", False)):
         return REFUSE_SWITCH
     cfg = crm_config.settings_view(settings)
     reason = cfg.delivery_refusal()
@@ -98,7 +120,7 @@ def refusal(settings) -> Optional[str]:
 
 
 def should_deliver(parse_status: Optional[str]) -> bool:
-    return parse_status in (PARSED, CANCELLATION)
+    return parse_status in (PARSED, CANCELLATION) or parse_status in AUTHORIZATION_KINDS
 
 
 def _iso(value) -> Optional[str]:
@@ -138,14 +160,46 @@ def cancellation_body(em) -> dict:
     }
 
 
+def dedupe_key(em) -> str:
+    """What the CRM is idempotent on. An authorization: per (job, AUTHO number), so the same
+    approval sent twice is ONE alert. "Items updated" carries no number, so per email."""
+    fields = em.fields or {}
+    job = str(fields.get("job_id") or em.job_id or "")
+    if em.parse_status == AUTHORIZATION:
+        return f"ahs_auth:{job}:{fields.get('autho_number') or ''}"
+    return f"ahs_auth_possible:{job}:{em.message_id}"
+
+
+def authorization_body(em) -> dict:
+    """`POST /api/ahs-jobs/authorizations`. Amounts as the email wrote them, minus `$` and
+    commas, as STRINGS (never floats). No customer data: an authorization note has none."""
+    fields = em.fields or {}
+    body = {
+        "kind": em.parse_status,
+        "ahs_job_id": str(fields.get("job_id") or em.job_id or ""),
+        "dedupe_key": dedupe_key(em),
+        "message_id": em.message_id,
+        "received_at": _iso(em.received_at),
+    }
+    if em.parse_status == AUTHORIZATION:
+        body.update({"autho_number": fields.get("autho_number"),
+                     "autho_code": fields.get("autho_code"),
+                     "net_total": fields.get("net_total"),
+                     "ncc": fields.get("ncc")})
+    return body
+
+
 # CRM outcome -> the status recorded on the email.
 _JOB_STATUS = {"created": "sent", "existing": "existing"}
 _CANCEL_STATUS = {"noted": "cancellation_noted",
                   "already_noted": "cancellation_already_noted",
                   "no_card": "skipped_no_card"}
+_AUTH_STATUS = {"created": "authorization_sent", "existing": "authorization_existing"}
 
 
 def status_for(kind: str, outcome: Optional[str]) -> str:
+    if kind in AUTHORIZATION_KINDS:
+        return _AUTH_STATUS.get(str(outcome or ""), "authorization_sent")
     table = _CANCEL_STATUS if kind == CANCELLATION else _JOB_STATUS
     return table.get(str(outcome or ""), "sent" if kind != CANCELLATION else "cancellation_noted")
 
@@ -180,7 +234,7 @@ async def enqueue_for_new_email(db, row, parse_status: Optional[str], *, created
         from app.core.config import settings
         from app.services import queue
 
-        reason = refusal(settings)
+        reason = refusal(settings, parse_status)
         if reason:
             logger.debug("email_relay_crm: not queued for %s — %s", row.message_id, reason)
             return False

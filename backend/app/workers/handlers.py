@@ -850,7 +850,7 @@ async def handle_email_relay_crm(db: AsyncSession, payload: dict) -> None:
         logger.info("email_relay_crm: %s has crm_status=%r, nothing to send",
                     em.message_id, em.crm_status)
         return
-    reason = email_jobs.refusal(settings)
+    reason = email_jobs.refusal(settings, em.parse_status)
     if reason:
         em.crm_status = "skipped_disabled"
         em.crm_error = reason

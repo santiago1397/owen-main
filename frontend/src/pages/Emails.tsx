@@ -34,6 +34,8 @@ function CrmBadge({ status }: { status: string | null }) {
   if (status === "failed") return <span className="badge spam" title="The CRM could not be reached; the job retries with backoff">CRM failed</span>;
   if (status === "refused") return <span className="badge spam" title="The CRM refused this email; a retry will not help">CRM refused</span>;
   if (status === "skipped_disabled") return <span className="badge" title="CRM delivery was switched off before this was sent">CRM off</span>;
+  if (status === "authorization_sent") return <span className="badge new" title="Dispatch in the CRM was told">sent to CRM</span>;
+  if (status === "authorization_existing") return <span className="badge new" title="The CRM already had this authorization">already in CRM</span>;
   return <span className="muted">—</span>;
 }
 
@@ -47,6 +49,12 @@ function ParseBadge({ status }: { status: string }) {
     // ignorable either — it is noted against the customer in GHL.
     return <span className="badge" title="The sender cancelled this job; noted on the customer in GoHighLevel">cancellation</span>;
   if (status === "ignored") return <span className="badge prov">not a job</span>;
+  // An AHS note that approves a repair, or may have changed its items (2026-10-01). Never sent
+  // to GHL; the CRM gets it behind CRM_LINK_AHS_AUTHORIZATIONS_ENABLED.
+  if (status === "authorization")
+    return <span className="badge new" title="AHS authorized the repair (AUTHO number in the note)">AHS authorized</span>;
+  if (status === "authorization_possible")
+    return <span className="badge" title="AHS says the items to service were updated — check the portal">AHS items updated</span>;
   return <span className="badge spam">parse failed</span>;
 }
 
@@ -229,6 +237,8 @@ export default function Emails() {
           <option value="failed">parse failed</option>
           <option value="cancellation">cancellation</option>
           <option value="ignored">not a job</option>
+          <option value="authorization">AHS authorized</option>
+          <option value="authorization_possible">AHS items updated</option>
         </select>
         <select onChange={(e) => set("relay_status", e.target.value)}>
           <option value="">any relay status</option>

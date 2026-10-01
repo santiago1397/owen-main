@@ -199,6 +199,22 @@ into GHL leads. All disabled (no-op) unless `INBOUND_MAIL_HOST`/`INBOUND_MAIL_US
   fetch → parse → `ingest_email` → enqueue `email_relay_ghl` for newly-inserted parsed rows →
   `mark_seen` handled UIDs (only after DB commit; a failed write leaves the mail UNSEEN to retry).
 
+**AHS authorization notes (2026-10-01) — OFF by default.** A note email ("American Home Shield
+sent you a note for job #<n>") used to be `ignored`. Two bodies now get their own
+`parse_status`: `authorization` — AHS approved the repair — when the tag-stripped body has an
+AUTHO number AND a Net Total or NCC amount (template: `Note Added in Frontdoor System NCC $####
+Net Total $#### AUTHO # ####RNCL Thanks for being the best!`; `fields` = job_id, autho_number,
+autho_code, net_total, ncc, amounts as strings); and `authorization_possible` for "items to
+service have been updated". Neither is a lead and neither is ever relayed to GHL. With
+`CRM_LINK_AHS_AUTHORIZATIONS_ENABLED=true` (independent of `CRM_LINK_EMAIL_JOBS_ENABLED`) each
+NEWLY-inserted one rides the existing `email_relay_crm` job and adapter to the CRM's
+`POST /api/ahs-jobs/authorizations`, keyed `ahs_auth:<job>:<autho>` (per email for the
+"possible" kind) so a repeat is one alert. **Built from ONE real sample** (1 of 31 notes when it
+was written; 4 said "items ... updated") — watch the first few, because a reworded template
+silently falls back to `ignored` (safe, but quiet). "Authorization Link: Click Here" on a work
+order is boilerplate and is NOT read as an approval. No backfill: notes stored before this
+stay `ignored`. Tests: `tests/test_ahs_authorization_email.py`.
+
 ### Webhooks (`app/webhooks/`) — real-time push ingestion
 
 - `common.py` — `build_router(adapter, provider, signature_headers)` factory. Reconstructs the public URL behind Traefik, verifies the signature (or SignalWire CFB HTTP Basic Auth via `SIGNALWIRE_CFB_WEBHOOK_SECRET`), parses body → adapter → `ingest_*`, returns 200 fast (slow work is enqueued). `POST /status` (on a terminal call, if `GHL_CALL_WEBHOOK_URL` is set, enqueues a delayed `call_relay_ghl`), `POST /recording`, and `POST /message` (inbound SMS → `ingest_message_event` → enqueue `message_relay_ghl`).

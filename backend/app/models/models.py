@@ -414,6 +414,9 @@ class InboundEmail(Base):
     # 'parsed'  — a work order we fully read; this is the only value that relays.
     # 'failed'   — a work order we could NOT read. A real problem; a lead was lost.
     # 'ignored'  — not a work order at all (cancellation, note, account mail). Not an error.
+    # 'cancellation' — AHS cancelled a dispatched job.
+    # 'authorization' / 'authorization_possible' — an AHS note approving (or maybe changing)
+    #   a repair (2026-10-01); see providers/dispatch_email.py. Not a lead, not an error.
     parse_status: Mapped[str] = mapped_column(String, default="failed")
     parse_error: Mapped[str | None] = mapped_column(Text)  # why parsing failed / which fields were missing
     fields: Mapped[dict | None] = mapped_column(JSONB)  # extracted structured data (what we relay)

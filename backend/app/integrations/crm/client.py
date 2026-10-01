@@ -270,6 +270,18 @@ class CrmClient:
                            body.get("ahs_job_id"), result.status)
         return result
 
+    async def post_ahs_authorization(self, body: dict) -> CrmResult:
+        """`POST /api/ahs-jobs/authorizations` — AHS approved (or may have changed) a job's
+        repair (2026-10-01). Idempotent on the CRM side by `dedupe_key`."""
+        result = await self._request("POST", "/api/ahs-jobs/authorizations", json=body)
+        if result.ok:
+            logger.info("crm-link: AHS %s for job %s delivered (%s)", body.get("kind"),
+                        body.get("ahs_job_id"), (result.data or {}).get("outcome"))
+        else:
+            logger.warning("crm-link: AHS %s for job %s REFUSED by the CRM (%s)",
+                           body.get("kind"), body.get("ahs_job_id"), result.status)
+        return result
+
     async def agent_context(self, caller_number: str) -> CrmResult:
         """`POST /api/agent-context` — who this caller is, for a voice agent (2026-09-24).
 

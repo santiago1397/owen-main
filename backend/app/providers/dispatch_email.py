@@ -50,6 +50,34 @@ IGNORED = "ignored"
 # because otherwise a card sits open in the pipeline for work nobody is going to do.
 CANCELLATION = "cancellation"
 
+# AN AHS AUTHORIZATION (2026-10-01). A note email ("American Home Shield sent you a note for
+# job #<n>") is normally just `ignored`, but ONE note template means AHS has APPROVED the
+# repair, and dispatch wants to know the moment it does:
+#
+#   Note Added in Frontdoor System NCC $1234 Net Total $1234 AUTHO # 5678RNCL Thanks for
+#   being the best!
+#
+# That is the ONLY such sample ever observed (1 of 31 note emails on 2026-10-01; 4 others said
+# "Your list of items to service have been updated", which MAY be approval-related and is
+# therefore its own, weaker kind). Matched on the BODY, after tags are stripped and whitespace
+# collapsed, so spacing, `$` and thousands commas do not matter. Watch it: when AHS changes the
+# wording, these go back to `ignored` silently — that is the safe direction (nothing is sent),
+# but it is not a loud one. The Work order's "Authorization Link: Click Here" is boilerplate
+# and is NOT an approval; nothing here reads a work order.
+AUTHORIZATION = "authorization"
+AUTHORIZATION_POSSIBLE = "authorization_possible"
+
+_NOTE_SUBJECT = re.compile(r"sent\s+you\s+a\s+note\s+for\s+job\s*#?\s*(\d{4,})", re.IGNORECASE)
+# The AUTHO number is the digits; a letter code stuck to them ("5678RNCL") is kept separately.
+# The code is case-SENSITIVE so the "Thanks" that follows can never be read as one.
+_AUTHO = re.compile(
+    r"\bAUTHO(?:RIZATION)?\s*(?:#|No\.?|Number)?\s*:?\s*(\d[\d-]{2,})(?-i:([A-Z]{2,6})\b)?",
+    re.IGNORECASE)
+_MONEY = r"\$?\s*(\d[\d,]*(?:\.\d{1,2})?)"
+_NET_TOTAL = re.compile(r"\bNet\s*Total\s*:?\s*" + _MONEY, re.IGNORECASE)
+_NCC = re.compile(r"\bNCC\s*:?\s*" + _MONEY, re.IGNORECASE)
+_ITEMS_UPDATED = re.compile(r"items?\s+to\s+service\s+ha(?:ve|s)\s+been\s+updated", re.IGNORECASE)
+
 # What makes an email a JOB NOTIFICATION — the only kind that can become a lead. Matched on
 # the subject, which stays stable even when the body template shifts.
 _JOB_SUBJECT = re.compile(r"Dispatch\s+E-?mail\s+Confirmation", re.IGNORECASE)
@@ -77,7 +105,8 @@ class ParsedEmail:
     job_id: str | None = None
     error: str | None = None
     missing: list[str] = field(default_factory=list)
-    # 'parsed' | 'failed' | 'ignored'. `ok` stays as the relay gate (only parsed relays), so
+    # 'parsed' | 'failed' | 'ignored' | 'cancellation' | 'authorization' |
+    # 'authorization_possible'. `ok` stays as the relay gate (only parsed relays), so
     # existing callers keep working; `status` is what distinguishes a problem from a non-event.
     status: str = PARSED
     # Human phrase for why it was ignored, e.g. "job cancellation". None unless ignored.
@@ -100,6 +129,46 @@ def cancelled_job_id(subject: str | None) -> str | None:
         return None
     m = _CANCELLATION_SUBJECT.search(subject)
     return m.group(1) if m else None
+
+
+def _flat(*bodies: str | None) -> str:
+    """Every body as one line of plain text: tags out, common entities decoded, whitespace
+    collapsed. What the authorization patterns read."""
+    s = " ".join(b for b in bodies if b)
+    s = re.sub(r"<[^>]+>", " ", s)
+    for ent, ch in (("&nbsp;", " "), ("&#36;", "$"), ("&#35;", "#"), ("&amp;", "&")):
+        s = s.replace(ent, ch)
+    return re.sub(r"\s+", " ", s).strip()
+
+
+def _amount(m: re.Match | None) -> str | None:
+    """'1,234.50' -> '1234.50'. A string, never a float."""
+    return m.group(1).replace(",", "") if m else None
+
+
+def authorization(subject: str | None, text_body: str | None,
+                  html_body: str | None) -> dict | None:
+    """The authorization facts of an AHS NOTE email, or None when it is not one.
+
+    Returns `{"kind": "authorization", "job_id", "autho_number", "autho_code"?, "net_total"?,
+    "ncc"?}` when the body carries an AUTHO number AND at least one amount, or
+    `{"kind": "authorization_possible", "job_id"}` for "items to service have been updated".
+    Only a note subject with a job number qualifies — no job number, nothing to act on."""
+    m = _NOTE_SUBJECT.search(subject or "")
+    if not m:
+        return None
+    job_id = m.group(1)
+    text = _flat(text_body, html_body)
+    autho = _AUTHO.search(text)
+    net, ncc = _NET_TOTAL.search(text), _NCC.search(text)
+    if autho and (net or ncc):
+        out = {"kind": AUTHORIZATION, "job_id": job_id,
+               "autho_number": autho.group(1).strip("-"),
+               "autho_code": autho.group(2), "net_total": _amount(net), "ncc": _amount(ncc)}
+        return {k: v for k, v in out.items() if v is not None}
+    if _ITEMS_UPDATED.search(text):
+        return {"kind": AUTHORIZATION_POSSIBLE, "job_id": job_id}
+    return None
 
 
 def non_job_kind(subject: str | None) -> str:
@@ -331,6 +400,19 @@ def parse(subject: str | None, text_body: str | None, html_body: str | None) -> 
             fields={"source": SOURCE, "kind": CANCELLATION, "cancelled_job_id": cancelled},
             job_id=cancelled, missing=missing, status=CANCELLATION,
             error=f"job {cancelled} was cancelled by the sender",
+        )
+
+    # An AHS authorization note (2026-10-01): not a lead, but the approval dispatch waits on.
+    # Never relayed to GoHighLevel (`ok` stays False); the CRM gets it behind its own switch.
+    autho = authorization(subject, text_body, html_body)
+    if autho:
+        kind = autho["kind"]
+        what = (f"AHS authorized job {autho['job_id']} (AUTHO {autho.get('autho_number')})"
+                if kind == AUTHORIZATION
+                else f"AHS may have updated job {autho['job_id']}'s items")
+        return ParsedEmail(
+            ok=False, fields={"source": SOURCE, **autho}, job_id=autho["job_id"],
+            missing=missing, status=kind, error=what,
         )
 
     if not is_job_notification(subject):
