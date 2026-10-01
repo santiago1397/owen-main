@@ -88,15 +88,19 @@ def test_spacing_dollar_signs_and_commas_do_not_matter():
     print("tolerant of spacing, $, commas, cents and HTML:")
     from app.providers import dispatch_email as d
 
+    a = "Note Added in Frontdoor System "
     variants = {
-        "no spaces, no $": "NCC1500 Net Total1350 AUTHO#4821RNCL Thanks",
-        "commas and cents": "NCC $ 1,500.00   Net  Total:  $1,350.25  AUTHO  #  4821RNCL",
-        "line breaks": "Note Added\nNCC\n$1500\nNet\nTotal\n$1350\nAUTHO\n#\n4821RNCL\nThanks",
-        "lower case": "ncc $1500 net total $1350 autho # 4821rncl thanks",
+        "no spaces, no $": "NoteAddedinFrontdoorSystem NCC1500 Net Total1350 AUTHO#4821RNCL Thanks",
+        "commas and cents": a + "NCC $ 1,500.00   Net  Total:  $1,350.25  AUTHO  #  4821RNCL",
+        "line breaks": "Note\nAdded\nin\nFrontdoor\nSystem\nNCC\n$1500\nNet\nTotal\n$1350"
+                       "\nAUTHO\n#\n4821RNCL\nThanks",
+        "lower case": "note added in frontdoor system ncc $1500 net total $1350 autho # 4821rncl "
+                      "thanks",
         "html": "<p>Note Added in Frontdoor System</p><p>NCC <b>$1500</b></p>"
                 "<p>Net Total&nbsp;&#36;1350</p><p>AUTHO &#35; 4821RNCL</p>",
-        "space before the code": "NCC $1500 Net Total $1350 AUTHO # 4821 RNCL Thanks",
-        "Authorization # spelled out": "Net Total $1350 Authorization # 4821",
+        "space before the code": a + "NCC $1500 Net Total $1350 AUTHO # 4821 RNCL Thanks",
+        "code glued to Thanks": a + "NCC $1500 Net Total $1350 AUTHO # 4821RNCLThanks for",
+        "Authorization # spelled out": a + "Net Total $1350 Authorization # 4821",
     }
     for name, body in variants.items():
         p = d.parse(NOTE_SUBJECT, body, None)
@@ -110,7 +114,16 @@ def test_spacing_dollar_signs_and_commas_do_not_matter():
     p = d.parse(NOTE_SUBJECT, None, variants["html"])
     check("an HTML-only email is read too", p.status == d.AUTHORIZATION
           and p.fields["net_total"] == "1350")
-    p = d.parse(NOTE_SUBJECT, "NCC $1500 AUTHO # 4821RNCL", None)
+    for name in ("html", "space before the code", "code glued to Thanks"):
+        p = d.parse(NOTE_SUBJECT, variants[name], None)
+        check(f"{name}: the code is RNCL", p.fields.get("autho_code") == "RNCL")
+    p = d.parse(NOTE_SUBJECT, a + "NCC $1500 Net Total $1350 AUTHO # 4821 Thanks", None)
+    check("'4821 Thanks': AUTHO 4821, no code", p.fields.get("autho_number") == "4821"
+          and "autho_code" not in p.fields)
+    p = d.parse(NOTE_SUBJECT, a + "NCC $1500 AUTHO # 48-21RNCL", None)
+    check("the AUTHO number is digits only (it is half the idempotency key)",
+          p.fields.get("autho_number") == "4821")
+    p = d.parse(NOTE_SUBJECT, a + "NCC $1500 AUTHO # 4821RNCL", None)
     check("NCC alone is enough, net total absent",
           p.status == d.AUTHORIZATION and "net_total" not in p.fields)
 
@@ -128,6 +141,33 @@ def test_what_is_not_an_authorization():
     check("the request to send a report to the Authorization department is not one",
           d.parse(NOTE_SUBJECT, "Please send the report to the Authorization department.",
                   None).status == d.IGNORED)
+    check("no anchor: AUTHO + amounts without 'Note Added in Frontdoor System' stay ignored",
+          d.parse(NOTE_SUBJECT, "NCC $1500 Net Total $1350 AUTHO # 4821RNCL", None).status
+          == d.IGNORED)
+    check("'Authorization 4821 DENIED. Net Total $0' is not one",
+          d.parse(NOTE_SUBJECT, "Authorization 4821 DENIED. Net Total $0", None).status
+          == d.IGNORED)
+    for word in ("DENIED", "declined", "Void", "voided", "cancelled", "canceled", "cancel",
+                 "not authorized", "rejected", "revoked"):
+        p = d.parse(NOTE_SUBJECT, "Note Added in Frontdoor System NCC $1500 Net Total $1350 "
+                    f"AUTHO # 4821RNCL {word}. Thanks for being the best!", None)
+        check(f"the template saying '{word}' is not one", p.status == d.IGNORED)
+    check("a refusal word still falls back to 'possible' when items were updated",
+          d.parse(NOTE_SUBJECT, ITEMS_BODY + " Note Added in Frontdoor System NCC $1500 "
+                  "Net Total $1350 AUTHO # 4821RNCL DENIED", None).status
+          == d.AUTHORIZATION_POSSIBLE)
+    check("a note quoting an older note is not one",
+          d.parse(NOTE_SUBJECT, "Customer called. Previous note: NCC $1500 Net Total $1350 "
+                  "AUTHO # 4821RNCL", None).status == d.IGNORED)
+    check("a note quoting the full older template is not one either",
+          d.parse(NOTE_SUBJECT, "Customer called to reschedule. Previous note: " + AUTH_BODY,
+                  None).status == d.IGNORED)
+    check("an AUTHO before the anchor is not read",
+          d.parse(NOTE_SUBJECT, "AUTHO # 4821RNCL Note Added in Frontdoor System NCC $1500",
+                  None).status == d.IGNORED)
+    check("the work order boilerplate 'Authorization Link: Click Here' next to a total",
+          d.parse(NOTE_SUBJECT, "Note Added in Frontdoor System Authorization Link: Click Here "
+                  "Net Total $1350", None).status == d.IGNORED)
     check("an empty note is still ignored",
           d.parse(NOTE_SUBJECT, "", "").status == d.IGNORED)
     check("the template under a non-note subject is not one (no job number to act on)",
@@ -150,8 +190,12 @@ def test_items_updated_is_a_possible_authorization():
     check("'has been updated' too",
           d.parse(NOTE_SUBJECT, "Your item to service has been updated", None).status
           == d.AUTHORIZATION_POSSIBLE)
-    check("a real authorization wins over the phrase",
-          d.parse(NOTE_SUBJECT, ITEMS_BODY + " " + AUTH_BODY, None).status == d.AUTHORIZATION)
+    p = d.parse(NOTE_SUBJECT, ITEMS_BODY + " Previous note: " + AUTH_BODY, None)
+    check("items updated that QUOTES an older AUTHO is 'possible', never a duplicate "
+          "authorization", p.status == d.AUTHORIZATION_POSSIBLE and "autho_number" not in p.fields)
+    check("items updated wins over an AUTHO in the same note (the safe direction)",
+          d.parse(NOTE_SUBJECT, ITEMS_BODY + " " + AUTH_BODY, None).status
+          == d.AUTHORIZATION_POSSIBLE)
 
 
 # --- the CRM body -------------------------------------------------------------------------

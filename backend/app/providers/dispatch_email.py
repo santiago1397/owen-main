@@ -60,23 +60,41 @@ CANCELLATION = "cancellation"
 # That is the ONLY such sample ever observed (1 of 31 note emails on 2026-10-01; 4 others said
 # "Your list of items to service have been updated", which MAY be approval-related and is
 # therefore its own, weaker kind). Matched on the BODY, after tags are stripped and whitespace
-# collapsed, so spacing, `$` and thousands commas do not matter. Watch it: when AHS changes the
-# wording, these go back to `ignored` silently — that is the safe direction (nothing is sent),
-# but it is not a loud one. The Work order's "Authorization Link: Click Here" is boilerplate
-# and is NOT an approval; nothing here reads a work order.
+# collapsed, so spacing, `$` and thousands commas do not matter — but ANCHORED on the
+# template's opening "Note Added in Frontdoor System", and refused when the note says denied /
+# void / cancelled or only quotes an older note (rules: `authorization()`). Watch it: when
+# AHS changes the wording, these go back to `ignored` silently — that is the safe direction
+# (nothing is sent), but it is not a loud one. The Work order's "Authorization Link: Click
+# Here" is boilerplate and is NOT an approval; nothing here reads a work order.
 AUTHORIZATION = "authorization"
 AUTHORIZATION_POSSIBLE = "authorization_possible"
 
 _NOTE_SUBJECT = re.compile(r"sent\s+you\s+a\s+note\s+for\s+job\s*#?\s*(\d{4,})", re.IGNORECASE)
-# The AUTHO number is the digits; a letter code stuck to them ("5678RNCL") is kept separately.
-# The code is case-SENSITIVE so the "Thanks" that follows can never be read as one.
+# The ANCHOR: an authorization is read only from the text AFTER this phrase, which opens the
+# one observed template. "AUTHO 4821" plus a dollar figure anywhere else in a note is not one.
+_ANCHOR = re.compile(r"\bNote\s*Added\s*in\s*Front\s*door\s*System\b", re.IGNORECASE)
+# The AUTHO number is the digits; a letter code after them ("5678RNCL", "5678 RNCL",
+# "5678RNCLThanks") is kept separately. The code is case-SENSITIVE, 2-6 capitals, and stops
+# before a capital followed by a lower-case letter, so "Thanks" is never read as one.
 _AUTHO = re.compile(
-    r"\bAUTHO(?:RIZATION)?\s*(?:#|No\.?|Number)?\s*:?\s*(\d[\d-]{2,})(?-i:([A-Z]{2,6})\b)?",
+    r"\bAUTHO(?:RIZATION)?\s*(?:#|No\.?|Number)?\s*:?\s*(\d[\d-]{2,})"
+    r"(?-i:\s?([A-Z]{2,6}?)(?=[A-Z][a-z]|\b))?",
     re.IGNORECASE)
 _MONEY = r"\$?\s*(\d[\d,]*(?:\.\d{1,2})?)"
 _NET_TOTAL = re.compile(r"\bNet\s*Total\s*:?\s*" + _MONEY, re.IGNORECASE)
 _NCC = re.compile(r"\bNCC\s*:?\s*" + _MONEY, re.IGNORECASE)
 _ITEMS_UPDATED = re.compile(r"items?\s+to\s+service\s+ha(?:ve|s)\s+been\s+updated", re.IGNORECASE)
+# A word that turns an AUTHO into the opposite of an approval. Any of these in the current
+# note and it is NOT an authorization.
+_REFUSAL = re.compile(
+    r"\b(?:den(?:ied|y)|declined?|void(?:ed)?|cancel(?:l?ed|lation)?|"
+    r"not\s+(?:been\s+)?authori[sz]ed|unauthori[sz]ed|reject(?:ed)?|revoked?|reversed)\b",
+    re.IGNORECASE)
+# Where the current note ends and QUOTED text (an older note, a reply chain) begins.
+_QUOTE = re.compile(
+    r"\b(?:previous|prior|earlier|original|older|last)\s+note\b|\bwrote\s*:|"
+    r"-{2,}\s*Original\s+Message|\bForwarded\s+message\b",
+    re.IGNORECASE)
 
 # What makes an email a JOB NOTIFICATION — the only kind that can become a lead. Matched on
 # the subject, which stays stable even when the body template shifts.
@@ -150,25 +168,46 @@ def authorization(subject: str | None, text_body: str | None,
                   html_body: str | None) -> dict | None:
     """The authorization facts of an AHS NOTE email, or None when it is not one.
 
-    Returns `{"kind": "authorization", "job_id", "autho_number", "autho_code"?, "net_total"?,
-    "ncc"?}` when the body carries an AUTHO number AND at least one amount, or
-    `{"kind": "authorization_possible", "job_id"}` for "items to service have been updated".
-    Only a note subject with a job number qualifies — no job number, nothing to act on."""
+    Only a note subject with a job number qualifies — no job number, nothing to act on. Then,
+    in this order (the safe direction always wins — a missed approval is a human reading the
+    email; a false one is dispatch acting on a repair AHS did not approve):
+
+    1. "items to service have been updated" anywhere -> `{"kind": "authorization_possible",
+       "job_id"}`, even when the note also contains an AUTHO. Such a note can quote an older
+       approval; calling it a (duplicate) authorization would be wrong, and "possible" still
+       puts it in front of a person.
+    2. The CURRENT note is the text before any quote marker ("Previous note:", "wrote:",
+       "-----Original Message", "Forwarded message"). Anything after is ignored.
+    3. The current note must contain the template's anchor, "Note Added in Frontdoor System".
+       The AUTHO number and the amounts are read only AFTER it.
+    4. A refusal word (denied, declined, void, cancelled, not authorized, rejected, revoked,
+       reversed) anywhere in the current note -> not an authorization.
+    5. An AUTHO number AND at least one of NCC / Net Total after the anchor ->
+       `{"kind": "authorization", "job_id", "autho_number", "autho_code"?, "net_total"?,
+       "ncc"?}`. `autho_number` is digits only (it is half the CRM's idempotency key).
+
+    Anything else -> None (the email stays `ignored`)."""
     m = _NOTE_SUBJECT.search(subject or "")
     if not m:
         return None
     job_id = m.group(1)
     text = _flat(text_body, html_body)
-    autho = _AUTHO.search(text)
-    net, ncc = _NET_TOTAL.search(text), _NCC.search(text)
-    if autho and (net or ncc):
-        out = {"kind": AUTHORIZATION, "job_id": job_id,
-               "autho_number": autho.group(1).strip("-"),
-               "autho_code": autho.group(2), "net_total": _amount(net), "ncc": _amount(ncc)}
-        return {k: v for k, v in out.items() if v is not None}
     if _ITEMS_UPDATED.search(text):
         return {"kind": AUTHORIZATION_POSSIBLE, "job_id": job_id}
-    return None
+    quote = _QUOTE.search(text)
+    current = text[:quote.start()] if quote else text
+    anchor = _ANCHOR.search(current)
+    if not anchor or _REFUSAL.search(current):
+        return None
+    note = current[anchor.end():]
+    autho = _AUTHO.search(note)
+    net, ncc = _NET_TOTAL.search(note), _NCC.search(note)
+    if not (autho and (net or ncc)):
+        return None
+    out = {"kind": AUTHORIZATION, "job_id": job_id,
+           "autho_number": re.sub(r"\D", "", autho.group(1)),
+           "autho_code": autho.group(2), "net_total": _amount(net), "ncc": _amount(ncc)}
+    return {k: v for k, v in out.items() if v is not None}
 
 
 def non_job_kind(subject: str | None) -> str:
