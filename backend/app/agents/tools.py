@@ -49,7 +49,24 @@ TOOLS: dict[str, dict] = {
         # instead of an operator discovering it from a customer who never got their text.
         "engines": ("openai_realtime", "dummy"),
     },
+    "request_change": {
+        "kind": IN_CALL,
+        "exit_port": None,
+        "description": "Pass a caller's request to reschedule, cancel or change something to "
+                       "the office as an urgent CRM task (RETELL-PLAN C3). The agent only "
+                       "REQUESTS — nothing is moved or cancelled by it.",
+        # Retell only (decision 13). owen-voice's registry has no such tool, and adding it
+        # there is a separate piece of work; naming the engine here is what makes activation
+        # refuse it on owen_voice instead of it being silently dropped there.
+        "engines": ("retell",),
+    },
 }
+
+# The tools a Retell agent may have (RETELL-PLAN C1). Retell owns the conversation, so these
+# are the only things OWEN does on its behalf; anything else — above all `send_sms` — is
+# refused at activation.
+RETELL_TOOLS: frozenset[str] = frozenset({"transfer", "end_call", "capture_lead",
+                                          "request_change"})
 
 # Tools with no `engines` key run everywhere. Only a tool that SOME engine cannot honour
 # needs to name the ones that can.

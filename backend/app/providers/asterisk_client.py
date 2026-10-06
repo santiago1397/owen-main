@@ -431,6 +431,39 @@ class AsteriskAriClient:
                 await self.destroy_bridge(bridge_id)
             await self._delete(f"/ari/channels/{out_id}")
 
+    async def originate_sip_leg(
+        self, queue: asyncio.Queue, channel_id: str, out_id: str, endpoint: str, *,
+        timeout_s: float,
+    ) -> str:
+        """Originate `endpoint` (a full dial string, e.g. the Retell SIP URI through its PJSIP
+        endpoint) as a leg of `channel_id`'s call and wait for it to answer.
+
+        The same originate `dial_number` makes — into our own Stasis app, marked as a
+        flow-dial leg (`appArgs` + the `out_id` prefix the caller chose) so the consumer never
+        mistakes it for a new inbound call, and linked by `originator` so it shares the call's
+        Linkedid — but it stops at "answered": the caller bridges, records and watches the leg
+        itself, because a Retell call ends on more than a hangup (a function call, a take-over).
+        `queue` must already watch both channels (`dtmf.watch(out_id, channel_id)`), or the
+        StasisStart can arrive before this returns. Returns "answered" or the dial port it got
+        instead; never raises."""
+        timeout_s = max(1.0, float(timeout_s or 10))
+        try:
+            created = await self._post_json("/ari/channels", params={
+                "endpoint": endpoint,
+                "app": settings.ARI_APP,
+                "appArgs": FLOW_DIAL_APP_ARG,
+                "channelId": out_id,
+                "originator": channel_id,
+                "timeout": str(int(timeout_s)),
+            })
+            if not isinstance(created, dict) or not created.get("id"):
+                return "failed"
+            port, _info = await self._await_dial_answer(queue, channel_id, out_id, timeout_s)
+            return port
+        except Exception:  # noqa: BLE001 - a failed leg is a port, never an exception
+            logger.exception("ARI originate_sip_leg to %s failed", endpoint)
+            return "failed"
+
     def _log_dial_outcome(self, channel_id: str, target: str, port: str) -> None:
         """Emit the dial's forensic summary as one `call.dial.outcome` line."""
         d = self._last_dial

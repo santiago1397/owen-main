@@ -191,39 +191,16 @@ class RemoteVoiceAgentSession:
 
 
 async def _over_spend_cap() -> bool:
-    """True when today's DERIVED AI spend has hit the configured ceiling.
+    """True when today's AI spend has hit the cap in force.
 
-    Best-effort and fail-OPEN: if the check itself errors we let the call proceed. A cost
-    guard that can block every call when the database hiccups is worse than the overspend it
-    prevents — and the cap is a backstop against runaway loops, not a billing system.
+    The cap is now runtime-settable from the CRM (RETELL-PLAN C6) and shared with the Retell
+    engine, so the check lives in `agents/spend.py`. Kept under this name because it is the
+    seam tests patch, and fail-OPEN exactly as before: a cost guard that can block every call
+    when the database hiccups is worse than the overspend it prevents.
     """
-    from app.core.config import settings
+    from app.agents import spend
 
-    cap = float(getattr(settings, "AI_DAILY_SPEND_CAP_USD", 0) or 0)
-    if cap <= 0:
-        return False
-    try:
-        from datetime import datetime, timedelta, timezone
-
-        from sqlalchemy import func as sa_func
-        from sqlalchemy import select
-
-        from app.db import SessionLocal
-        from app.models import CallCharge
-        from app.services.ai_cost import AI_KINDS
-
-        since = datetime.now(timezone.utc) - timedelta(days=1)
-        async with SessionLocal() as db:
-            spent = (await db.execute(
-                select(sa_func.coalesce(sa_func.sum(CallCharge.amount), 0)).where(
-                    CallCharge.kind.in_(AI_KINDS),
-                    CallCharge.created_at >= since,
-                )
-            )).scalar_one()
-        return float(spent or 0) >= cap
-    except Exception:  # noqa: BLE001 - fail open; see the docstring
-        logger.debug("spend cap check unavailable", exc_info=True)
-        return False
+    return await spend.over_cap()
 
 
 async def _build_context(spec: AgentSpec, ctx: AgentCallContext) -> tuple[dict, dict]:

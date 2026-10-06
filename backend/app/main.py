@@ -30,6 +30,7 @@ from app.integrations.crm import public_media as crm_public_media
 from app.integrations.openphone import api as openphone_mirror_api
 from app.integrations.openphone import webhook as openphone_webhook
 from app.integrations import link_status as link_status_api
+from app.integrations.retell import api as retell_api
 from app.core.config import settings
 from app.db import engine
 from app.migrate import run_migrations
@@ -102,6 +103,10 @@ app.include_router(crm_link_api.router)
 # and the exposure it creates are written out in integrations/crm/media.py.
 app.include_router(crm_public_media.router)
 app.include_router(openphone_mirror_api.router)
+# Retell (docs/RETELL-PLAN.md): PUBLIC, because Retell is on the internet — POST
+# /api/retell/webhook and /api/retell/functions/{name}. Every request is signature-verified
+# against RETELL_API_KEY before anything is read, and both answer 503 while it is unset.
+app.include_router(retell_api.router)
 # Quo's webhook: PUBLIC (POST /webhooks/openphone), HMAC-verified, 404 while
 # OPENPHONE_WEBHOOK_ENABLED is false. See integrations/openphone/webhook.py.
 app.include_router(openphone_webhook.router)

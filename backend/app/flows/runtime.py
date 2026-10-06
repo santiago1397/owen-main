@@ -667,6 +667,8 @@ async def run_agent_on_call(
             agent_row = await dba.get(Agent, version.agent_id)
             agent_name = str(getattr(agent_row, "name", "") or "")
             spec = build_spec(str(version.agent_id), str(version.id), version.config)
+            spec.agent_name = agent_name
+            spec.version_number = version.version
         session = get_session_for_agent(spec)
         ctx = AgentCallContext(
             channel_id=channel_id, linkedid=lid, ari=ari,

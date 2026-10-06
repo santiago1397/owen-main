@@ -180,6 +180,34 @@ class Settings(BaseSettings):
     # as capacity exhaustion. A runaway loop at 3am is exactly what a retry queue and
     # a 4-slot pool will not catch on their own. 0 = no cap.
     AI_DAILY_SPEND_CAP_USD: float = 0.0
+    # Percent of the cap at which a WARNING is logged (once per day) so the owner hears about
+    # spend before calls start falling to voicemail. Both this and the cap above are only the
+    # DEFAULTS: the CRM's spend setting (`PUT /api/crm-link/agent-spend`, stored in
+    # `app_settings` under "agent_spend") overrides them at runtime without a redeploy
+    # (RETELL-PLAN C6). See app/agents/spend.py.
+    AI_SPEND_ALERT_PCT: int = 80
+
+    # --- Retell voice agents (docs/RETELL-PLAN.md, 2026-10-06) ------------------------------
+    # OFF unless RETELL_API_KEY is set: with it empty an agent on engine "retell" takes the
+    # `failed` port at once (-> the flow's fallback, voicemail), the webhook and function
+    # routes answer 503, and NO request is made to Retell. The key is also the HMAC key every
+    # webhook and function call is verified with (Retell signs with the API key), so it lives
+    # ONLY in owen-main's env — never in an agent version, the CRM, or a log line.
+    RETELL_API_KEY: str = ""
+    RETELL_API_BASE: str = "https://api.retellai.com"
+    # The PJSIP endpoint the Retell leg is dialled THROUGH (asterisk/pjsip_retell.conf.example):
+    # `PJSIP/<endpoint>/sip:<call_id>@<RETELL_SIP_HOST>`. Must exist in pjsip.conf before any
+    # agent is switched to engine "retell"; without it the originate is refused and the call
+    # takes the `failed` port (voicemail), so a missing endpoint costs a call, not dead air.
+    RETELL_SIP_ENDPOINT: str = "retell"
+    RETELL_SIP_HOST: str = "sip.retellai.com"
+    # How long the Retell SIP leg may take to answer after registration before the call gives
+    # up and takes the `failed` port. Retell expects the dial within seconds of
+    # register-phone-call; a leg that has not answered by then is not going to.
+    RETELL_CONNECT_TIMEOUT_SECONDS: float = 10.0
+    # Budget for `POST /v2/register-phone-call`. The caller is listening to silence (after
+    # the consent notice) while this runs, so it is short.
+    RETELL_REGISTER_TIMEOUT_SECONDS: float = 3.0
 
     VOICE_AGENT_ENGINE: str = ""  # "" = per-agent | dummy | openai_realtime | vapi | diy
 

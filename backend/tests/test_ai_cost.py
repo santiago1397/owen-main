@@ -48,7 +48,10 @@ FULL = {
 def test_a_complete_session_prices_every_stage():
     charges = charges_for_session(FULL)
     check(len(charges) == 3, "one line per stage")
-    check({c.kind for c in charges} == set(AI_KINDS), "stt, llm and tts are all present")
+    # AI_KINDS also holds `ai.retell` (2026-10-06), which is Retell's own per-call figure and
+    # never comes out of a usage breakdown — so a full owen_voice session is the other three.
+    check({c.kind for c in charges} == set(AI_KINDS) - {"ai.retell"},
+          "stt, llm and tts are all present")
     check(all(not c.unrated for c in charges), "nothing is unrated when usage is complete")
     total, any_unrated = session_total(charges)
     check(total > 0, f"a real total is produced ({total})")

@@ -810,3 +810,56 @@ class AppLog(Base):
     # "what went wrong on this call" without parsing free text.
     linkedid: Mapped[str | None] = mapped_column(String, index=True)
     traceback: Mapped[str | None] = mapped_column(Text)
+
+
+class RetellCall(Base):
+    """One call answered by a Retell voice agent (docs/RETELL-PLAN.md, 2026-10-06).
+
+    Two processes need the same facts about a live Retell call, and that is why this is a
+    table and not a dict: the WORKER runs the call (originates the SIP leg, bridges it, waits),
+    while the APP answers Retell's webhooks and function calls on the public host. A function
+    call ("transfer the caller") lands in the app and must reach the worker's wait loop; a
+    `call_ended` webhook can arrive after a restart and must still find its linkedid. So the
+    mapping `retell_call_id -> linkedid` is persisted the moment Retell hands out a call id.
+
+    It is also the live-call registry for Listen / Take over (C7): the caller's channel, the
+    Retell leg and the bridge are what `telephony.supervision` needs, and owen-voice — which
+    holds them for `owen_voice` calls — knows nothing about a Retell call.
+
+    Idempotency: Retell retries a webhook up to three times. `ended_event_at` /
+    `analyzed_event_at` are claimed with a conditional UPDATE, so a retry finds them set and
+    writes nothing twice.
+    """
+
+    __tablename__ = "retell_calls"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_uuid)
+    retell_call_id: Mapped[str] = mapped_column(String, unique=True)
+    linkedid: Mapped[str] = mapped_column(String, index=True)
+    # registering | live | ended. `live` rows are what the live-call list shows.
+    status: Mapped[str] = mapped_column(String, default="live", server_default="live", index=True)
+    retell_agent_id: Mapped[str] = mapped_column(String, default="", server_default="")
+    agent_name: Mapped[str] = mapped_column(String, default="", server_default="")
+    agent_version_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("agent_versions.id"))
+    caller_number: Mapped[str | None] = mapped_column(String)
+    dialed_number: Mapped[str | None] = mapped_column(String)
+    call_channel_id: Mapped[str | None] = mapped_column(String)
+    retell_channel_id: Mapped[str | None] = mapped_column(String)
+    bridge_id: Mapped[str | None] = mapped_column(String)
+    # A function call that ends the agent's part ("transfer", "end_call"), written by the APP
+    # and read by the worker's wait loop. `exit_data` carries the transfer destination NAME —
+    # never a number: the allowlist resolves it (flows/transfer.py).
+    exit_port: Mapped[str | None] = mapped_column(String)
+    exit_data: Mapped[dict | None] = mapped_column(JSONB)
+    captured: Mapped[dict | None] = mapped_column(JSONB)
+    requests: Mapped[list | None] = mapped_column(JSONB)
+    retell_agent_version: Mapped[int | None] = mapped_column(Integer)
+    cost_cents: Mapped[float | None] = mapped_column(Numeric(12, 4))
+    disconnection_reason: Mapped[str | None] = mapped_column(String)
+    summary: Mapped[str | None] = mapped_column(Text)
+    sentiment: Mapped[str | None] = mapped_column(String)
+    successful: Mapped[bool | None] = mapped_column(Boolean)
+    ended_event_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    analyzed_event_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

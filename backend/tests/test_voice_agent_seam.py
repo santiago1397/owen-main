@@ -105,7 +105,9 @@ def test_dummy_ports_and_capture_lead():
 
 def test_tools_registry():
     print("tool registry — fixed set, flow-exit ports, per-agent toggles filter unknowns:")
-    check("the four fixed tools exist", set(TOOLS) == {"transfer", "end_call", "capture_lead", "send_sms"})
+    # Five since 2026-10-06: `request_change` (Retell only — RETELL-PLAN C1/C3).
+    check("the five fixed tools exist", set(TOOLS) == {"transfer", "end_call", "capture_lead",
+                                                      "send_sms", "request_change"})
     check("flow-exit ports are transfer/end_call", FLOW_EXIT_PORTS == frozenset({"transfer", "end_call"}))
     check("valid ports add default/failed", VALID_PORTS == frozenset({"transfer", "end_call", "default", "failed"}))
     check("is_valid_port true for a real port", is_valid_port("transfer"))

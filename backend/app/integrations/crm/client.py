@@ -60,6 +60,7 @@ DELIVERY_PATH = "/api/events/delivery"
 CONTACTS_PATH = "/api/contacts"
 HEALTH_PATH = "/api/health"
 AGENT_CONTEXT_PATH = "/api/agent-context"
+AGENT_REQUESTS_PATH = "/api/agent-requests"
 
 # How many contacts a lookup will look at per candidate rendering before giving up. The
 # search is a substring ILIKE, so a short candidate can match broadly; the last-ten-digits
@@ -282,16 +283,35 @@ class CrmClient:
                            body.get("kind"), body.get("ahs_job_id"), result.status)
         return result
 
-    async def agent_context(self, caller_number: str) -> CrmResult:
+    async def agent_context(self, caller_number: str, agent_name: str = "") -> CrmResult:
         """`POST /api/agent-context` — who this caller is, for a voice agent (2026-09-24).
 
-        The body is the number and NOTHING else; the CRM refuses any other key, so this side
-        can never choose whose brief it reads. Same `events:write` token as the event feed.
-        Logged by status only: the answer is a customer's name and job."""
-        result = await self._request("POST", AGENT_CONTEXT_PATH,
-                                     json={"caller_number": str(caller_number or "")})
+        The body is the number and, since RETELL-PLAN C2, optionally the agent's NAME — the
+        CRM keys its per-agent context switches on it. Nothing else: the CRM refuses any other
+        key (`extra="forbid"`), so this side can never choose whose brief it reads. Without an
+        agent name the body is byte-for-byte what it always was. Same `events:write` token as
+        the event feed. Logged by status only: the answer is a customer's name and job."""
+        body = {"caller_number": str(caller_number or "")}
+        if str(agent_name or "").strip():
+            body["agent_name"] = str(agent_name).strip()
+        result = await self._request("POST", AGENT_CONTEXT_PATH, json=body)
         if not result.ok:
             logger.warning("crm-link: agent context REFUSED or unreachable (%s)", result.status)
+        return result
+
+    async def post_agent_request(self, body: dict) -> CrmResult:
+        """`POST /api/agent-requests` — a caller asked a voice agent to reschedule, cancel or
+        change something (RETELL-PLAN C3). The CRM turns it into an urgent task or a Dispatch
+        item and is idempotent on (owen_call_id, kind, request). Logged by kind and status
+        only: the request is the caller's own words."""
+        result = await self._request("POST", AGENT_REQUESTS_PATH, json=body)
+        if result.ok:
+            logger.info("crm-link: agent request (%s) delivered: created=%s where=%s",
+                        body.get("kind"), (result.data or {}).get("created"),
+                        (result.data or {}).get("where"))
+        else:
+            logger.warning("crm-link: agent request (%s) REFUSED or unreachable (%s)",
+                           body.get("kind"), result.status)
         return result
 
     async def post_event(self, body: dict) -> CrmResult:

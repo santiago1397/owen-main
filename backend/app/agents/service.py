@@ -12,11 +12,15 @@ Kept pure (no DB/ORM import) so it is unit-testable and reusable from the runtim
 from __future__ import annotations
 
 from app.agents.session import AgentSpec, _ENGINES, select_voice_agent_engine
-from app.agents.tools import TOOLS, engines_for, unsupported_tools
+from app.agents.tools import RETELL_TOOLS, TOOLS, engines_for, unsupported_tools
 from app.flows.service import next_version_number
 
 __all__ = ["next_version_number", "build_spec", "validate_agent_config",
-           "KNOWLEDGE_MAX_CHARS", "voice_warning"]
+           "KNOWLEDGE_MAX_CHARS", "RETELL_AGENT_ID_MAX", "voice_warning"]
+
+# RETELL-PLAN C1. Retell's agent ids are short opaque strings; anything longer is a paste of
+# something else (a URL, a prompt) and would only fail later, on a caller.
+RETELL_AGENT_ID_MAX = 100
 
 # VOICE_STACK_MIGRATION M11. `knowledge` is concatenated WHOLE into the system prompt by a
 # property recomputed EVERY TURN, and until this cap it was the one completely unbounded input
@@ -110,8 +114,10 @@ def validate_agent_config(config: dict | None) -> tuple[list[str], list[str]]:
     # real call runs on owen_voice — which is the exact pair where send_sms goes missing.
     # `select_voice_agent_engine` falls back to the declared value when settings are not
     # importable (the dependency-light sandbox), so this stays testable offline.
+    # A Retell agent's tools are checked against RETELL-PLAN C1 below, with sentences that
+    # name the Retell rule; checking them here as well would say the same thing twice.
     effective = select_voice_agent_engine(cfg.get("engine"))
-    for name in unsupported_tools(tools, effective):
+    for name in ([] if engine == "retell" else unsupported_tools(tools, effective)):
         errors.append(
             f"tool '{name}' is not implemented by the '{effective}' engine "
             f"(implemented by: {', '.join(engines_for(name))})"
@@ -159,6 +165,14 @@ def validate_agent_config(config: dict | None) -> tuple[list[str], list[str]]:
                 "the agent can never reach them"
             )
 
+    if engine == "retell":
+        # Retell owns HOW the agent talks — prompt, voice, greeting, knowledge (decision 1) —
+        # so none of those are required here and the knowledge budget does not apply: that
+        # text lives in Retell's dashboard and is never sent from OWEN. What OWEN does need is
+        # WHICH Retell agent to register the call against, and a tool set it can honour.
+        errors.extend(_retell_errors(cfg, tools))
+        return errors, warnings
+
     # Knowledge budget (M11). A HARD error, because this is exactly what activation validation
     # is for: the operator learns while editing, not when the bill arrives. Every turn of every
     # call pays for this text.
@@ -183,6 +197,29 @@ def validate_agent_config(config: dict | None) -> tuple[list[str], list[str]]:
     if not str(cfg.get("persona") or "").strip():
         warnings.append("no persona set — the agent has no described behaviour")
     return errors, warnings
+
+
+def _retell_errors(cfg: dict, tools: dict) -> list[str]:
+    """RETELL-PLAN C1: `retell_agent_id` required (non-empty, <= 100 characters) and the
+    toggled-on tools a subset of {transfer, end_call, capture_lead, request_change}. Never
+    send_sms — and the sentence says so, because "not in the allowed set" invites a retry."""
+    errors: list[str] = []
+    raw = cfg.get("retell_agent_id")
+    rid = str(raw or "").strip() if isinstance(raw, (str, int)) else ""
+    if not rid:
+        errors.append("a Retell agent needs retell_agent_id (the agent's id in Retell)")
+    elif len(rid) > RETELL_AGENT_ID_MAX:
+        errors.append(f"retell_agent_id is {len(rid)} characters, over the "
+                      f"{RETELL_AGENT_ID_MAX} limit — paste the agent id, not a URL")
+    for name, on in tools.items():
+        if on and name not in RETELL_TOOLS:
+            if name == "send_sms":
+                errors.append("tool 'send_sms' is never available to a Retell agent: "
+                              "nothing a voice agent does may send a text")
+            else:
+                errors.append(f"tool '{name}' is not available to a Retell agent (allowed: "
+                              f"{', '.join(sorted(RETELL_TOOLS))})")
+    return errors
 
 
 def build_spec(agent_id: str, version_id: str | None, config: dict | None) -> AgentSpec:

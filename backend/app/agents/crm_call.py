@@ -99,6 +99,12 @@ def report_extra(*, agent_name: str, version, outcome: str, data: dict,
     data = data or {}
     record = ai_call_record(agent_name=agent_name, version=version, outcome=outcome,
                             captured=data.get("captured"), campaign=campaign)
+    # Engine-specific facts for the same `ai_call` object (RETELL-PLAN C4: `engine`,
+    # `retell_call_id`, ...). Only non-empty values, for the reason `ai_call_record` gives:
+    # the CRM merges these records, and an empty value would occupy the key.
+    for key, value in (data.get("ai_call_extra") or {}).items()             if isinstance(data.get("ai_call_extra"), dict) else ():
+        if value not in (None, "", {}, []):
+            record[str(key)] = value
     text = transcript_text(data.get("transcript"))
     if not record and not text and not has_recording:
         return {}

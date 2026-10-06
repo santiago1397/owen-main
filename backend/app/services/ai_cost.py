@@ -30,7 +30,11 @@ from decimal import ROUND_HALF_UP, Decimal
 KIND_AI_STT = "ai.stt"
 KIND_AI_LLM = "ai.llm"
 KIND_AI_TTS = "ai.tts"
-AI_KINDS = (KIND_AI_STT, KIND_AI_LLM, KIND_AI_TTS)
+# A Retell call's cost, ONE row per call, as Retell itself reports it (`call_cost.
+# combined_cost`, RETELL-PLAN decision 11). Stamped RATED, not derived: the vendor issued the
+# figure, exactly as BulkVS issues the carrier's — nothing here multiplied usage by a rate.
+KIND_AI_RETELL = "ai.retell"
+AI_KINDS = (KIND_AI_STT, KIND_AI_LLM, KIND_AI_TTS, KIND_AI_RETELL)
 
 PROVENANCE_RATED = "rated"      # the carrier issued this figure
 PROVENANCE_DERIVED = "derived"  # we computed it from vendor-reported usage

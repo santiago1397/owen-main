@@ -51,6 +51,12 @@ class AgentSpec:
     knowledge: str = ""                              # in-context knowledge text
     guardrails: dict = field(default_factory=dict)  # max_call_seconds/max_silence_seconds/model_tier
     config: dict = field(default_factory=dict)       # raw version config (engine-specific extras)
+    # The agent's NAME, set by the runtime after the build (it is not in the version config).
+    # The Retell engine sends it to the CRM's caller brief, which keys its context switches on
+    # the agent (RETELL-PLAN C2), and into Retell's call metadata.
+    agent_name: str = ""
+    # The pinned version's NUMBER (1, 2, ...), for the same metadata.
+    version_number: int | None = None
 
 
 @dataclass
@@ -160,12 +166,26 @@ def _make_openai_realtime():
     return factory
 
 
+def _make_retell():
+    """Factory for the Retell engine (docs/RETELL-PLAN.md). Lazy for the same reason as the
+    others: the seam must import with the standard library alone."""
+
+    def factory() -> VoiceAgentSession:
+        from app.agents.retell import RetellVoiceAgentSession
+
+        return RetellVoiceAgentSession()
+
+    return factory
+
+
 # name -> zero-arg factory. `dummy` + `openai_realtime` (Ticket 12) are live; vapi/diy stubbed.
 _ENGINES: dict[str, object] = {
     "dummy": DummyVoiceAgentSession,
     # The real conversational engine: audio runs in the owen-voice container, not here.
     "owen_voice": _make_owen_voice(),
     "openai_realtime": _make_openai_realtime(),
+    # Retell runs the conversation; OWEN dials it over SIP and keeps the call (RETELL-PLAN).
+    "retell": _make_retell(),
     "vapi": _make_stub("vapi"),
     "diy": _make_stub("diy"),
 }

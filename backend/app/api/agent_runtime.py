@@ -168,6 +168,9 @@ class LookupIn(BaseModel):
     caller_number: str
     dialed_number: str = ""
     linkedid: str = ""
+    # The answering agent's name (RETELL-PLAN C2). Passed to the CRM, which applies that
+    # agent's context switches; empty = today's answer, unchanged.
+    agent_name: str = ""
 
 
 @router.post("/crm/lookup")
@@ -267,13 +270,51 @@ async def crm_link_lookup(
         return {}
     budget = float(getattr(settings, "CRM_LINK_CONTEXT_TIMEOUT_SECONDS", 0.8) or 0.8)
     result = await CrmClient(link.base_url, link.token, timeout_s=budget,
-                             budget_s=budget).agent_context(body.caller_number)
+                             budget_s=budget).agent_context(body.caller_number,
+                                                            agent_name=body.agent_name)
     if not result.ok:
         # Status only: the reason can echo the request, which is a customer's number.
         logger.warning("agent-runtime: crm-link lookup failed (status %s); the agent will "
                        "greet without customer context", result.status or "unreachable")
         return {}
     return caller_brief.to_provider(result.data)
+
+
+@router.post("/crm-link/brief")
+async def crm_link_brief(
+    body: LookupIn,
+    _key=Depends(require_scope(SCOPE_AGENT_WRITE)),
+) -> dict:
+    """The CRM's caller brief AS THE CRM SENT IT (RETELL-PLAN C2), for the Retell engine.
+
+    `crm-link/lookup` above flattens the answer into owen-voice's provider shape, which loses
+    everything C2 added (the Zuper job, recent calls and texts, the address the agent compares
+    against). Retell's dynamic variables are rendered from the full answer in the worker
+    (`integrations/retell/brief.py`), so this hop returns it — filtered to C2's keys, by name,
+    whatever else the CRM sends.
+
+    Same token, same 0.8 s budget, same degradation as the lookup: link off, CRM slow or
+    refusing -> `{}` and a WARNING, and the agent is told the caller is unknown. Never raises.
+    """
+    from app.core.config import settings
+    from app.integrations.crm import config as crm_config
+    from app.integrations.crm.client import CrmClient
+    from app.integrations.retell.brief import filter_answer
+
+    link = crm_config.current()
+    refusal = link.delivery_refusal() or ("" if link.base_url else "no CRM_LINK_BASE_URL")
+    if refusal:
+        logger.warning("agent-runtime: crm-link brief skipped (%s)", refusal)
+        return {}
+    budget = float(getattr(settings, "CRM_LINK_CONTEXT_TIMEOUT_SECONDS", 0.8) or 0.8)
+    result = await CrmClient(link.base_url, link.token, timeout_s=budget,
+                             budget_s=budget).agent_context(body.caller_number,
+                                                            agent_name=body.agent_name)
+    if not result.ok:
+        logger.warning("agent-runtime: crm-link brief failed (status %s); the Retell agent "
+                       "will be told nothing about the caller", result.status or "unreachable")
+        return {}
+    return {"answer": filter_answer(result.data)}
 
 
 class ReportIn(BaseModel):
