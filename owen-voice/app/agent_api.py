@@ -138,6 +138,7 @@ async def run_session(
     session.call_channel_id = body.channel_id
     session.linkedid = body.linkedid
     session.caller_number = body.caller_number
+    session.dialed_number = body.dialed_number
     session.agent = body.agent.model_dump()
     session.context = body.context or {}
     session.context_provider = body.context_provider or {}

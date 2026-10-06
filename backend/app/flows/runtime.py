@@ -362,9 +362,14 @@ async def _persist_agent_output(
         db.add(Transcription(
             call_id=call.id,
             recording_id=None,
-            engine="owen_voice",
+            # Which engine heard it. owen_voice by default (the only engine that returned a
+            # transcript until Retell); a Retell transcript arrives by webhook and says so.
+            engine=str(data.get("engine") or "owen_voice"),
             text=text,
-            language="en",
+            # The language the recogniser reported (phase 4 carries it back as `language`).
+            # This was hardcoded "en", so a Spanish conversation was filed as English; an
+            # engine that reports nothing now stores NULL — unknown, not a guess.
+            language=str(data.get("language") or "") or None,
             segments=segments,
             status="completed",
         ))
@@ -671,6 +676,9 @@ async def run_agent_on_call(
             # The dialled number's campaign — facts about the LINE, kept apart from the
             # caller's own (phase 3; agents/campaign.py).
             campaign=campaign_context(campaign) or None,
+            # The DID the caller rang: owen-voice's context request and Retell's dynamic
+            # variables both need it, and nothing carried it before (RETELL-PLAN phase 1).
+            dialed_number=str(dialed or "") or None,
         )
         result = await session.run(spec, ctx)
         # Persist BEFORE returning the port: the interpreter may route straight into a
@@ -1023,6 +1031,17 @@ async def _register_agent_recording(provider_id, linkedid: str, name: str) -> No
     async with SessionLocal() as db:
         row = await ingest_recording_event(db, "asterisk", rec)
         await db.commit()
+        if row is not None and row.storage_path is None:
+            # `queue.enqueue(db, job_type, payload)` — this used to be called WITHOUT the
+            # session, so it raised TypeError on every call and the backup registration never
+            # queued anything (masked by the consumer's own RecordingFinished path). Same
+            # payload and the same "only while not yet fetched" rule as the consumer
+            # (workers/asterisk_consumer.py), so the two paths queue identical jobs.
+            await queue.enqueue(db, "recording_fetch", {
+                "provider": "asterisk",
+                "recording_id": str(row.id),
+                "recording_sid": rec.provider_recording_sid,
+                "provider_url": rec.provider_url,
+            })
     if row is not None:
-        await queue.enqueue("recording_fetch", {"recording_id": str(row.id)})
         logger.info("flow runtime: registered agent recording %s (linkedid=%s)", name, linkedid)

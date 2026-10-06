@@ -126,9 +126,13 @@ async def take_over(
     The caller's channel is never hung up: they are mid-conversation and about to be handed a
     human.
     """
+    # The agent's leg is NOT claimed: it is about to be ejected (step 3), and a claimed
+    # channel is one the ARI client refuses to hang up — so claiming it made step 3 a silent
+    # no-op. owen-voice hid that (it also ends its own session on `stop_session`); a Retell
+    # leg has nobody else to hang it up, and the agent would keep talking over the human.
     if not ownership.claim(
         linkedid, operator_id,
-        channels=[c for c in (target_channel_id, operator_channel_id, agent_channel_id) if c],
+        channels=[c for c in (target_channel_id, operator_channel_id) if c],
         reason="takeover",
     ):
         return {"ok": False, "reason": "already_owned", "owner": ownership.owner_of(linkedid)}

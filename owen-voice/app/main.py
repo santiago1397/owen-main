@@ -171,7 +171,10 @@ async def _fetch_context(session: MediaSession) -> dict:
     return await fetch_provider(
         session.context_provider,
         caller_number=session.caller_number,
-        dialed_number=session.agent.get("dialed_number", "") if session.agent else "",
+        # The top-level `SessionIn.dialed_number`. This used to read `agent["dialed_number"]`,
+        # a key `AgentConfig` does not declare and pydantic therefore always dropped — so the
+        # provider was told the dialled number was "" on every call.
+        dialed_number=getattr(session, "dialed_number", "") or "",
         linkedid=session.linkedid,
         timeout_s=settings.CONTEXT_TIMEOUT_S,
     )

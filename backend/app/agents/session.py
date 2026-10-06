@@ -65,6 +65,10 @@ class AgentCallContext:
     # The dialled number's campaign as `{"name", "brief"}` (agents/campaign.py), or None.
     # Facts about the LINE, carried separately from anything known about the caller.
     campaign: dict | None = None
+    # The DID the caller rang. It was never carried here, so owen-voice's caller-context
+    # request always sent `dialed_number: ""` and a Retell agent could not be told which line
+    # it answered (RETELL-PLAN phase 1 fix).
+    dialed_number: str | None = None
 
 
 @dataclass

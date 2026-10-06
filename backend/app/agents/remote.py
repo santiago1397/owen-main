@@ -74,6 +74,10 @@ class RemoteVoiceAgentSession:
             "channel_id": ctx.channel_id,
             "linkedid": ctx.linkedid,
             "caller_number": ctx.caller_number or "",
+            # The DID the caller rang. `SessionIn.dialed_number` has always existed and was
+            # never sent, so owen-voice's context request carried an empty dialled number on
+            # every call (RETELL-PLAN phase 1 fix).
+            "dialed_number": getattr(ctx, "dialed_number", None) or "",
             # TOP LEVEL, because that is where `SessionIn` declares them. They used to be
             # sent inside `agent`, where `AgentConfig` does not declare them — so pydantic
             # dropped both, every call, silently. owen-voice then had no provider to call

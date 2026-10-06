@@ -102,6 +102,9 @@ class MediaSession:
     # --- flow-driven agent session (step 3) ---
     linkedid: str = ""
     caller_number: str = ""
+    # The DID the caller rang, from `SessionIn.dialed_number`. Read by the caller-context
+    # request; it used to be looked for inside `agent`, where AgentConfig drops it.
+    dialed_number: str = ""
     # The pinned agent-version config, as sent by OWEN. Empty for a standalone spike.
     agent: dict = field(default_factory=dict)
     # Caller context (CRM_CONTEXT_SPEC). `context` is OWEN's local half, already resolved;
