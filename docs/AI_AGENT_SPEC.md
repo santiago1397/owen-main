@@ -522,6 +522,89 @@ else is code this codebase has demonstrably written before.
 > `c3e6a9d1f725`. Nothing has yet carried a real customer call — a test DID still needs
 > pointing at an agent-bearing flow, which is the one remaining step and is data, not code.
 
+## D16 — Retell as an engine (2026-10-06, BUILT AND OFF)
+
+The owner's decisions and the cross-repo contract (C1–C7) are in `docs/RETELL-PLAN.md`; this
+is owen-main's half, and the operator steps. Retell holds the conversation; OWEN keeps the
+call — flow, recording, fallback, Listen / Take over all stay here.
+
+**OFF until configured.** With `RETELL_API_KEY` empty an agent on `engine: "retell"` takes
+the `failed` port at once (→ the flow's fallback, voicemail) with a logged sentence and NO
+request; `/api/retell/*` answer 503. No test reaches Retell: `tests/retell_guard.py` is
+installed by the `tests` package for every module, refuses any lookup of `*.retellai.com`
+(and whatever `RETELL_API_BASE` names) and fails the process that tried.
+
+### What was built
+
+| Piece | Where |
+|---|---|
+| Engine `retell` (register → SIP leg → bridge + record → wait) | `app/agents/retell.py` |
+| `POST /v2/register-phone-call`, the only request to Retell | `app/integrations/retell/client.py` |
+| Live-call registry, `retell_calls` table (call_id → linkedid, channels, exit requests, once-only webhook claims) | `app/integrations/retell/registry.py`, migration `d8e3f1a2b4c6` |
+| Public `POST /api/retell/webhook`, `POST /api/retell/functions/{name}`, signature-verified | `app/integrations/retell/api.py`, `signature.py`, `webhook.py`, `functions.py` |
+| C2 brief → dynamic variables (`customer_brief` starts with the disclosure rule) | `app/integrations/retell/brief.py`, `POST /api/agent-runtime/crm-link/brief` |
+| C1 validation, `request_change` tool (Retell only) | `app/agents/service.py`, `app/agents/tools.py` |
+| C5 numbers → agents (CRM-managed flows from templates) | `app/integrations/crm/numbers.py`, `/api/crm-link/numbers*` |
+| C6 runtime spend cap + alert | `app/agents/spend.py`, `/api/crm-link/agent-spend` |
+| C7 live list / Listen / Take over for Retell calls | `app/telephony/supervision.py` |
+
+Ports: Retell hangs up its leg → `end_call`; the caller hangs up → `default`; a `transfer`
+function → `transfer` with the destination NAME (resolved against the pinned version's
+`transfer_targets` by the same `_do_agent_transfer` an owen_voice transfer uses); an
+`end_call` function → `end_call`; a take-over → `taken_over`. Anything failing → `failed`.
+
+Invariant 8 ("agents do not dial") still holds in the sense it was written for: the only
+thing this engine originates is a SIP leg to Retell's SIP host through the dedicated `retell`
+endpoint, never a number on the BulkVS trunk.
+
+Fixed on the way: the backup agent-recording registration called `queue.enqueue` without the
+session and always raised; agent transcripts were always stored as `"en"`; the dialled number
+never reached the caller-context lookup (OWEN never sent `SessionIn.dialed_number`, owen-voice
+looked for it inside `agent`); `monitor.take_over` claimed the agent's channel before hanging
+it up, so the ARI ownership guard refused that hangup (owen-voice masked it; a Retell leg
+would have kept talking over the operator).
+
+### Operator steps (none of this is done by deploying)
+
+1. **Account and key.** Company-owned Retell account (decision 20). Put the API key in
+   `.env.prod` as `RETELL_API_KEY` — owen-main ONLY, never the CRM. It is also the HMAC key
+   every webhook and function call is verified with.
+2. **Webhook URL** (Retell dashboard → the agent, or account-level webhook):
+   `https://api.<APP_DOMAIN>/api/retell/webhook`. Events: call_started, call_ended,
+   call_analyzed.
+3. **Custom functions** on the Retell agent, each with URL
+   `https://api.<APP_DOMAIN>/api/retell/functions/<name>`:
+   `transfer` (args `{target}` — a NAME from the OWEN agent version's `transfer_targets`),
+   `capture_lead` (name, phone, email, address, intent, urgency, notes),
+   `request_change` (args `{kind: reschedule|cancel|other, request}`), and optionally
+   `end_call` (Retell's native end-call works as well). A function runs only if the OWEN
+   agent version toggles that tool on.
+4. **Turn off Retell's recording storage** for the agent (`data_storage_setting` / opt-out,
+   decision 15). OWEN records the bridge.
+5. **Asterisk:** add the endpoint from `asterisk/pjsip_retell.conf.example` (TCP, ulaw), then
+   `pjsip reload`. Optionally restrict RTP to Retell's published media ranges and, if
+   Retell offers it, allowlist this VPS's IP on the Retell side. See the file's checklist.
+6. **Spend cap:** the CRM sets it (`PUT /api/crm-link/agent-spend`, pilot `$25`/day, alert at
+   80%); `AI_DAILY_SPEND_CAP_USD` / `AI_SPEND_ALERT_PCT` are only the defaults until it does.
+7. **Migration:** `retell_calls` (revision `d8e3f1a2b4c6`).
+8. **Pilot (decision 12):** in the CRM, publish a voice agent with `engine: retell` and its
+   `retell_agent_id`, assign the spare BulkVS DID in `ai_first` mode, call it, Listen.
+
+### Unverified — needs a real Retell account and a real call
+
+* Whether an omitted `agent_version` means Retell's latest PUBLISHED version or its draft
+  (decision 14). The version that answered is recorded from `call_ended` either way; pin
+  `retell_agent_version` in the OWEN version if the answer is "draft".
+* The exact webhook / function body field names (`transcript_object`, `call_cost.
+  combined_cost` in cents, `call_analysis.*`, `agent_version`, a `language` field) are taken
+  from Retell's documented shapes, not from a delivery.
+* The signature scheme (`v=<ms>,d=<hex>`, HMAC-SHA256 of body + timestamp with the API key)
+  as Retell's SDK implements it — not yet checked against a live request.
+* The SIP leg over TCP through the `retell` endpoint, its answer timing, and audio both ways.
+* That the worker container can reach `api.retellai.com` (it has internet egress for other
+  vendors; not tried for this host).
+* Latency to the first word over the extra SIP hop (RETELL-PLAN "Open").
+
 ## Deploy record — steps 6-8 (DONE 2026-09-04)
 
 Deployed from `0e2c25f`. Both migrations applied cleanly on first run; `app` was brought up

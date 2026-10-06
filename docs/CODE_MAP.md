@@ -279,6 +279,7 @@ Selected at runtime by `settings.TRANSCRIPTION_ENGINE` / `settings.ANALYSIS_ENGI
 | `settings.py` | `GET /api/settings` (masked creds, webhook URLs to paste into providers, active engines, categories, inbound-email poller status) |
 | `api_keys.py` | `GET/POST /api/api-keys` · `DELETE /api/api-keys/{id}` (revoke) · `GET /api/api-keys/{id}/usage`. **JWT-authed on purpose** — an API key must never be able to mint or widen another API key. The plaintext secret is returned by POST and nowhere else. |
 | `deps.py` | `current_user` JWT dependency; `SHORT_CALL_MAX_DURATION_SECONDS=1` (≤1s misdials hidden by default). |
+| `integrations/retell/api.py` | **Public, no JWT — Retell-signature-verified** (`X-Retell-Signature`, HMAC with `RETELL_API_KEY`; 503 while unset): `POST /api/retell/webhook` (call_started / call_ended / call_analyzed) · `POST /api/retell/functions/{name}` (transfer / end_call / capture_lead / request_change). See `docs/AI_AGENT_SPEC.md` D16 and `docs/RETELL-PLAN.md`. |
 
 ### The AI API (`app/api/ai/`) — machine-facing, API-key-authed, read-only
 

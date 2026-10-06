@@ -1,0 +1,61 @@
+; ============================================================================
+; pjsip_retell.conf.example — the PJSIP endpoint OWEN dials Retell through
+; (docs/RETELL-PLAN.md, decision 2; docs/AI_AGENT_SPEC.md D16)
+;
+; NOT RENDERED, NOT INCLUDED, NOT LIVE. This file is an operator step written down, not
+; applied: nothing in deploy/render.sh reads it, and pjsip.conf does not #include it. Until an
+; operator adds it to the live config AND sets RETELL_API_KEY, no agent can use engine
+; "retell" — the engine fails its originate and the caller goes to the flow's fallback
+; (voicemail). Existing numbers' dialplan is untouched either way: this endpoint has no
+; `identify` section and its context answers nothing, so it adds NO inbound path.
+;
+; How it is used. For each call an agent on engine "retell" answers, OWEN:
+;   1. POSTs https://api.retellai.com/v2/register-phone-call  -> a call_id
+;   2. originates over ARI:  PJSIP/retell/sip:<call_id>@sip.retellai.com
+;      (RETELL_SIP_ENDPOINT=retell, RETELL_SIP_HOST=sip.retellai.com)
+;   3. bridges that leg with the caller and records the BRIDGE (OWEN's recording; Retell's
+;      own recording storage is turned off in Retell's dashboard — decision 15).
+; Retell identifies the call by the call_id in the Request-URI; no SIP credentials are
+; involved.
+;
+; Operator checklist (in docs/AI_AGENT_SPEC.md D16 as well):
+;   * TCP: Retell recommends TCP for SIP. pjsip needs a TCP transport to place TCP calls;
+;     if pjsip.conf has none yet, add the one below. Outbound TCP needs no inbound UFW rule —
+;     do NOT open 5060/tcp to the internet for this.
+;   * Codec: ulaw only (the BulkVS leg is ulaw; no transcoding in the bridge).
+;   * RTP: Retell's media arrives on the same rtp.conf port range BulkVS's does. UFW already
+;     allows that range (see README.md, Firewall). If you restrict RTP by source, add
+;     Retell's published media IP ranges — take them from Retell's CURRENT documentation at
+;     the time you do this; they are not recorded here because they change.
+;   * Retell side: if your Retell account offers an IP allowlist for "dial to SIP URI"
+;     calls, add this VPS's public IP so only OWEN can dial your registered calls.
+;   * Then: `asterisk -rx "pjsip reload"` and check `pjsip show endpoint retell`.
+; ============================================================================
+
+; Only if pjsip.conf has no TCP transport yet.
+;[transport-tcp]
+;type = transport
+;protocol = tcp
+;bind = 0.0.0.0:5060
+
+;[retell]
+;type = endpoint
+;transport = transport-tcp
+;; No inbound: nothing identifies to this endpoint, and if something ever did, this context
+;; is expected NOT to exist in extensions.conf, so Asterisk rejects the call.
+;context = retell-no-inbound
+;disallow = all
+;allow = ulaw
+;direct_media = no
+;rtp_symmetric = yes
+;force_rport = yes
+;rewrite_contact = yes
+;aors = retell
+;
+;[retell]
+;type = aor
+;; The dial string names the full URI (sip:<call_id>@sip.retellai.com), so this contact is a
+;; fallback that is never dialled on its own. No qualify: Retell does not answer OPTIONS as a
+;; health check worth alerting on.
+;contact = sip:sip.retellai.com;transport=tcp
+;qualify_frequency = 0

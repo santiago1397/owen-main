@@ -175,6 +175,16 @@ CREATE INDEX ix_cdr_start ON cdr (start);
 `answer`/`end` MUST be present (the reconciler reads them). OWEN's `callmon` app role only
 needs `SELECT` on `cdr`.
 
+## Retell SIP endpoint (2026-10-06) — NOT applied
+
+An AI agent on engine `retell` is answered by Retell over SIP: OWEN registers the call with
+Retell's API, then originates `PJSIP/retell/sip:<call_id>@sip.retellai.com` and bridges it
+with the caller. That needs a `retell` endpoint (TCP, ulaw) that this config does not have
+yet. It is written out, commented, with the operator checklist in
+`pjsip_retell.conf.example` — deliberately not rendered or included, so deploying this
+repository changes nothing about any live number. Without it (or without `RETELL_API_KEY`)
+a Retell agent's call takes the flow's fallback (voicemail). See `docs/AI_AGENT_SPEC.md` D16.
+
 ## Operator WebRTC softphone (Ticket 13) — in-platform calling
 
 Operators answer platform calls **in the browser**: a per-operator `chan_pjsip` WebRTC
