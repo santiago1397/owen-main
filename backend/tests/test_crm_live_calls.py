@@ -83,6 +83,14 @@ class World:
 
         voice_client.active_sessions = active_sessions
         queue.enqueue = enqueue
+        # Retell calls (RETELL-PLAN C7) are listed and taken over from the Retell registry,
+        # a database table. Empty here — these tests are about owen-voice sessions — and in
+        # memory, so nothing in this module ever opens a database connection.
+        from app.integrations.retell import registry
+        from tests.retell_support import MemoryRegistry
+
+        self.registry = registry
+        self.saved_registry = registry.use(MemoryRegistry())
         return self
 
     def __exit__(self, *exc):
@@ -90,6 +98,7 @@ class World:
             setattr(self.settings, f, v)
         self.voice.active_sessions = self.saved_active
         self.queue.enqueue = self.saved_enqueue
+        self.registry.use(self.saved_registry)
         return False
 
 

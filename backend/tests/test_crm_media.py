@@ -597,8 +597,16 @@ def test_the_crm_link_router_gained_exactly_two_routes():
         # appending one. Deliberately one route, so this fence still counts sixteen.
         ("/api/crm-link/agent-versions", ("POST",)),
         ("/api/crm-link/agent-versions", ("GET",)),
+        # Retell voice agents (RETELL-PLAN C5/C6, 2026-10-06): which number goes to which
+        # agent (the CRM-managed flow is built here, the replaced one remembered), and the
+        # daily AI spend cap the CRM sets. Three paths, five routes — so twenty-one.
+        ("/api/crm-link/numbers", ("GET",)),
+        ("/api/crm-link/numbers/{number_id}/assignment", ("PUT",)),
+        ("/api/crm-link/numbers/{number_id}/assignment", ("DELETE",)),
+        ("/api/crm-link/agent-spend", ("GET",)),
+        ("/api/crm-link/agent-spend", ("PUT",)),
     ])
-    check("exactly the sixteen we expect, no more and no fewer", paths == expected)
+    check("exactly the twenty-one we expect, no more and no fewer", paths == expected)
 
 
 def test_the_crm_event_now_carries_how_many_pictures_and_still_no_urls():

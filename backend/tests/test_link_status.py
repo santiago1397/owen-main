@@ -226,6 +226,8 @@ def test_it_is_mounted_as_one_get_route_and_nothing_else_moved():
     check("mounted on the app", len(mounted) == 1)
     crm = {r.path for r in main_mod.app.routes
            if getattr(r, "path", "").startswith("/api/crm-link")}
+    # Eighteen since 2026-10-06 (RETELL-PLAN C5/C6): /numbers, /numbers/{id}/assignment and
+    # /agent-spend — the CRM assigns numbers to Retell agents and sets the spend cap.
     # Still fifteen after phase 2c (2026-09-25): answering on/off for a voice agent rides the
     # SAME POST /agent-versions (`deactivate: true`, or `activate` of a stored CRM version) —
     # a body form, not a path, so nothing here moved.
@@ -233,7 +235,7 @@ def test_it_is_mounted_as_one_get_route_and_nothing_else_moved():
     # routes) lets the CRM publish the voice agent it edits and import the live one.
     # Fourteen since 2026-09-23: /live-calls and /live-calls/{linkedid}/listen|takeover, so
     # the CRM can show a live AI-agent call and ring its user in to hear or seize it.
-    check(f"the CRM link has its fifteen paths ({len(crm)})", len(crm) == 15)
+    check(f"the CRM link has its eighteen paths ({len(crm)})", len(crm) == 18)
 
 
 # --- 3. answers when things are off -------------------------------------------------------

@@ -675,8 +675,10 @@ def test_the_router_is_exactly_these_routes_and_the_crm_link_is_untouched():
     # then /media + /messages/{id}/media/{i} (pictures on a CRM text,
     # feature/mms-media-relay) were added to the CRM link on purpose. The mirror still
     # adds none, which is what this line is actually for.
-    check(f"the CRM link still has its fifteen paths, unwidened by the mirror ({len(crm)})",
-          len(crm) == 15 and "/api/crm-link/email-jobs" in crm)
+    # Eighteen since 2026-10-06: /numbers, /numbers/{id}/assignment and /agent-spend (Retell
+    # voice agents, RETELL-PLAN C5/C6). Still none of them the mirror's.
+    check(f"the CRM link still has its eighteen paths, unwidened by the mirror ({len(crm)})",
+          len(crm) == 18 and "/api/crm-link/email-jobs" in crm)
     check("scopes exist and are the two reused ones",
           bool(SCOPE_AGENT_WRITE) and bool(SCOPE_CRM_LINK))
 

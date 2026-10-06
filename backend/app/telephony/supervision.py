@@ -29,9 +29,72 @@ class NoLiveSession(LookupError):
 
 
 async def _session(linkedid: str) -> dict | None:
+    """The live agent session for a call: owen-voice's, else a Retell call's.
+
+    A Retell call (RETELL-PLAN C7) has no owen-voice session — its conversation is on Retell's
+    side of a SIP leg OWEN dialled — so the same three facts come from the Retell registry
+    instead: the caller's channel, the Retell leg (ejected on take-over exactly as owen-voice's
+    media channel is), and the bridge the operator joins. One shape, so `queue_listen` /
+    `queue_takeover` and the monitor job stay ONE mechanism for both engines."""
     from app.telephony import voice_client
 
-    return await voice_client.session_for(linkedid)
+    sess = await voice_client.session_for(linkedid)
+    if sess is not None:
+        return sess
+    return await retell_session(linkedid)
+
+
+async def retell_session(linkedid: str) -> dict | None:
+    """A live Retell call in owen-voice's session shape, or None. Best-effort: a registry
+    that cannot be read means "not live", never an exception into a supervisor's request."""
+    try:
+        from app.integrations.retell import registry
+
+        row = await registry.current().live_for(linkedid)
+    except Exception:  # noqa: BLE001
+        import logging
+
+        logging.getLogger("telephony.supervision").exception(
+            "supervision: Retell registry lookup failed for %s", linkedid)
+        return None
+    if row is None:
+        return None
+    return {
+        "linkedid": linkedid,
+        "engine": "retell",
+        "call_channel_id": row.get("call_channel_id"),
+        "media_channel_id": row.get("retell_channel_id"),
+        "bridge_id": row.get("bridge_id"),
+    }
+
+
+async def retell_sessions() -> list[dict]:
+    """Every live Retell call as a session row for `describe` (C7): linkedid, how long it has
+    run, and `engine: "retell"`. Best-effort; [] when the registry cannot be read."""
+    try:
+        from app.integrations.retell import registry
+
+        rows = await registry.current().live()
+    except Exception:  # noqa: BLE001
+        import logging
+
+        logging.getLogger("telephony.supervision").exception(
+            "supervision: listing live Retell calls failed")
+        return []
+    from datetime import timezone
+
+    now = datetime.now(timezone.utc)
+    out = []
+    for r in rows:
+        started = r.get("created_at")
+        duration = None
+        if isinstance(started, datetime):
+            if started.tzinfo is None:
+                started = started.replace(tzinfo=timezone.utc)
+            duration = int((now - started).total_seconds())
+        out.append({"linkedid": r.get("linkedid"), "duration_s": duration, "turns": None,
+                    "engine": "retell"})
+    return out
 
 
 async def queue_listen(db: AsyncSession, *, operator_id: str, linkedid: str,
@@ -105,7 +168,7 @@ def describe(sessions: list[dict], facts: dict[str, dict]) -> list[dict]:
         if not linkedid:
             continue
         f = facts.get(linkedid) or {}
-        out.append({
+        row = {
             "linkedid": linkedid,
             "caller_number": f.get("caller_number"),
             "dialed_number": f.get("dialed_number"),
@@ -113,7 +176,12 @@ def describe(sessions: list[dict], facts: dict[str, dict]) -> list[dict]:
             "started_at": _iso(f.get("started_at")),
             "duration_s": s.get("duration_s"),
             "turns": s.get("turns"),
-        })
+        }
+        # C7: a Retell call says so. owen_voice rows keep their exact documented shape — a
+        # row with no `engine` IS an owen_voice call, as it always was.
+        if s.get("engine") == "retell":
+            row["engine"] = "retell"
+        out.append(row)
     return out
 
 

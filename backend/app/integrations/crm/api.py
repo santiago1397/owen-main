@@ -635,6 +635,11 @@ async def live_calls(
     from app.telephony import supervision, voice_client
 
     sessions = await voice_client.active_sessions()
+    # ...and the Retell calls (RETELL-PLAN C7), which owen-voice cannot know about. Same
+    # shape, plus `"engine": "retell"`; a linkedid owen-voice already lists is not repeated.
+    seen = {str(s.get("linkedid")) for s in sessions}
+    sessions = sessions + [r for r in await supervision.retell_sessions()
+                           if str(r.get("linkedid")) not in seen]
     facts = await supervision.call_facts(
         db, [str(s.get("linkedid")) for s in sessions if s.get("linkedid")])
     return {"calls": supervision.describe(sessions, facts)}
@@ -1078,3 +1083,126 @@ async def list_active_agent_versions(
     Read-only: executes SELECTs and nothing else."""
     _require_enabled()
     return {"agents": await crm_agent_versions.active_agents(db)}
+
+
+# --- phone numbers -> agents (RETELL-PLAN C5) -----------------------------------------------
+#
+# The CRM's AI Agents -> Phone numbers tab (ADMIN in the CRM). OWEN keeps the flows, so it
+# builds the CRM-managed flow from a template and remembers the one it replaced; see
+# `numbers.py` for the templates, what "hand-built" means and why consent is required.
+
+
+class NumberAssignmentIn(BaseModel):
+    model_config = {"extra": "forbid"}
+
+    agent_name: str = Field(min_length=1, max_length=200)
+    mode: str
+    hours: Optional[dict] = None
+    # Replacing a flow somebody built by hand is a deliberate act, never a side effect.
+    replace: bool = False
+
+
+def _numbers_refused(r) -> HTTPException:
+    logger.info("crm-link: number assignment refused (%d): %s", r.status, r.message)
+    return HTTPException(r.status, r.message)
+
+
+@router.get("/numbers")
+async def list_numbers(
+    db: AsyncSession = Depends(get_db),
+    _key=Depends(require_scope(SCOPE_CRM_LINK)),
+) -> dict:
+    """Every number OWEN carries, whether a flow can answer it (and why not), and the CRM
+    assignment in force. Read-only."""
+    _require_enabled()
+    from app.integrations.crm import numbers as crm_numbers
+
+    return await crm_numbers.list_numbers(db)
+
+
+@router.put("/numbers/{number_id}/assignment")
+async def assign_number(
+    number_id: str,
+    body: NumberAssignmentIn,
+    db: AsyncSession = Depends(get_db),
+    _key=Depends(require_scope(SCOPE_CRM_LINK)),
+) -> dict:
+    """Give this number to an agent in a mode (`ai_first` | `staff_then_ai` |
+    `after_hours_ai`). 409 to replace a hand-built flow without `replace: true`, for a number
+    whose calls do not run through OWEN, without a consent notice, or with nobody to ring;
+    422 for a bad mode or hours (after_hours_ai REQUIRES hours); 404 / 409 for an agent name
+    that is unknown / ambiguous."""
+    _require_enabled()
+    from app.integrations.crm import numbers as crm_numbers
+
+    try:
+        return await crm_numbers.assign(db, number_id, agent_name=body.agent_name,
+                                        mode=body.mode, hours=body.hours, replace=body.replace)
+    except crm_numbers.Refused as r:
+        raise _numbers_refused(r) from None
+
+
+@router.delete("/numbers/{number_id}/assignment")
+async def unassign_number(
+    number_id: str,
+    db: AsyncSession = Depends(get_db),
+    _key=Depends(require_scope(SCOPE_CRM_LINK)),
+) -> dict:
+    """Take the number back from the agent: the flow it ran before is restored (or none, and
+    `note` says why), and the CRM-managed flow is archived — never deleted, because calls it
+    answered still point at its versions."""
+    _require_enabled()
+    from app.integrations.crm import numbers as crm_numbers
+
+    try:
+        return await crm_numbers.unassign(db, number_id)
+    except crm_numbers.Refused as r:
+        raise _numbers_refused(r) from None
+
+
+# --- the daily AI spend cap (RETELL-PLAN C6) ------------------------------------------------
+
+
+class AgentSpendIn(BaseModel):
+    model_config = {"extra": "forbid"}
+
+    daily_cap_usd: float
+    alert_pct: int
+
+
+@router.get("/agent-spend")
+async def get_agent_spend(
+    db: AsyncSession = Depends(get_db),
+    _key=Depends(require_scope(SCOPE_CRM_LINK)),
+) -> dict:
+    """The cap in force, the alert percent, and what has been spent in the last 24 hours —
+    the same window and the same rows the cap is enforced on (`agents/spend.py`)."""
+    _require_enabled()
+    from app.agents import spend
+
+    cap, pct = await spend.limits(db)
+    return {"daily_cap_usd": cap, "alert_pct": pct,
+            "today_usd": float(round(await spend.spent_today(db), 2))}
+
+
+@router.put("/agent-spend")
+async def put_agent_spend(
+    body: AgentSpendIn,
+    db: AsyncSession = Depends(get_db),
+    _key=Depends(require_scope(SCOPE_CRM_LINK)),
+) -> dict:
+    """Set the cap and the alert percent. Takes effect on the next call — no redeploy.
+    `daily_cap_usd: 0` means no cap, as the env setting always has."""
+    _require_enabled()
+    from app.agents import spend
+
+    problems = spend.validate_limits(body.daily_cap_usd, body.alert_pct)
+    if problems:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "; ".join(problems))
+    await spend.set_limits(db, daily_cap_usd=body.daily_cap_usd, alert_pct=body.alert_pct)
+    await db.commit()
+    logger.info("crm-link: AI spend cap set to $%.2f/day, alert at %d%%",
+                body.daily_cap_usd, body.alert_pct)
+    cap, pct = await spend.limits(db)
+    return {"daily_cap_usd": cap, "alert_pct": pct,
+            "today_usd": float(round(await spend.spent_today(db), 2))}
