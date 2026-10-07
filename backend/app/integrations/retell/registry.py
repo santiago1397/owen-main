@@ -6,6 +6,8 @@ goes through here:
 
     worker -> app   the call exists, and on which channels / bridge (functions, takeover)
     app -> worker   a function asked to leave: `transfer` or `end_call` (the wait loop polls)
+    app -> worker   Retell's `call_ended` arrived (ended_event_at): if the leg still looks up
+                    here its BYE was lost, and the wait loop ends it (`retell_said_ended`)
     app -> app      Retell retried a webhook (claimed once, by a conditional UPDATE)
 
 The interface is small and every method answers with plain dicts, so the engine, the routes
@@ -48,6 +50,18 @@ def snapshot(row) -> dict:
     if out.get("cost_cents") is not None:
         out["cost_cents"] = float(out["cost_cents"])
     return out
+
+
+def retell_said_ended(row: dict | None) -> bool:
+    """Has Retell's `call_ended` webhook been received for this row? PURE.
+
+    `ended_event_at` is the claim; `disconnection_reason` is stored by the same claim and is
+    NOT cleared when a failed claim is released for Retell's retry — so the engine's safety
+    net (agents/retell.py `_wait`) still sees the end while the retry is pending. `call_analyzed`
+    writes neither."""
+    if not row:
+        return False
+    return row.get("ended_event_at") is not None or bool(row.get("disconnection_reason"))
 
 
 class DbRegistry:

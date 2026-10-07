@@ -221,6 +221,12 @@ async def handle(body: dict, reg) -> tuple[int, dict]:
     snap = await reg.claim_event(call_id, kind, fields)
     if snap is None:
         return 200, {"duplicate": True}
+    if kind == "ended" and snap.get("status") == "live":
+        # Normally ARI has already seen the Retell leg go. If not, its BYE was lost: the
+        # engine's wait loop sees this claim (registry.retell_said_ended) and ends the leg.
+        # Nothing here touches the call — never the caller; the flow decides.
+        logger.info("retell: call_ended while linkedid=%s is still live here; the engine "
+                    "will end the Retell leg", snap.get("linkedid"))
     try:
         if kind == "ended":
             await persist_ended(snap, call)

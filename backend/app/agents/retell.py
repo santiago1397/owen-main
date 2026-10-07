@@ -21,7 +21,8 @@ recording (of the bridge, here), the fallback, Listen and Take over.
     7. bridge caller + Retell, record the bridge -> failed if the bridge is refused
     8. wait for: Retell hangs up (end_call) | the caller hangs up (default) | a function asks
        to leave (transfer / end_call, after a short grace so the agent's last sentence is
-       heard) | a supervisor took over (taken_over)
+       heard) | a supervisor took over (taken_over) | Retell's `call_ended` webhook arrived
+       while the leg still looks up here (its SIP BYE was lost) -> treated as Retell hanging up
 
 `failed` routes to the flow's fallback (voicemail) — decision 17. A caller never hears dead
 air because Retell is down, unconfigured or over budget.
@@ -40,6 +41,7 @@ import logging
 import uuid
 
 from app.agents.session import AgentCallContext, AgentResult, AgentSpec
+from app.integrations.retell.registry import retell_said_ended
 
 logger = logging.getLogger("agents.retell")
 
@@ -191,7 +193,9 @@ async def _connect_and_wait(spec: AgentSpec, ctx: AgentCallContext, call_id: str
         else:
             # Retell hung up its own leg: the agent ended the conversation (its native
             # end-call), or Retell dropped. Which one is known only from the webhook's
-            # `disconnection_reason`, which the CRM receives too.
+            # `disconnection_reason`, which the CRM receives too. `retell_ended` is the same
+            # thing learnt from the webhook alone (the BYE never reached Asterisk): leg_gone
+            # stays False, so the finally hangs the Retell leg up from here.
             port, data = "end_call", {"ended_by": "retell"}
         result = AgentResult(port=port, data=data)
         return result
@@ -250,7 +254,8 @@ def _decorate(result: AgentResult, snap: dict, call_id: str, rec_name: str | Non
 async def _wait(queue: asyncio.Queue, reg, call_id: str, caller_chan: str, out_id: str,
                 max_s: float) -> tuple[str, tuple[str, dict] | None]:
     """Block until the conversation ends. Returns `(how, exit_request)`; `how` is one of
-    retell_gone | caller_gone | exit | max_duration."""
+    retell_gone | retell_ended (the webhook said so; ARI never did) | caller_gone | exit |
+    max_duration."""
     loop = asyncio.get_running_loop()
     started = loop.time()
     next_poll = 0.0
@@ -270,9 +275,27 @@ async def _wait(queue: asyncio.Queue, reg, call_id: str, caller_chan: str, out_i
                 return "caller_gone", None
         if loop.time() >= next_poll:
             next_poll = loop.time() + POLL_SECONDS
-            req = await _safe_exit_request(reg, call_id)
-            if req is not None:
-                return "exit", req
+            row = await _safe_row(reg, call_id)
+            if row is not None:
+                if row.get("exit_port"):
+                    # A function's request wins over everything else Retell says.
+                    return "exit", (str(row["exit_port"]), dict(row.get("exit_data") or {}))
+                if retell_said_ended(row):
+                    # The safety net. Retell's webhook says the call is over, yet ARI has
+                    # not seen the Retell leg go: its BYE was lost (the 2026-10-06 firewall
+                    # call, where the caller sat in silence until they hung up). End it the
+                    # way a real hang-up would; the finally hangs the leg up from here.
+                    logger.warning("retell: call_ended arrived but the Retell leg %s is still "
+                                   "up here; ending it (call %s)", out_id, call_id)
+                    return "retell_ended", None
+
+
+async def _safe_row(reg, call_id: str):
+    try:
+        return await reg.get(call_id)
+    except Exception:  # noqa: BLE001 - a DB blip must not end a live conversation
+        logger.debug("retell: registry poll failed", exc_info=True)
+        return None
 
 
 async def _safe_exit_request(reg, call_id: str):
