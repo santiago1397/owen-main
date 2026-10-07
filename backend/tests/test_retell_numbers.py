@@ -261,7 +261,10 @@ def test_a_hand_built_flow_is_protected_and_restored():
         exc = _refusal(_put(db, number))
         check("PUT without replace: 409", exc is not None and exc.status_code == 409)
         check("naming the flow and the way out", "Owner's flow" in exc.detail
-              and "replace" in exc.detail)
+              and "replace" in exc.detail
+              # the CRM tells this 409 from the other two by these words (ghl-clone
+              # app/ai/api.py HAND_BUILT_NEEDLE) — change both or neither
+              and "hand-built flow" in exc.detail)
         check("NOTHING written", db.writes() == (0, 0, 0) and number.flow_id == hand.id)
 
         out = asyncio.run(_put(db, number, replace=True))
