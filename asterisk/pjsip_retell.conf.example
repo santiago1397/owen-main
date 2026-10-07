@@ -20,8 +20,17 @@
 ;
 ; Operator checklist (in docs/AI_AGENT_SPEC.md D16 as well):
 ;   * TCP: Retell recommends TCP for SIP. pjsip needs a TCP transport to place TCP calls;
-;     if pjsip.conf has none yet, add the one below. Outbound TCP needs no inbound UFW rule —
-;     do NOT open 5060/tcp to the internet for this.
+;     if pjsip.conf has none yet, add the one below. Live (2026-10-06) runs on the existing
+;     UDP transport instead: adding a transport needs an Asterisk restart.
+;   * FIREWALL — REQUIRED: allow SIP from Retell's published blocks on 5060:5069 (UDP, or TCP
+;     if you use TCP). Our INVITE's replies come back through conntrack, but when the AGENT
+;     ends the call Retell sends a NEW request (BYE) from its own servers; with only BulkVS
+;     allowed it is dropped and the caller sits in silence until they hang up (seen on the
+;     first test call). Live rules, from Retell's docs "custom telephony":
+;       ufw allow proto udp from <cidr> to any port 5060:5069 comment "Retell SIP"
+;       for 18.98.16.120/30 3.42.144.0/23 153.57.128.0/18 143.223.88.0/21 161.115.160.0/19
+;     Safe: the `retell` endpoint has no identify section, so nothing from those ranges can
+;     start a call here; only in-dialog requests on calls OWEN placed are accepted.
 ;   * Codec: ulaw only (the BulkVS leg is ulaw; no transcoding in the bridge).
 ;   * RTP: Retell's media arrives on the same rtp.conf port range BulkVS's does. UFW already
 ;     allows that range (see README.md, Firewall). If you restrict RTP by source, add
