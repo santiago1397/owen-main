@@ -573,17 +573,27 @@ async def _do_agent_transfer(ari, channel_id: str, lid: str, chosen: dict) -> bo
     kind, target = chosen["kind"], chosen["target"]
     clog(logger, "agent.transfer", linkedid=lid, kind=kind, target=target)
     try:
-        if kind == "number":
-            result = await ari.dial_number(
-                channel_id, target, caller_id=None,
-                timeout_s=float(settings.OPERATOR_RING_TIMEOUT_SECONDS),
-            )
-            return result == "answered"
-        if kind == "operator":
-            result = await ari.dial_operator(
-                channel_id, [target], caller_id=None,
-                timeout_s=float(settings.OPERATOR_RING_TIMEOUT_SECONDS),
-            )
+        if kind in ("number", "operator"):
+            if kind == "number":
+                result = await ari.dial_number(
+                    channel_id, target, caller_id=None,
+                    timeout_s=float(settings.OPERATOR_RING_TIMEOUT_SECONDS),
+                )
+            else:
+                result = await ari.dial_operator(
+                    channel_id, [target], caller_id=None,
+                    timeout_s=float(settings.OPERATOR_RING_TIMEOUT_SECONDS),
+                )
+            if result == "answered":
+                # The dial returns once EITHER leg leaves, and the interpreter then stands
+                # down (`transferred`: no routing, no hangup). If the person transferred to
+                # hung up first the caller would sit in silence on a channel nobody owns, so
+                # the conversation being over ends the caller's leg too — a no-op when the
+                # caller was the one who left (2026-10-06, found reviewing Retell transfers).
+                try:
+                    await ari.hangup(channel_id)
+                except Exception:  # noqa: BLE001 - already gone is the common case
+                    pass
             return result == "answered"
         if kind == "flow":
             # Resolve the target DID to its assigned flow and run that graph on THIS channel.
