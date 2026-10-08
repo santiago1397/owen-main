@@ -75,6 +75,14 @@ class AgentCallContext:
     # request always sent `dialed_number: ""` and a Retell agent could not be told which line
     # it answered (RETELL-PLAN phase 1 fix).
     dialed_number: str | None = None
+    # True when this session is the agent taking the caller BACK after a transfer nobody
+    # answered (2026-10-08, flows/runtime.py `_return_to_agent`). The Retell engine tells the
+    # agent so (`transfer_failed`, a "sorry" greeting) and uses a second recording name.
+    transfer_failed: bool = False
+    # What the engine worked out about the caller for the first session (the Retell engine's
+    # rendered dynamic variables), kept so a second session on the same call reuses it
+    # instead of asking the CRM again while the caller waits.
+    agent_variables: dict | None = None
 
 
 @dataclass

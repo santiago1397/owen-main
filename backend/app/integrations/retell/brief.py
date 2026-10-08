@@ -1,13 +1,16 @@
 """The CRM's caller brief as Retell dynamic variables — PURE (RETELL-PLAN C2, decision 4).
 
 Retell substitutes `{{name}}` placeholders in the agent's prompt with strings OWEN sends at
-registration (`retell_llm_dynamic_variables`). Five are sent, always, all strings:
+registration (`retell_llm_dynamic_variables`). Seven are sent, always, all strings:
 
     customer_known       "yes" | "no"
     customer_first_name  "" when unknown
     customer_brief       the rendered block below
     caller_number        E.164
     dialed_number        the DID the caller rang
+    greeting             the agent's first words (Retell's begin message is "{{greeting}}")
+    transfer_failed      "no", or "yes" when the agent takes the caller back after a transfer
+                         nobody answered (2026-10-08) — and then the greeting apologises
 
 `customer_brief` ALWAYS starts with the disclosure rule, known caller or not, so a prompt
 that uses `{{customer_brief}}` can never receive facts without the rule above them. The rule
@@ -154,11 +157,17 @@ def _known_lines(answer: dict, now: datetime | None) -> tuple[str, list[str]]:
 
 GREETING_UNKNOWN = "Thank you for calling Dream Team Roofing! How can I help you today?"
 GREETING_KNOWN = "Hi {first}, thanks for calling Dream Team Roofing! How can I help you today?"
+# The agent's first words when it takes the caller back after a transfer nobody answered
+# (2026-10-08, owner): the caller has just heard ringing, so it apologises and offers to take
+# the message rather than greeting them as if the call had just started.
+GREETING_TRANSFER_FAILED = ("Sorry, nobody could pick up right now. I'll make sure the office "
+                            "gets your message - what would you like me to pass on?")
 
 
 def render_variables(answer, *, caller_number: str, dialed_number: str,
                      now: datetime | None = None) -> dict[str, str]:
-    """The six dynamic variables for one call. Anything but an explicit `known: true` with
+    """The seven dynamic variables for one call (`transfer_failed` is "no" here; see
+    `after_failed_transfer`). Anything but an explicit `known: true` with
     a named contact is UNKNOWN: nothing about anybody, the rule still first."""
     answer = filter_answer(answer)
     known = answer.get("known") is True
@@ -183,4 +192,16 @@ def render_variables(answer, *, caller_number: str, dialed_number: str,
         "customer_brief": brief,
         "caller_number": str(caller_number or ""),
         "dialed_number": str(dialed_number or ""),
+        # "yes" only in the session that takes the caller back after an unanswered transfer
+        # (after_failed_transfer); a prompt can use it to take a message instead.
+        "transfer_failed": "no",
     }
+
+
+def after_failed_transfer(variables: dict) -> dict[str, str]:
+    """The same call's variables for the agent taking the caller back after a transfer nobody
+    answered: the same brief, `transfer_failed` "yes", and the apology as the greeting. PURE."""
+    out = {str(k): str(v) for k, v in (variables or {}).items()}
+    out["transfer_failed"] = "yes"
+    out["greeting"] = GREETING_TRANSFER_FAILED
+    return out

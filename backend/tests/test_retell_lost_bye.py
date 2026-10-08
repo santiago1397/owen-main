@@ -59,7 +59,7 @@ class Hooks:
                 raise RuntimeError("database down")
             self.persisted.append(snap["retell_call_id"])
 
-        async def report(kind, snap, call):
+        async def report(kind, snap, call, segments=None):
             self.reported.append(kind)
             return True
 

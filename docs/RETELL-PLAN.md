@@ -65,6 +65,25 @@ Allowed tools for retell: `transfer_call`→`transfer`, `end_call`, `capture_lea
 owen-main validation for engine `retell`: `retell_agent_id` required (non-empty, ≤ 100 chars);
 tools ⊆ {transfer, end_call, capture_lead, request_change}.
 
+**Transfer ring time and the return to the agent (owner, 2026-10-08).** A transfer target may
+carry `"ring_seconds"` (a whole number, 5..60) — how long a `number` / `operator` target rings
+before the transfer counts as unanswered; without it, `OPERATOR_RING_TIMEOUT_SECONDS` (25).
+Validation refuses anything else with a sentence (a flow / agent target only warns: it does not
+ring). Why: the office's Quo line forwards after 15 s to ANOTHER AI number, so it needs e.g.
+`{"office": {"kind": "number", "target": "+19549147244", "ring_seconds": 12}}`.
+
+When a Retell agent's transfer is not answered (noanswer / busy / failed), the SAME agent and
+pinned version take the caller back on the same channel, once: a second registration with the
+same variables plus `transfer_failed` = "yes" and `greeting` = "Sorry, nobody could pick up right
+now. I'll make sure the office gets your message - what would you like me to pass on?" (every
+call otherwise sends `transfer_failed` = "no"). In that session `transfer` answers "take a
+message instead"; every other function works. Its ending is the node's port. If it cannot start
+(Retell error, spend cap) — or the caller hung up while it rang — the `transfer` port as before
+(voicemail on CRM-managed numbers). The CRM's `ai_call` gets `transfer: {target, outcome,
+returned_to_agent}`; the second part is recorded as `<linkedid>-agent-2` and its transcript is
+appended to the call's. owen_voice is unchanged. The caller hears ~1-2 s of silence between the
+ring stopping and the apology (registration + Retell's SIP answer; the brief is not re-fetched).
+
 ### C2. Caller brief — `POST /api/agent-context` (CRM, events:write token)
 Body: `{"caller_number": str, "agent_name": str?}` (still `extra="forbid"`).
 - No `agent_name`, or one that is not a non-archived voice agent: today's answer, unchanged.

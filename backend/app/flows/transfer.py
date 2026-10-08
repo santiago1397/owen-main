@@ -18,11 +18,32 @@ from typing import Optional
 
 TRANSFER_KINDS = ("number", "operator", "flow", "agent")
 
+# How long a `number` / `operator` target rings before the transfer counts as unanswered
+# (2026-10-08, owner). Optional per target, `"ring_seconds": 12`; absent = the platform's
+# OPERATOR_RING_TIMEOUT_SECONDS. It exists because a target can have its OWN no-answer rule:
+# the office's Quo line forwards to another AI number after 15 s, so a 25 s ring was answered
+# by the wrong agent. Ringing for less than the target's own rule gives up first.
+RING_SECONDS_MIN = 5
+RING_SECONDS_MAX = 60
+RING_KINDS = ("number", "operator")
+
+
+def ring_seconds_problem(name: str, value) -> Optional[str]:
+    """A sentence saying why `value` is not a usable `ring_seconds`, or None if it is."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        return (f"transfer target '{name}' has ring_seconds {value!r}: it must be a whole "
+                f"number of seconds from {RING_SECONDS_MIN} to {RING_SECONDS_MAX}")
+    if not RING_SECONDS_MIN <= value <= RING_SECONDS_MAX:
+        return (f"transfer target '{name}' rings for {value} seconds: ring_seconds must be "
+                f"from {RING_SECONDS_MIN} to {RING_SECONDS_MAX}")
+    return None
+
 
 def resolve_transfer_target(targets, name: str) -> Optional[dict]:
     """Look a destination NAME up in an agent version's declared allowlist.
 
-    Returns `{kind, target, name}` or None. None means "not permitted", and the caller falls
+    Returns `{kind, target, name}` (plus `ring_seconds` when the entry declares a valid one)
+    or None. None means "not permitted", and the caller falls
     back to the flow's own `transfer` edge — so a bad or absent name degrades to the
     operator's wiring rather than to an arbitrary dial.
     """
@@ -35,7 +56,13 @@ def resolve_transfer_target(targets, name: str) -> Optional[dict]:
     target = str(entry.get("target") or "").strip()
     if kind not in TRANSFER_KINDS or not target:
         return None
-    return {"kind": kind, "target": target, "name": str(name)}
+    chosen = {"kind": kind, "target": target, "name": str(name)}
+    ring = entry.get("ring_seconds")
+    if ring is not None and ring_seconds_problem(str(name), ring) is None:
+        # An invalid value is refused at activation (agents/service.py); one that slipped
+        # through is ignored here, so the platform default rings rather than nothing.
+        chosen["ring_seconds"] = ring
+    return chosen
 
 
 def target_names(targets) -> list:

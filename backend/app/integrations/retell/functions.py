@@ -15,7 +15,10 @@ Four functions, and the rules that make them safe to expose:
     number (flows/transfer.py says why: an LLM that can dial arbitrary numbers is a toll-fraud
     primitive). Allowed -> the worker's wait loop ends the Retell leg and the runtime moves
     the caller through `_do_agent_transfer`, the same path an owen_voice transfer takes.
-    Refused -> nothing happens and the agent is told so. First request wins.
+    Refused -> nothing happens and the agent is told so. First request wins. ONE transfer per
+    call: once a transfer on this call was tried and nobody answered, the agent has the caller
+    back (flows/runtime.py `_return_to_agent`) and a second `transfer` is refused with
+    "take a message instead" (2026-10-08) — never a loop of rings.
   * **end_call** — optional: Retell's native end-call works too (its leg hangs up). Both end
     the agent's part with the `end_call` port.
   * **capture_lead** — merged into the call's capture; stored as `call_captures` when the
@@ -40,6 +43,9 @@ MAX_REQUEST_CHARS = 1000
 SAY_CALL_OVER = "This call has already ended."
 SAY_NOT_ALLOWED = "That is not something I can do on this line."
 SAY_TRANSFERRING = "Transferring the caller now."
+SAY_TRANSFER_TRIED = ("Nobody could pick up just now, so do not transfer again. Take a message "
+                      "instead: ask what they need and capture it, then tell them the office will "
+                      "call them back.")
 SAY_ENDING = "Ending the call now."
 SAY_CAPTURED = "Saved."
 SAY_REQUEST_LOGGED = ("Passed to the office as an urgent request; someone will follow up with "
@@ -97,6 +103,21 @@ async def _post_request(body: dict):
                            budget_s=budget).post_agent_request(body)
 
 
+async def _transfer_tried(reg, row: dict, call_id: str) -> bool:
+    """Has an EARLIER Retell session on this same call already asked for a transfer? Then this
+    session is the agent taking the caller back after nobody answered. Read from the registry
+    (the worker's facts, not anything Retell sends), and a lookup that fails refuses: a
+    second ring the caller sits through is worse than a message taken."""
+    linkedid = str(row.get("linkedid") or "")
+    if not linkedid:
+        return False
+    try:
+        return bool(await reg.transfer_tried(linkedid, exclude_call_id=call_id))
+    except Exception:  # noqa: BLE001 - see the docstring: refuse rather than loop
+        logger.exception("retell: transfer history lookup failed (linkedid=%s)", linkedid)
+        return True
+
+
 async def handle(name: str, body: dict, reg) -> dict:
     """Run one function call. Never raises; the answer is always a sentence."""
     call = body.get("call") if isinstance(body.get("call"), dict) else {}
@@ -117,6 +138,10 @@ async def handle(name: str, body: dict, reg) -> dict:
         return say(SAY_NOT_ALLOWED)
 
     if name == "transfer":
+        if await _transfer_tried(reg, row, call_id):
+            logger.info("retell: transfer refused — this call already tried one and nobody "
+                        "answered (linkedid=%s)", row.get("linkedid"))
+            return say(SAY_TRANSFER_TRIED)
         targets = config.get("transfer_targets")
         wanted = str(args.get("target") or args.get("destination") or "").strip()
         chosen = resolve_transfer_target(targets, wanted)

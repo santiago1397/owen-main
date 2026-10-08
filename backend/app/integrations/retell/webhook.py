@@ -112,8 +112,13 @@ def ai_call_for(kind: str, snap: dict) -> dict:
     return {k: v for k, v in out.items() if v not in (None, "", {}, [])}
 
 
-async def persist_ended(snap: dict, call: dict) -> None:
-    """Transcript + the cost row. Raises on a database failure (the claim is then released)."""
+async def persist_ended(snap: dict, call: dict) -> list[dict] | None:
+    """Transcript + the cost row. Raises on a database failure (the claim is then released).
+
+    One OWEN call can hold TWO Retell calls: the agent takes the caller back after a transfer
+    nobody answered (flows/runtime.py `_return_to_agent`, 2026-10-08). The second one's turns
+    are APPENDED to the call's Retell transcript, never dropped, and the whole transcript is
+    returned so the CRM report carries both parts (None when there is nothing stored)."""
     from sqlalchemy import select
     from sqlalchemy.dialects.postgresql import insert as pg_insert
 
@@ -129,16 +134,27 @@ async def persist_ended(snap: dict, call: dict) -> None:
         if row is None:
             logger.warning("retell: no OWEN call for linkedid %s; transcript and cost kept "
                            "on the Retell row only", linkedid)
-            return
+            return None
         segments = segments_from(call)
+        stored: list[dict] | None = None
         if segments:
-            exists = (await db.execute(
-                select(Transcription.id).where(Transcription.call_id == row.id,
-                                               Transcription.engine == "retell").limit(1)
-            )).scalar_one_or_none()
-            if exists is None:
-                from app.agents.crm_call import transcript_text
+            from app.agents.crm_call import transcript_text
 
+            existing = (await db.execute(
+                select(Transcription).where(Transcription.call_id == row.id,
+                                            Transcription.engine == "retell").limit(1)
+            )).scalar_one_or_none()
+            if existing is not None:
+                before = [t for t in (existing.segments or []) if isinstance(t, dict)]
+                n = len(segments)
+                if len(before) >= n and before[-n:] == segments:
+                    stored = before          # this part is already there (a retried event)
+                else:
+                    stored = before + segments
+                    existing.segments = stored
+                    existing.text = transcript_text(stored)
+            else:
+                stored = segments
                 db.add(Transcription(
                     call_id=row.id, recording_id=None, engine="retell",
                     text=transcript_text(segments),
@@ -165,10 +181,13 @@ async def persist_ended(snap: dict, call: dict) -> None:
                 usage={"call_cost": call.get("call_cost")},
             ).on_conflict_do_nothing(index_elements=["uniqueid", "kind"]))
         await db.commit()
+        return stored
 
 
-async def report(kind: str, snap: dict, call: dict) -> bool:
-    """One `ended` event to the CRM through the existing `crm_report` path."""
+async def report(kind: str, snap: dict, call: dict, segments: list | None = None) -> bool:
+    """One `ended` event to the CRM through the existing `crm_report` path. `segments` is the
+    call's whole stored transcript when `persist_ended` returned one (both parts of a call the
+    agent took back after an unanswered transfer); else this Retell call's own."""
     from app.agents.crm_call import report_extra
     from app.integrations.crm import push as crm_push
     from app.integrations.crm.events import CallEventFacts
@@ -180,7 +199,7 @@ async def report(kind: str, snap: dict, call: dict) -> bool:
     owen_call_id = await functions._owen_call_id(linkedid)
     data: dict = {"ai_call_extra": ai_call_for(kind, snap)}
     if kind == "ended":
-        segments = segments_from(call)
+        segments = segments or segments_from(call)
         if segments:
             data["transcript"] = segments
     extra = report_extra(agent_name=str(snap.get("agent_name") or ""), version=None,
@@ -228,9 +247,8 @@ async def handle(body: dict, reg) -> tuple[int, dict]:
         logger.info("retell: call_ended while linkedid=%s is still live here; the engine "
                     "will end the Retell leg", snap.get("linkedid"))
     try:
-        if kind == "ended":
-            await persist_ended(snap, call)
-        await report(kind, snap, call)
+        stored = await persist_ended(snap, call) if kind == "ended" else None
+        await report(kind, snap, call, segments=stored if isinstance(stored, list) else None)
     except Exception:  # noqa: BLE001 - release so Retell's retry can do it
         logger.exception("retell: processing %s for linkedid=%s failed; released for retry",
                          event, snap.get("linkedid"))

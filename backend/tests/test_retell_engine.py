@@ -127,10 +127,11 @@ def test_success_registers_dials_bridges_records_and_ends():
                                "owen_version": 4})
     check("no agent_version: Retell picks it (decision 14)", "agent_version" not in body)
     v = body["retell_llm_dynamic_variables"]
-    check("the C2 variables plus the greeting, all strings",
+    check("the C2 variables plus the greeting and transfer_failed, all strings",
           set(v) == {"customer_known", "customer_first_name", "customer_brief",
-                     "caller_number", "dialed_number", "greeting"} and all(isinstance(x, str)
-                                                               for x in v.values()))
+                     "caller_number", "dialed_number", "greeting", "transfer_failed"}
+          and all(isinstance(x, str) for x in v.values()))
+    check("a normal call: transfer_failed = no", v["transfer_failed"] == "no")
     check("known caller, first name given", v["customer_known"] == "yes"
           and v["customer_first_name"] == "Maria")
     from app.integrations.retell.brief import DISCLOSURE_RULE

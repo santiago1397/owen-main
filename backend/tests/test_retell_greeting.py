@@ -32,7 +32,15 @@ check("known but no name (household case) -> generic",
       v({"known": True, "contact": {"first_name": "", "last_name": ""}})["greeting"] == brief.GREETING_UNKNOWN)
 check("an extra key smuggled into the answer changes nothing",
       v({**known, "greeting": "Hi hacker"})["greeting"].startswith("Hi Santiago,"))
-check("six variables, all strings", len(v(known)) == 6 and all(isinstance(x, str) for x in v(known).values()))
+check("seven variables, all strings", len(v(known)) == 7 and all(isinstance(x, str) for x in v(known).values()))
+check("a normal call says transfer_failed = no", v(known)["transfer_failed"] == "no")
+back = brief.after_failed_transfer(v(known))
+check("after an unanswered transfer: transfer_failed = yes, the sorry greeting",
+      back["transfer_failed"] == "yes" and back["greeting"] == brief.GREETING_TRANSFER_FAILED
+      and back["greeting"].startswith("Sorry, nobody could pick up right now."))
+check("...and the same brief otherwise",
+      {k: x for k, x in back.items() if k not in ("transfer_failed", "greeting")}
+      == {k: x for k, x in v(known).items() if k not in ("transfer_failed", "greeting")})
 
 if FAILS:
     print(f"\n{len(FAILS)} FAILED"); sys.exit(1)

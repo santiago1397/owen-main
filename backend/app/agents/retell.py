@@ -24,6 +24,14 @@ recording (of the bridge, here), the fallback, Listen and Take over.
        heard) | a supervisor took over (taken_over) | Retell's `call_ended` webhook arrived
        while the leg still looks up here (its SIP BYE was lost) -> treated as Retell hanging up
 
+## A transfer nobody answers (2026-10-08, owner)
+
+When the agent's `transfer` is not answered, the runtime runs THIS engine again on the same
+caller channel (`flows/runtime.py` `_return_to_agent`) with `ctx.transfer_failed`: the same
+brief (`ctx.agent_variables`, not fetched again), `transfer_failed` "yes" and an apologising
+`greeting` (`brief.after_failed_transfer`), recorded as `<linkedid>-agent-2`. In that session
+the `transfer` function is refused (`functions.py`), so it cannot loop.
+
 `failed` routes to the flow's fallback (voicemail) — decision 17. A caller never hears dead
 air because Retell is down, unconfigured or over budget.
 
@@ -89,7 +97,18 @@ class RetellVoiceAgentSession:
             await spend.check_alert()
             return _failed("the daily AI spend cap is reached", lid)
 
-        variables = await _dynamic_variables(spec, ctx)
+        if isinstance(ctx.agent_variables, dict):
+            # The same call, again (the transfer nobody answered): what was worked out about
+            # the caller a minute ago still holds, and asking the CRM again is up to 1.2 s of
+            # silence for a caller who has just heard ringing stop.
+            variables = dict(ctx.agent_variables)
+        else:
+            variables = await _dynamic_variables(spec, ctx)
+            ctx.agent_variables = dict(variables)
+        if ctx.transfer_failed:
+            from app.integrations.retell.brief import after_failed_transfer
+
+            variables = after_failed_transfer(variables)
 
         from app.integrations.retell import client as retell_client
         from app.integrations.retell import registry
@@ -101,7 +120,8 @@ class RetellVoiceAgentSession:
             to_number=getattr(ctx, "dialed_number", None) or "",
             metadata={"linkedid": lid, "owen_agent": spec.agent_name or spec.agent_id,
                       "owen_version": spec.version_number if spec.version_number is not None
-                      else spec.version_id},
+                      else spec.version_id,
+                      **({"after_failed_transfer": True} if ctx.transfer_failed else {})},
             variables=variables,
             agent_version=int(pinned) if isinstance(pinned, int) and not isinstance(pinned, bool)
             else None,
@@ -146,7 +166,9 @@ async def _connect_and_wait(spec: AgentSpec, ctx: AgentCallContext, call_id: str
     queue = dtmf.watch(out_id, caller_chan)
     bridge_id = None
     leg_gone = False
-    rec_name = f"{lid}-agent-1"
+    # A second session on the same call (the agent taking the caller back after an unanswered
+    # transfer) records under its own name: the first recording already holds `-agent-1`.
+    rec_name = f"{lid}-agent-{2 if ctx.transfer_failed else 1}"
     loop = asyncio.get_running_loop()
     bridged_at = None
     result = AgentResult(port="failed", data={"engine": ENGINE_NAME})
@@ -242,8 +264,13 @@ def _decorate(result: AgentResult, snap: dict, call_id: str, rec_name: str | Non
         data["destination"] = snap["exit_data"].get("destination")
     if rec_name:
         data["recording_name"] = rec_name
-    if duration_s is not None and duration_s > 0:
-        data["duration_s"] = round(duration_s, 1)
+    if duration_s is not None:
+        # The caller was put through to Retell. The runtime reads it to tell a second session
+        # that failed IN FRONT of the caller from one that never reached them (runtime.py
+        # `_return_to_agent`).
+        data["bridged"] = True
+        if duration_s > 0:
+            data["duration_s"] = round(duration_s, 1)
     extra = {"engine": ENGINE_NAME, "retell_call_id": call_id}
     if snap.get("requests"):
         extra["requests"] = list(snap["requests"])

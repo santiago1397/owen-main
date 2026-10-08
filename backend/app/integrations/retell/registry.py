@@ -137,6 +137,24 @@ class DbRegistry:
             return None
         return str(row["exit_port"]), dict(row.get("exit_data") or {})
 
+    async def transfer_tried(self, linkedid: str, *, exclude_call_id: str = "") -> bool:
+        """Did another Retell session on this call (same linkedid) ask to transfer? True only
+        for the agent taking the caller back after an unanswered transfer (2026-10-08)."""
+        from sqlalchemy import select
+
+        from app.db import SessionLocal
+        from app.models import RetellCall
+
+        async with SessionLocal() as db:
+            found = (await db.execute(
+                select(RetellCall.id).where(
+                    RetellCall.linkedid == str(linkedid),
+                    RetellCall.retell_call_id != str(exclude_call_id),
+                    RetellCall.exit_port == "transfer",
+                ).limit(1)
+            )).scalar_one_or_none()
+            return found is not None
+
     async def request_exit(self, retell_call_id: str, port: str, data: dict) -> bool:
         """Ask the worker to end the agent's part. First request wins: a retried function
         call (Retell retries) or a second tool call cannot change where the caller goes."""

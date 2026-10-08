@@ -561,28 +561,51 @@ async def _enqueue_crm_report(spec, lid: str, caller_number, port: str,
         await db.commit()
 
 
+# What `_agent_transfer_outcome` answers when the transfer took the caller somewhere.
+TRANSFER_HANDLED = ("answered", "handled")
+
+
+def _ring_seconds(chosen: dict) -> float:
+    """The target's own `ring_seconds` (flows/transfer.py), else the platform default."""
+    ring = chosen.get("ring_seconds")
+    if isinstance(ring, int) and not isinstance(ring, bool) and ring > 0:
+        return float(ring)
+    return float(settings.OPERATOR_RING_TIMEOUT_SECONDS)
+
+
 async def _do_agent_transfer(ari, channel_id: str, lid: str, chosen: dict) -> bool:
-    """Move the caller to the destination the agent picked. Returns True if it was handled.
+    """Move the caller to the destination the agent picked. Returns True if it was handled."""
+    return await _agent_transfer_outcome(ari, channel_id, lid, chosen) in TRANSFER_HANDLED
+
+
+async def _agent_transfer_outcome(ari, channel_id: str, lid: str, chosen: dict) -> str:
+    """Move the caller to the destination the agent picked, and say how it went:
+    "answered" / "handled" (the caller is somewhere now), or why not: "noanswer", "busy",
+    "failed", "caller_gone" (the caller hung up while it rang), "unrunnable".
 
     `flow` and `agent` stay INTERNAL — same channel, no PSTN round trip. `services/billing.py`
     records from live BulkVS data that an inbound call forwarded back out over the same trunk
     bills as inbound minutes AND outbound minutes; dialling our own DID to reach its flow
     would double-bill every transfer, add PSTN latency and burn two trunk channels for one
     conversation.
+
+    A `number` / `operator` target rings for its own `ring_seconds` when it declares one
+    (2026-10-08): the office's Quo line forwards to ANOTHER AI number after 15 s, so ringing it
+    for the platform's 25 s handed the caller to the wrong agent.
     """
     kind, target = chosen["kind"], chosen["target"]
-    clog(logger, "agent.transfer", linkedid=lid, kind=kind, target=target)
+    ring_s = _ring_seconds(chosen)
+    clog(logger, "agent.transfer", linkedid=lid, kind=kind, target=target,
+         ring_s=ring_s if kind in ("number", "operator") else None)
     try:
         if kind in ("number", "operator"):
             if kind == "number":
                 result = await ari.dial_number(
-                    channel_id, target, caller_id=None,
-                    timeout_s=float(settings.OPERATOR_RING_TIMEOUT_SECONDS),
+                    channel_id, target, caller_id=None, timeout_s=ring_s,
                 )
             else:
                 result = await ari.dial_operator(
-                    channel_id, [target], caller_id=None,
-                    timeout_s=float(settings.OPERATOR_RING_TIMEOUT_SECONDS),
+                    channel_id, [target], caller_id=None, timeout_s=ring_s,
                 )
             if result == "answered":
                 # The dial returns once EITHER leg leaves, and the interpreter then stands
@@ -594,25 +617,101 @@ async def _do_agent_transfer(ari, channel_id: str, lid: str, chosen: dict) -> bo
                     await ari.hangup(channel_id)
                 except Exception:  # noqa: BLE001 - already gone is the common case
                     pass
-            return result == "answered"
+                return "answered"
+            last = getattr(ari, "_last_dial", None)
+            if isinstance(last, dict) and last.get("dial_ended_by") == "caller":
+                return "caller_gone"
+            return str(result or "failed")
         if kind == "flow":
             # Resolve the target DID to its assigned flow and run that graph on THIS channel.
             async with SessionLocal() as db:
                 _assigned, resolved = await _resolve_active_flow_version(db, target)
             if resolved is None:
                 logger.warning("flow runtime: transfer target flow %r not runnable", target)
-                return False
+                return "unrunnable"
             fv_id, graph = resolved
             logger.info("flow runtime: agent transferred %s into flow_version=%s", lid, fv_id)
             await _run_graph_on_channel(ari, channel_id, lid, graph)
-            return True
+            return "handled"
         if kind == "agent":
             logger.info("flow runtime: agent-to-agent transfer to %s (linkedid=%s)",
                         target, lid)
-            return False  # handled by the caller re-entering the node; not yet wired
+            return "unrunnable"  # handled by the caller re-entering the node; not yet wired
     except Exception:  # noqa: BLE001 - a failed transfer falls back to the graph edge
         logger.exception("flow runtime: agent transfer failed (linkedid=%s)", lid)
-    return False
+    return "failed"
+
+
+def _merge_extra(first: dict, second: dict) -> dict:
+    """Two sessions' `ai_call_extra` as one: the second's facts win, requests add up."""
+    a = first.get("ai_call_extra") if isinstance(first.get("ai_call_extra"), dict) else {}
+    b = second.get("ai_call_extra") if isinstance(second.get("ai_call_extra"), dict) else {}
+    out = {**a, **b}
+    earlier = list(a.get("requests") or [])
+    requests = earlier + [r for r in (b.get("requests") or []) if r not in earlier]
+    if requests:
+        out["requests"] = requests
+    return out
+
+
+async def _return_to_agent(*, session, spec, ctx: AgentCallContext, chosen: dict,
+                           outcome: str, first: dict, store) -> tuple[str, dict]:
+    """A Retell agent's transfer nobody answered: give the caller back to the SAME agent
+    (same pinned version) on the same channel, once (owner, 2026-10-08).
+
+    The second session is a fresh Retell registration whose variables are the first's plus
+    `transfer_failed` "yes" and an apologising greeting; its `transfer` function is refused
+    (integrations/retell/functions.py), so there is no loop. Whatever it ends with is the
+    node's port. If it cannot start (Retell refused, the spend cap, the leg never answered)
+    the answer is today's: the `transfer` port, which the CRM's template sends to voicemail.
+    `store(data)` persists what the second session produced (captures, its recording).
+
+    Returns `(port, data)`; `data["ai_call_extra"]["transfer"]` says what happened, for the
+    CRM's ai_call: `{target, outcome, returned_to_agent}`."""
+    import dataclasses
+
+    record = {"target": chosen.get("name"), "outcome": outcome, "returned_to_agent": False}
+
+    def as_today(reason: str) -> tuple[str, dict]:
+        logger.info("flow runtime: transfer to %r %s; not returning to the agent (%s), "
+                    "the transfer port decides (linkedid=%s)",
+                    chosen.get("name"), outcome, reason, ctx.linkedid)
+        data = dict(first)
+        data["ai_call_extra"] = {**_merge_extra(first, {}), "transfer": record}
+        return "transfer", data
+
+    if outcome == "caller_gone":
+        return as_today("the caller hung up while it rang")
+    logger.info("flow runtime: transfer to %r %s; the agent takes the caller back "
+                "(linkedid=%s)", chosen.get("name"), outcome, ctx.linkedid)
+    try:
+        second = await session.run(spec, dataclasses.replace(ctx, transfer_failed=True))
+    except Exception:  # noqa: BLE001 - a session that raises never started for the caller
+        logger.exception("flow runtime: the second agent session raised (linkedid=%s)",
+                         ctx.linkedid)
+        return as_today("the second session raised")
+    sdata = dict(second.data or {})
+    try:
+        await store(sdata)
+    except Exception:  # noqa: BLE001 - storing is best-effort; never the caller's problem
+        logger.exception("flow runtime: storing the second session failed (linkedid=%s)",
+                         ctx.linkedid)
+    if second.port == "failed" and not sdata.get("bridged"):
+        # It never reached the caller, so nobody on the line heard it fail.
+        return as_today("the second session did not start: "
+                        f"{sdata.get('failed_reason') or 'failed'}")
+
+    record["returned_to_agent"] = True
+    data = dict(sdata)
+    captured = {**(first.get("captured") or {}), **(sdata.get("captured") or {})}
+    if captured:
+        data["captured"] = captured
+    durations = [d.get("duration_s") for d in (first, sdata)
+                 if isinstance(d.get("duration_s"), (int, float))]
+    if durations:
+        data["duration_s"] = round(sum(durations), 1)
+    data["ai_call_extra"] = {**_merge_extra(first, sdata), "transfer": record}
+    return second.port, data
 
 
 async def _run_graph_on_channel(ari, channel_id: str, lid: str, graph: dict) -> None:
@@ -630,6 +729,44 @@ async def _noop_emit(event_type: str, provider_sequence: str, payload: dict) -> 
     would make the timeline read as one flow that impossibly ran two paths."""
     return None
 
+
+async def _store_agent_output(provider_id, lid: str, version_id, data: dict) -> None:
+    """Persist one agent session's output and register its recording. Never raises.
+
+    One call can hold TWO sessions (a Retell agent taking the caller back after a transfer
+    nobody answered, `_return_to_agent`); each is stored as it ends, its recording under its
+    own name."""
+    # Persist BEFORE returning the port: the interpreter may route straight into a
+    # terminal node, and a lead captured at minute two must survive a call that ends
+    # at minute four. Own short session, like every other write on this path.
+    try:
+        async with SessionLocal() as dbw:
+            await _persist_agent_output(dbw, provider_id, lid, version_id, data or {})
+            await dbw.commit()
+    except Exception:  # noqa: BLE001 - never dead-air a caller over a failed write
+        logger.exception("flow runtime: storing agent output failed (linkedid=%s)", lid)
+
+    # Register the agent's bridge recording (agent observability).
+    #
+    # BELT AND BRACES, not the primary path. I assumed OWEN's consumer could not see
+    # this recording, because owen-voice records a bridge belonging to its OWN Stasis
+    # app. That assumption was wrong: on the first real call the worker logged
+    # `ingest_recording_event sid=...-agent-1` four seconds after the hangup and the
+    # fetch/transcribe chain ran on its own. ARI delivered RecordingFinished to OWEN's
+    # app as well, presumably because the bridge held a channel that app owns.
+    #
+    # This stays because it costs nothing and closes the gap if that ever stops being
+    # true (a bridge with no OWEN-owned channel, an ARI version change). It is
+    # idempotent on the recording SID, so the two paths cannot double-register.
+    rec_name = str((data or {}).get("recording_name") or "")
+    if rec_name:
+        try:
+            await _register_agent_recording(provider_id, lid, rec_name)
+        except Exception:  # noqa: BLE001 - a lost recording is a lost diagnostic,
+            # never a lost call. It must not touch the port the caller is routed on.
+            logger.exception(
+                "flow runtime: registering agent recording failed (linkedid=%s)", lid
+            )
 
 @dataclass
 class AgentRun:
@@ -693,39 +830,13 @@ async def run_agent_on_call(
             dialed_number=str(dialed or "") or None,
         )
         result = await session.run(spec, ctx)
-        # Persist BEFORE returning the port: the interpreter may route straight into a
-        # terminal node, and a lead captured at minute two must survive a call that ends
-        # at minute four. Own short session, like every other write on this path.
-        try:
-            async with SessionLocal() as dbw:
-                await _persist_agent_output(
-                    dbw, provider_id, lid, version.id, result.data or {}
-                )
-                await dbw.commit()
-        except Exception:  # noqa: BLE001 - never dead-air a caller over a failed write
-            logger.exception("flow runtime: storing agent output failed (linkedid=%s)", lid)
 
-        # Register the agent's bridge recording (agent observability).
-        #
-        # BELT AND BRACES, not the primary path. I assumed OWEN's consumer could not see
-        # this recording, because owen-voice records a bridge belonging to its OWN Stasis
-        # app. That assumption was wrong: on the first real call the worker logged
-        # `ingest_recording_event sid=...-agent-1` four seconds after the hangup and the
-        # fetch/transcribe chain ran on its own. ARI delivered RecordingFinished to OWEN's
-        # app as well, presumably because the bridge held a channel that app owns.
-        #
-        # This stays because it costs nothing and closes the gap if that ever stops being
-        # true (a bridge with no OWEN-owned channel, an ARI version change). It is
-        # idempotent on the recording SID, so the two paths cannot double-register.
-        rec_name = str((result.data or {}).get("recording_name") or "")
-        if rec_name:
-            try:
-                await _register_agent_recording(provider_id, lid, rec_name)
-            except Exception:  # noqa: BLE001 - a lost recording is a lost diagnostic,
-                # never a lost call. It must not touch the port the caller is routed on.
-                logger.exception(
-                    "flow runtime: registering agent recording failed (linkedid=%s)", lid
-                )
+        async def store(data: dict) -> None:
+            await _store_agent_output(provider_id, lid, version.id, data)
+
+        # Persist BEFORE returning the port (`_store_agent_output` says why), and register
+        # the session's own recording.
+        await store(result.data or {})
 
         # D9: the agent may have named a destination from its OWN declared allowlist. If
         # it did, move the caller there and tell the interpreter to stand down. If it
@@ -743,9 +854,16 @@ async def run_agent_on_call(
                 str((result.data or {}).get("destination") or ""),
             )
             if chosen is not None:
-                moved = await _do_agent_transfer(ari, channel_id, lid, chosen)
-                if moved:
+                outcome = await _agent_transfer_outcome(ari, channel_id, lid, chosen)
+                if outcome in TRANSFER_HANDLED:
                     port, data = "transferred", {**(result.data or {}), "transfer": chosen}
+                elif getattr(session, "name", "") == "retell" and not ctx.transfer_failed:
+                    # Nobody picked up: the SAME agent takes the caller back, once, and its
+                    # second session's ending is the port (owner, 2026-10-08). owen_voice
+                    # keeps today's behaviour: the flow's `transfer` edge.
+                    port, data = await _return_to_agent(
+                        session=session, spec=spec, ctx=ctx, chosen=chosen,
+                        outcome=outcome, first=dict(result.data or {}), store=store)
             elif (result.data or {}).get("destination"):
                 # Named something not on its allowlist. Loud, because it is either a
                 # misconfigured agent or a caller talking it into somewhere it may not go.

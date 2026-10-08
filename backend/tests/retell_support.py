@@ -74,6 +74,10 @@ class MemoryRegistry:
             return None
         return row["exit_port"], dict(row.get("exit_data") or {})
 
+    async def transfer_tried(self, linkedid, *, exclude_call_id=""):
+        return any(r.get("linkedid") == linkedid and cid != exclude_call_id
+                   and r.get("exit_port") == "transfer" for cid, r in self.rows.items())
+
     async def request_exit(self, call_id, port, data):
         row = self.rows.get(call_id)
         if not row or row.get("status") != "live" or row.get("exit_port"):

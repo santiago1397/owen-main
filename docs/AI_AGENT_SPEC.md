@@ -553,6 +553,10 @@ function → `transfer` with the destination NAME (resolved against the pinned v
 `transfer_targets` by the same `_do_agent_transfer` an owen_voice transfer uses); an
 `end_call` function → `end_call`; a take-over → `taken_over`. Anything failing → `failed`.
 
+A transfer target may set `ring_seconds` (5..60; default `OPERATOR_RING_TIMEOUT_SECONDS`). An
+unanswered transfer on a Retell agent returns the caller to the same agent once
+(`flows/runtime.py` `_return_to_agent`) — see RETELL-PLAN C1, 2026-10-08.
+
 Invariant 8 ("agents do not dial") still holds in the sense it was written for: the only
 thing this engine originates is a SIP leg to Retell's SIP host through the dedicated `retell`
 endpoint, never a number on the BulkVS trunk.

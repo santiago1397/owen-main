@@ -14,6 +14,7 @@ from __future__ import annotations
 from app.agents.session import AgentSpec, _ENGINES, select_voice_agent_engine
 from app.agents.tools import RETELL_TOOLS, TOOLS, engines_for, unsupported_tools
 from app.flows.service import next_version_number
+from app.flows.transfer import RING_KINDS, ring_seconds_problem
 
 __all__ = ["next_version_number", "build_spec", "validate_agent_config",
            "KNOWLEDGE_MAX_CHARS", "RETELL_AGENT_ID_MAX", "voice_warning"]
@@ -159,6 +160,15 @@ def validate_agent_config(config: dict | None) -> tuple[list[str], list[str]]:
                     )
                 if not str(entry.get("target") or "").strip():
                     errors.append(f"transfer target '{name}' has no target")
+                if "ring_seconds" in entry:
+                    problem = ring_seconds_problem(str(name), entry.get("ring_seconds"))
+                    if problem:
+                        errors.append(problem)
+                    elif kind not in RING_KINDS:
+                        warnings.append(
+                            f"transfer target '{name}' is a {kind} target, which does not "
+                            "ring — its ring_seconds is ignored"
+                        )
         if isinstance(targets, dict) and targets and not (cfg.get("tools") or {}).get("transfer"):
             warnings.append(
                 "transfer_targets are declared but the `transfer` tool is toggled off — "
