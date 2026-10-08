@@ -107,6 +107,11 @@ async def handle_recording_fetch(db: AsyncSession, payload: dict) -> None:
             logger.info("recording_fetch: registered asterisk %s", rec.provider_recording_sid)
         if not rec.transcribed and not payload.get("skip_transcribe"):
             await queue.enqueue(db, "transcribe", {"recording_id": str(rec.id)})
+        # Every AGENT call is recorded by Asterisk, so returning before the CRM report below
+        # meant no agent call ever got its player in the CRM (found 2026-10-08 on the first
+        # Retell test calls). Only once the audio is really on disk here.
+        if rec.storage_path and os.path.exists(rec.storage_path):
+            await _tell_crm_the_recording_is_ready(db, rec)
         return
 
     if not (rec.storage_path and os.path.exists(rec.storage_path)):
