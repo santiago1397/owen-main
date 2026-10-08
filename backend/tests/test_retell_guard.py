@@ -148,10 +148,11 @@ def test_the_brief():
     v = render_variables(answer, caller_number=CALLER, dialed_number=DID, now=now)
     b = v["customer_brief"]
     check("the rule comes FIRST", b.startswith(DISCLOSURE_RULE))
-    check("the rule forbids money and reading the address",
-          "money" in DISCLOSURE_RULE and "Never read the address aloud" in DISCLOSURE_RULE)
-    check("history only after the street address is confirmed",
-          "ONLY after the caller has confirmed their street address" in DISCLOSURE_RULE)
+    check("the rule forbids money and reading the full address",
+          "money" in DISCLOSURE_RULE and "Never read the full address aloud" in DISCLOSURE_RULE)
+    check("a phone-matched caller is answered without an address check (owner, 2026-10-08)",
+          "do not ask them to confirm an address" in DISCLOSURE_RULE
+          and "never mention other customers" in DISCLOSURE_RULE)
     check("the address is there, marked for comparison only",
           "FOR COMPARISON ONLY, never read it aloud: 12 Palm Ave, Bradenton" in b)
     check("the Zuper job, technician and schedule",

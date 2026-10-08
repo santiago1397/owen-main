@@ -34,13 +34,16 @@ from datetime import datetime
 
 from app.integrations.crm.caller_brief import HOUSEHOLD, _clean, spoken_when
 
+# 2026-10-08, owner: a caller matched by phone number to exactly ONE customer is answered
+# about their job straight away - no address check (amends the 2026-10-06 decision 4). The
+# match itself stays strict (CRM: last ten digits, exactly one customer, else unknown).
 DISCLOSURE_RULE = (
-    "HOW TO USE THE FACTS BELOW. They are for understanding the caller, not for reading out. "
-    "You may use the caller's first name, and say they have a job with us, straight away. "
-    "Share dates, job status, the technician's name or anything from their history ONLY "
-    "after the caller has confirmed their street address. Never read the address aloud: ask "
-    "the caller to say it, and compare. Never discuss prices, invoices, payments or money of "
-    "any kind."
+    "HOW TO USE THE FACTS BELOW. This caller was matched to this customer by their phone "
+    "number: greet them by first name and answer about their job straight away - do not ask "
+    "them to confirm an address. Say status and dates in plain words, never internal codes. "
+    "Never read the full address aloud unless the caller asks which property it is. Never "
+    "discuss prices, invoices, payments or money of any kind, and never mention other "
+    "customers."
 )
 
 UNKNOWN_LINE = ("We have no record of this caller. Treat them as a new customer and do not "
