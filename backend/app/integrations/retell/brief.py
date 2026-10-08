@@ -149,9 +149,13 @@ def _known_lines(answer: dict, now: datetime | None) -> tuple[str, list[str]]:
     return first, lines
 
 
+GREETING_UNKNOWN = "Thank you for calling Dream Team Roofing! How can I help you today?"
+GREETING_KNOWN = "Hi {first}, thanks for calling Dream Team Roofing! How can I help you today?"
+
+
 def render_variables(answer, *, caller_number: str, dialed_number: str,
                      now: datetime | None = None) -> dict[str, str]:
-    """The five dynamic variables for one call. Anything but an explicit `known: true` with
+    """The six dynamic variables for one call. Anything but an explicit `known: true` with
     a named contact is UNKNOWN: nothing about anybody, the rule still first."""
     answer = filter_answer(answer)
     known = answer.get("known") is True
@@ -168,6 +172,11 @@ def render_variables(answer, *, caller_number: str, dialed_number: str,
     return {
         "customer_known": "yes" if known else "no",
         "customer_first_name": first if known else "",
+        # The agent's first words (Retell's begin message is "{{greeting}}"): the caller's
+        # first name only when the brief named exactly one customer — decision 4 allows the
+        # first name at once; everything else waits for the address check (2026-10-08).
+        "greeting": (GREETING_KNOWN.format(first=first) if known and first
+                     else GREETING_UNKNOWN),
         "customer_brief": brief,
         "caller_number": str(caller_number or ""),
         "dialed_number": str(dialed_number or ""),

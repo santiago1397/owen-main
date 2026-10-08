@@ -127,9 +127,9 @@ def test_success_registers_dials_bridges_records_and_ends():
                                "owen_version": 4})
     check("no agent_version: Retell picks it (decision 14)", "agent_version" not in body)
     v = body["retell_llm_dynamic_variables"]
-    check("the five C2 variables, all strings",
+    check("the C2 variables plus the greeting, all strings",
           set(v) == {"customer_known", "customer_first_name", "customer_brief",
-                     "caller_number", "dialed_number"} and all(isinstance(x, str)
+                     "caller_number", "dialed_number", "greeting"} and all(isinstance(x, str)
                                                                for x in v.values()))
     check("known caller, first name given", v["customer_known"] == "yes"
           and v["customer_first_name"] == "Maria")
