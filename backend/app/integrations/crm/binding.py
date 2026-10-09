@@ -162,3 +162,27 @@ async def resolve_for_number_id(db, number_id) -> Optional[CrmBinding]:
     if number is None:
         return None
     return await resolve(db, number.phone_number)
+
+
+async def resolve_send_only(db, from_number: str) -> Optional[CrmBinding]:
+    """The binding a SEND-ONLY number's texts ride (2026-10-09): the one enabled CRM binding,
+    when `from_number` is on `CRM_LINK_SEND_ONLY_NUMBERS`. None when it is not listed, or when
+    there is not exactly one enabled binding — never a guess between two CRMs."""
+    cfg = crm_config.current()
+    if not crm_config.link_enabled() or crm_config.match_key(from_number) not in             cfg.send_only_numbers:
+        return None
+    try:
+        rows = (await db.execute(
+            select(CrmLink.number_id).where(CrmLink.enabled.is_(True)).limit(2))).all()
+    except Exception:  # noqa: BLE001
+        logger.exception("crm-link: send-only binding lookup failed for %s", from_number)
+        return None
+    if len(rows) != 1:
+        return None
+    return await resolve_for_number_id(db, rows[0][0])
+
+
+async def resolve_sender(db, did: str) -> Optional[CrmBinding]:
+    """The binding a text SENT from `did` belongs to: its own, else the send-only one. For the
+    outbound SMS route and its delivery receipts only — never for calls or inbound texts."""
+    return await resolve(db, did) or await resolve_send_only(db, did)

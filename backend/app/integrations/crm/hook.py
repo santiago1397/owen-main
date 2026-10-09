@@ -222,7 +222,8 @@ async def handle_delivery_receipt(*, message_id: str, status: str, detail: str =
                 return False
             did = msg.from_number or marker.get("did") or ""
             sid = msg.provider_message_sid or ""
-            bound = await crm_binding.resolve(db, did)
+            # A send-only number's texts are the CRM's too (2026-10-09).
+            bound = await crm_binding.resolve_sender(db, did)
         if bound is None:
             logger.info("crm-link: not relaying the receipt for message %s — %s is no "
                         "longer bound to the CRM", message_id, did or "<no DID>")

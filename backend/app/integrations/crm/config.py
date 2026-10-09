@@ -152,6 +152,8 @@ class CrmLinkSettings:
     # or an emergency number can never be dialled from the CRM by this path.
     allow_any_destination: bool = False
     sms_enabled: bool = False
+    # Match keys of numbers that may SEND the CRM's texts without a binding (see Settings).
+    send_only_numbers: frozenset[str] = field(default_factory=frozenset)
     # The provisioned CRM browser-softphone operators, as SLUGS (see softphone.py). EMPTY
     # GRANTS NOTHING, like `allowlist` above: a forgotten roster must mean "nobody got a
     # softphone", never "anybody did".
@@ -246,6 +248,7 @@ def settings_view(settings) -> CrmLinkSettings:
         allowlist=parse_allowlist(getattr(settings, "CRM_LINK_ALLOWLIST", "")),
         allow_any_destination=bool(getattr(settings, "CRM_LINK_ALLOW_ANY_DESTINATION", False)),
         sms_enabled=bool(getattr(settings, "CRM_LINK_SMS_ENABLED", False)),
+        send_only_numbers=parse_allowlist(getattr(settings, "CRM_LINK_SEND_ONLY_NUMBERS", "")),
         softphone_operators=crm_softphone.parse_roster(
             getattr(settings, "CRM_LINK_SOFTPHONE_OPERATORS", "")
         ),

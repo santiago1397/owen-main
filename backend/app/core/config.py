@@ -300,6 +300,13 @@ class Settings(BaseSettings):
     # ON TOP OF the platform's per-number `numbers.sms_enabled` + `sms_campaign_id` check and
     # the per-contact opt-out — it never replaces either.
     CRM_LINK_SMS_ENABLED: bool = False
+    # Numbers that may SEND the CRM's texts without being bound to it (2026-10-09: the CRM's
+    # automatic appointment / AHS texts go out from +17869200331, whose calls the Retell agent
+    # answers). Comma-separated, compared on the last ten digits. Sending only: a listed number
+    # gets NO crm_links row, so who answers its calls and where its inbound texts go do not
+    # change. Its texts ride the one enabled CRM binding (for the delivery-receipt marker).
+    # EMPTY = none; every other gate (SMS switch, 10DLC, allowlist, opt-out, block) still applies.
+    CRM_LINK_SEND_ONLY_NUMBERS: str = ""
     # Most PSTN numbers a hybrid ring group may ring alongside the softphones.
     CRM_LINK_MAX_PSTN_LEGS: int = 2
     # Default ring time for a bound DID before the call rolls to voicemail. A binding row may
