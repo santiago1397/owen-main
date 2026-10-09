@@ -90,8 +90,12 @@ def _require_enabled() -> crm_config.CrmLinkSettings:
     return cfg
 
 
-async def _bound_from_number(db: AsyncSession, from_number: str):
+async def _bound_from_number(db: AsyncSession, from_number: str, *, send_only: bool = False):
     """`(Number, CrmBinding)` for a from-number that is CRM-bound and usable for outbound.
+
+    `send_only` (the SMS route only, 2026-10-09): a number on `CRM_LINK_SEND_ONLY_NUMBERS` that
+    is not bound is accepted with the one enabled CRM binding. Calls never pass it, so a
+    send-only number can never be dialled from by the CRM.
 
     Raises the specific refusal rather than a generic 403, because the CRM is a machine
     caller: it cannot ask a follow-up question, so the reason has to be in the response.
@@ -118,7 +122,8 @@ async def _bound_from_number(db: AsyncSession, from_number: str):
             f"{from_number} is not a usable outbound DID "
             f"(active={number.active}, carrier status={number.provider_status!r})",
         )
-    bound = await crm_binding.resolve(db, from_number)
+    bound = await (crm_binding.resolve_sender(db, from_number) if send_only
+                   else crm_binding.resolve(db, from_number))
     if bound is None:
         raise HTTPException(status.HTTP_403_FORBIDDEN, crm_config.REFUSE_NOT_BOUND)
     return number, bound
@@ -339,7 +344,9 @@ async def deliver_receipt(
     facts = DeliveryReceiptFacts.from_payload(body.model_dump())
 
     base_url, token = cfg.base_url, cfg.token
-    bound = await crm_binding.resolve(db, facts.dialed_number) if facts.dialed_number else None
+    # A receipt is for a text the CRM SENT: a send-only number counts too (2026-10-09).
+    bound = (await crm_binding.resolve_sender(db, facts.dialed_number)
+             if facts.dialed_number else None)
     if bound is None:
         logger.warning("crm-link: not relaying the receipt for message %s — %s is not bound",
                        facts.owen_message_id, facts.dialed_number or "<no DID>")
@@ -754,7 +761,7 @@ async def send_message(
         logger.warning("crm-link: REFUSED SMS to %s — %s", body.to_number, refusal)
         raise HTTPException(status.HTTP_403_FORBIDDEN, refusal)
 
-    number, bound = await _bound_from_number(db, body.from_number)
+    number, bound = await _bound_from_number(db, body.from_number, send_only=True)
 
     # The platform's OWN 10DLC gate. Independent of ours and never bypassed.
     gate = sms.outbound_block_reason(number.sms_enabled, number.sms_campaign_id)
