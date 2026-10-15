@@ -279,7 +279,10 @@ def test_unanswered_transfer_returns_to_the_same_agent():
         v1 = first["retell_llm_dynamic_variables"]
         v2 = second["retell_llm_dynamic_variables"]
         check(f"[{outcome}] session 1: transfer_failed = no, the normal greeting",
-              v1["transfer_failed"] == "no" and v1["greeting"].startswith("Hi Maria"))
+              v1["transfer_failed"] == "no" and "Hi Maria!" in v1["greeting"])
+        from app.integrations.retell.brief import NOTICE
+        check(f"[{outcome}] the notice is spoken in session 1 only, never repeated after a transfer",
+              v1["greeting"].startswith(NOTICE) and NOTICE not in v2["greeting"])
         check(f"[{outcome}] session 2: transfer_failed = yes",
               v2["transfer_failed"] == "yes")
         check(f"[{outcome}] session 2: the sorry greeting, word for word",

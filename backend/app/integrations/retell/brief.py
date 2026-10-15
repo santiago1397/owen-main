@@ -155,8 +155,12 @@ def _known_lines(answer: dict, now: datetime | None) -> tuple[str, list[str]]:
     return first, lines
 
 
-GREETING_UNKNOWN = "Thank you for calling Dream Team Roofing! How can I help you today?"
-GREETING_KNOWN = "Hi {first}, thanks for calling Dream Team Roofing! How can I help you today?"
+# The agent says the recording / AI notice itself, first and fast, in its own voice (owner,
+# 2026-10-15) - the flow plays no separate notice before it. Only the FIRST session speaks it:
+# the greeting after a failed transfer (after_failed_transfer) does not repeat it.
+NOTICE = "Just so you know, this call's recorded and I'm an AI assistant."
+GREETING_UNKNOWN = NOTICE + " Hi! I'm Anisa with Dream Team Roofing, how can I help you?"
+GREETING_KNOWN = NOTICE + " Hi {first}! I'm Anisa with Dream Team Roofing, how can I help you?"
 # The agent's first words when it takes the caller back after a transfer nobody answered
 # (2026-10-08, owner): the caller has just heard ringing, so it apologises and offers to take
 # the message rather than greeting them as if the call had just started.
