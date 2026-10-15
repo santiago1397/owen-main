@@ -159,8 +159,10 @@ def _known_lines(answer: dict, now: datetime | None) -> tuple[str, list[str]]:
 # 2026-10-15) - the flow plays no separate notice before it. Only the FIRST session speaks it:
 # the greeting after a failed transfer (after_failed_transfer) does not repeat it.
 NOTICE = "Just so you know, this call's recorded and I'm an AI assistant."
-GREETING_UNKNOWN = NOTICE + " Hello? Hi, I'm Anisa with Dream Team Roofing, how can I help you?"
-GREETING_KNOWN = NOTICE + " Hello? Hi {first}, I'm Anisa with Dream Team Roofing, how can I help you?"
+# Only "Hello?" - the agent then WAITS for the caller and introduces itself in its first reply
+# (the Retell prompt says how; it uses {{customer_first_name}} for a known caller).
+GREETING_UNKNOWN = NOTICE + " Hello?"
+GREETING_KNOWN = GREETING_UNKNOWN   # the name comes in the introduction, after the caller answers
 # The agent's first words when it takes the caller back after a transfer nobody answered
 # (2026-10-08, owner): the caller has just heard ringing, so it apologises and offers to take
 # the message rather than greeting them as if the call had just started.
@@ -191,8 +193,7 @@ def render_variables(answer, *, caller_number: str, dialed_number: str,
         # The agent's first words (Retell's begin message is "{{greeting}}"): the caller's
         # first name only when the brief named exactly one customer — decision 4 allows the
         # first name at once; everything else waits for the address check (2026-10-08).
-        "greeting": (GREETING_KNOWN.format(first=first) if known and first
-                     else GREETING_UNKNOWN),
+        "greeting": GREETING_KNOWN if known and first else GREETING_UNKNOWN,
         "customer_brief": brief,
         "caller_number": str(caller_number or ""),
         "dialed_number": str(dialed_number or ""),
