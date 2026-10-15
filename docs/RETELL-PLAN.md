@@ -136,6 +136,31 @@ texts. Response `{"created": bool, "where": "task"|"dispatch"|null}`.
 `/api/crm-link/live-calls` lists Retell calls in the same shape (+ `"engine": "retell"`).
 Take over hangs up the Retell SIP leg and bridges the operator. The CRM adds a desktop notification.
 
+### C8. Outbound agent calls a person started (2026-10-15, BUILT AND OFF)
+owen-main `POST /api/crm-link/agent-calls` (CRM key) `{"to_number", "agent_name", "reason"
+(<= 300), "from_number"?, "customer_first_name"?}` -> 202 `{"call_id", "linkedid", "status":
+"dialing"}`; `GET /api/crm-link/agent-calls/status` -> `{"enabled", "from_number", "daily_max",
+"used_today", "hours": "08:00-20:00 America/New_York"}`. CLI for the first test:
+`python -m app.agents.outbound_call --to +1... --agent "NAME" --reason "..." [--from +1...] --yes`.
+Off unless `AGENT_OUTBOUND_ENABLED=true` (503 with a sentence; nothing dialled or queued).
+Guards: Retell configured; a Retell agent with an active version; a full US number that is not
+ours and not blocked; from = given / the agent's one CRM-assigned number / `AGENT_OUTBOUND_FROM`,
+an active BulkVS DID we own; 08:00-20:00 New York; 10 a day (`AGENT_OUTBOUND_DAILY_MAX`); not the
+same number within 10 minutes; the spend cap. OWEN rings the person over BulkVS (our DID as
+caller ID); on answer it registers the Retell call with `direction: "outbound"` and runs the
+inbound path unchanged (bridge, recording, functions, transfer, Listen / Take over). Variables:
+the usual brief for the person's number + `call_direction: "outbound"`, `call_reason`, and the
+greeting "Hi, this is Anisa with Dream Team Roofing. Just so you know, this call's recorded and
+I'm an AI assistant. Is this {first}? I'm calling about {reason}." The CRM gets the ordinary
+`ended` event, direction OUTBOUND, with `ai_call.direction = "outbound"` and `ai_call.reason`;
+no answer / busy / failed is an outbound call with that status and no Retell registration.
+Never retried, never automatic.
+
+**TCPA:** the agent's voice is an "artificial voice" (FCC, Feb 2024). Calling a mobile with it
+needs the called party's prior express consent (written, if telemarketing); only calls a person
+starts, to someone expecting them; calling hours enforced; the AI and recording notice in the
+first sentence. Details and operator steps: AI_AGENT_SPEC D16.
+
 ## Phases
 0. Account + key (owner); Asterisk PJSIP endpoint to `sip.retellai.com` (TCP, ulaw) and Retell's
    IPs allowed — written as operator steps, not applied; DECISIONS amendments; Retell test guards.

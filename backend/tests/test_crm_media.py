@@ -605,8 +605,11 @@ def test_the_crm_link_router_gained_exactly_two_routes():
         ("/api/crm-link/numbers/{number_id}/assignment", ("DELETE",)),
         ("/api/crm-link/agent-spend", ("GET",)),
         ("/api/crm-link/agent-spend", ("PUT",)),
+        # An AI agent calls one number a person asked it to (2026-10-15), off by default.
+        ("/api/crm-link/agent-calls", ("POST",)),
+        ("/api/crm-link/agent-calls/status", ("GET",)),
     ])
-    check("exactly the twenty-one we expect, no more and no fewer", paths == expected)
+    check("exactly the twenty-three we expect, no more and no fewer", paths == expected)
 
 
 def test_the_crm_event_now_carries_how_many_pictures_and_still_no_urls():

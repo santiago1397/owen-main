@@ -25,6 +25,7 @@ from app.db import SessionLocal
 from app.flows import dtmf
 from app.providers.asterisk import (
     AsteriskEventRouter,
+    is_agent_outbound_leg,
     is_entry_channel,
     is_flow_dial_leg,
     is_outbound_leg,
@@ -125,6 +126,9 @@ async def _handle(router: AsteriskEventRouter, raw: str | bytes) -> None:
         and is_entry_channel(event)
         and not is_flow_dial_leg(event)
         and not is_outbound_leg(event)
+        # An AI agent's outbound call (2026-10-15): the worker that originated it runs the
+        # agent on it; a flow run here would talk over the agent.
+        and not is_agent_outbound_leg(event)
     ):
         asyncio.create_task(_run_flow(event))
 

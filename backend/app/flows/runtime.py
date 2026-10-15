@@ -452,7 +452,7 @@ def _dial_target_of(event_type: str, payload: dict) -> Optional[str]:
 
 async def _report_agent_call_to_crm(*, lid: str, dialed: str, caller_number: str | None,
                                     agent_name: str, version, port: str,
-                                    data: dict) -> None:
+                                    data: dict, direction: str = "inbound") -> None:
     """Tell the CRM that an AI agent answered this call, and what it heard.
 
     Phase 1 of the CRM's voice-agent amendment (ghl-clone DECISIONS.md, 2026-09-22).
@@ -486,7 +486,9 @@ async def _report_agent_call_to_crm(*, lid: str, dialed: str, caller_number: str
         linkedid=lid,
         caller_number=caller_number or "",
         dialed_number=dialed or "",
-        direction="inbound",
+        # "outbound" for a call the agent placed (2026-10-15): `caller_number` is still the
+        # customer — the number the CRM files the thread under, either direction.
+        direction="outbound" if direction == "outbound" else "inbound",
         # The agent picked up, so the call was ANSWERED whatever port it exited on. The
         # port is the agent's outcome and rides in `extra`; `outcome` here is the CALL's,
         # and reporting "failed" would file a completed conversation as a missed call.
@@ -578,7 +580,8 @@ async def _do_agent_transfer(ari, channel_id: str, lid: str, chosen: dict) -> bo
     return await _agent_transfer_outcome(ari, channel_id, lid, chosen) in TRANSFER_HANDLED
 
 
-async def _agent_transfer_outcome(ari, channel_id: str, lid: str, chosen: dict) -> str:
+async def _agent_transfer_outcome(ari, channel_id: str, lid: str, chosen: dict,
+                                  caller_id: str | None = None) -> str:
     """Move the caller to the destination the agent picked, and say how it went:
     "answered" / "handled" (the caller is somewhere now), or why not: "noanswer", "busy",
     "failed", "caller_gone" (the caller hung up while it rang), "unrunnable".
@@ -601,7 +604,7 @@ async def _agent_transfer_outcome(ari, channel_id: str, lid: str, chosen: dict) 
         if kind in ("number", "operator"):
             if kind == "number":
                 result = await ari.dial_number(
-                    channel_id, target, caller_id=None, timeout_s=ring_s,
+                    channel_id, target, caller_id=caller_id, timeout_s=ring_s,
                 )
             else:
                 result = await ari.dial_operator(
@@ -781,6 +784,7 @@ class AgentRun:
 async def run_agent_on_call(
     *, ari, channel_id: str, lid: str, dialed: str, caller_number: str, provider_id: int,
     agent_id: str, campaign: Optional[CampaignFacts] = None, report_to_crm: bool = True,
+    outbound: Optional[dict] = None,
 ) -> AgentRun:
     """Run `agent_id`'s ACTIVE version on a channel that is already answered and in Stasis.
 
@@ -794,6 +798,12 @@ async def run_agent_on_call(
     (agents/campaign.py). `report_to_crm=False` skips the CRM thread report here, for a
     caller that files the call itself (the CRM line reports its own `ended` event, and two
     would be two call rows on the customer's thread).
+
+    `outbound` = `{"reason", "first_name"}` for a call the AGENT placed because a person asked
+    it to (2026-10-15, agents/outbound_call.py): `channel_id` is then the answered leg of the
+    person called, `caller_number` THEIR number and `dialed` OUR DID the call came from. The
+    session is told the direction and reason, a transfer dials out with our DID as caller
+    ID, and the CRM is told an OUTBOUND call. None (every inbound call) changes nothing.
 
     Never raises: any failure is `AgentRun(port="failed")`, and the caller routes to its
     fallback (the flow's, or voicemail on the CRM line).
@@ -829,7 +839,19 @@ async def run_agent_on_call(
             # variables both need it, and nothing carried it before (RETELL-PLAN phase 1).
             dialed_number=str(dialed or "") or None,
         )
+        if outbound is not None:
+            ctx.direction = "outbound"
+            ctx.call_reason = str(outbound.get("reason") or "")
+            ctx.customer_first_name = str(outbound.get("first_name") or "")
         result = await session.run(spec, ctx)
+        if outbound is not None:
+            # The CRM's ai_call says this was the agent calling out, and why.
+            rdata = dict(result.data or {})
+            extra = rdata.get("ai_call_extra") if isinstance(rdata.get("ai_call_extra"),
+                                                             dict) else {}
+            rdata["ai_call_extra"] = {**extra, "direction": "outbound",
+                                      "reason": ctx.call_reason}
+            result.data = rdata
 
         async def store(data: dict) -> None:
             await _store_agent_output(provider_id, lid, version.id, data)
@@ -854,7 +876,11 @@ async def run_agent_on_call(
                 str((result.data or {}).get("destination") or ""),
             )
             if chosen is not None:
-                outcome = await _agent_transfer_outcome(ari, channel_id, lid, chosen)
+                # An outbound call's leg carries OUR DID as its caller ID already, but say it:
+                # BulkVS refuses a transfer leg whose caller ID is not one of ours (SIP 486).
+                outcome = await _agent_transfer_outcome(
+                    ari, channel_id, lid, chosen,
+                    caller_id=str(dialed) if outbound is not None and dialed else None)
                 if outcome in TRANSFER_HANDLED:
                     port, data = "transferred", {**(result.data or {}), "transfer": chosen}
                 elif getattr(session, "name", "") == "retell" and not ctx.transfer_failed:
@@ -890,7 +916,8 @@ async def run_agent_on_call(
             if report_to_crm:
                 await _report_agent_call_to_crm(
                     lid=lid, dialed=str(dialed), caller_number=ctx.caller_number,
-                    agent_name=agent_name, version=version.version, port=port, data=data)
+                    agent_name=agent_name, version=version.version, port=port, data=data,
+                    direction="outbound" if outbound is not None else "inbound")
         except Exception:  # noqa: BLE001 - the CRM never affects the call
             logger.exception(
                 "flow runtime: reporting the agent call to the CRM failed "

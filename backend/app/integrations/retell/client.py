@@ -2,7 +2,9 @@
 
 Retell's "dial to SIP URI" method (decision 2): register the call, get a `call_id`, then dial
 `sip:<call_id>@sip.retellai.com`. Nothing else is ever requested from Retell — no agent edits,
-no phone-number purchases, no outbound calls. The CRM shows Retell's settings read-only and
+no phone-number purchases, and never Retell's own outbound-call API: an agent call a person
+started (2026-10-15) is dialled by OWEN over BulkVS and registered here with direction
+"outbound". The CRM shows Retell's settings read-only and
 Retell's dashboard owns them (decision 1).
 
 ## The version that answers (decision 14)
@@ -40,13 +42,19 @@ class RetellError(Exception):
 
 
 def register_body(*, agent_id: str, from_number: str, to_number: str, metadata: dict,
-                  variables: dict, agent_version: int | None = None) -> dict:
-    """The request body. PURE, so its shape is pinned by a test without a network."""
+                  variables: dict, agent_version: int | None = None,
+                  direction: str = "inbound") -> dict:
+    """The request body. PURE, so its shape is pinned by a test without a network.
+
+    `direction` is "outbound" only for a call the agent placed because a person asked it to
+    (agents/outbound_call.py): then `from_number` is OUR DID and `to_number` the person
+    called. Still register-phone-call - OWEN dials the person and Retell over SIP itself;
+    Retell's own outbound-call API is never used."""
     body = {
         "agent_id": str(agent_id),
         "from_number": str(from_number or ""),
         "to_number": str(to_number or ""),
-        "direction": "inbound",
+        "direction": "outbound" if direction == "outbound" else "inbound",
         "metadata": dict(metadata or {}),
         "retell_llm_dynamic_variables": {str(k): str(v) for k, v in (variables or {}).items()},
     }

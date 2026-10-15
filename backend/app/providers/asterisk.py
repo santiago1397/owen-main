@@ -181,6 +181,24 @@ def is_outbound_leg(event: dict) -> bool:
     return _direction(event) == "outbound"
 
 
+# An AI agent's OUTBOUND call a person started (2026-10-15, app/agents/outbound_call.py). Its
+# PSTN leg is the call's ENTRY leg (its own id is the Linkedid, so it is ingested as the
+# call), and it must never start a flow run: the worker that originated it runs the agent on
+# it. X_OWEN_DIRECTION=outbound already keeps it out of the flow runtime; these markers keep
+# that true even under an ari.conf that drops channelvars. The prefix has NO dash, because a
+# recording's Linkedid is read as everything before the first '-' (`recording_linkedid`).
+AGENT_OUTBOUND_APP_ARG = "agent-outbound"
+AGENT_OUTBOUND_CHANNEL_PREFIX = "agentout"
+
+
+def is_agent_outbound_leg(event: dict) -> bool:
+    """True iff this event belongs to an AI agent's outbound PSTN leg."""
+    args = event.get("args")
+    if isinstance(args, list) and AGENT_OUTBOUND_APP_ARG in args:
+        return True
+    return str(_channel(event).get("id") or "").startswith(AGENT_OUTBOUND_CHANNEL_PREFIX)
+
+
 def is_flow_dial_leg(event: dict) -> bool:
     """True iff this event belongs to an outbound leg the flow interpreter originated.
 
@@ -255,7 +273,10 @@ class AsteriskAdapter(ProviderAdapter):
             # (run_outbound_call originates it with callerId=<callee> so the softphone shows who
             # it's calling), so the callee = caller_number. The owned DID is X_OWEN_FROM.
             from_number = _channelvar(params, "X_OWEN_FROM") or caller_number
-            to_number = caller_number
+            # An AI agent's outbound leg (2026-10-15) is the PSTN leg itself, so its caller ID
+            # is OUR DID; the number it dialled rides X_OWEN_TO. Absent (every operator call),
+            # exactly the rule above.
+            to_number = _channelvar(params, "X_OWEN_TO") or caller_number
         else:
             from_number = caller_number
             to_number = exten

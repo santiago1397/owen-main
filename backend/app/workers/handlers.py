@@ -754,6 +754,24 @@ async def handle_outbound_call(db: AsyncSession, payload: dict) -> None:
     task.add_done_callback(_OUTBOUND_TASKS.discard)
 
 
+async def handle_agent_outbound_call(db: AsyncSession, payload: dict) -> None:
+    """An AI agent's outbound call a PERSON started (2026-10-15, app/agents/outbound_call.py).
+
+    Detached for the reason `handle_outbound_call` is: the call awaits the leg's StasisStart,
+    which only this process's ARI consumer sees, and it lasts minutes. The job completes as
+    soon as the task starts, so the queue NEVER retries it — a retry would ring the person
+    again. Queued only by `outbound_call.place()`, which is only reached by a person (the
+    CRM route or the CLI); nothing schedules it."""
+    import asyncio
+
+    from app.agents import outbound_call
+    from app.providers.asterisk_client import AsteriskAriClient
+
+    task = asyncio.create_task(outbound_call.run_call(AsteriskAriClient(), dict(payload)))
+    _OUTBOUND_TASKS.add(task)
+    task.add_done_callback(_OUTBOUND_TASKS.discard)
+
+
 async def handle_monitor_listen(db: AsyncSession, payload: dict) -> None:
     """Ring a supervisor and bridge them to a SNOOP of a live call (AI_AGENT_SPEC D4).
 
@@ -896,6 +914,7 @@ HANDLERS = {
     "email_relay_ghl": handle_email_relay_ghl,
     "email_relay_crm": handle_email_relay_crm,
     "outbound_call": handle_outbound_call,
+    "agent_outbound_call": handle_agent_outbound_call,
     "monitor_listen": handle_monitor_listen,
     "monitor_takeover": handle_monitor_takeover,
     "monitor_stop": handle_monitor_stop,

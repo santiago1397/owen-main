@@ -442,8 +442,13 @@ def test_the_crm_link_router_gained_exactly_one_route():
         ("/api/crm-link/numbers/{number_id}/assignment", ("DELETE",)),
         ("/api/crm-link/agent-spend", ("GET",)),
         ("/api/crm-link/agent-spend", ("PUT",)),
+        # An AI agent calls ONE number because a person asked it to (2026-10-15), and whether
+        # the CRM may offer that. Off by default (AGENT_OUTBOUND_ENABLED): the POST answers
+        # 503 and queues nothing. Two paths, two routes — twenty-three.
+        ("/api/crm-link/agent-calls", ("POST",)),
+        ("/api/crm-link/agent-calls/status", ("GET",)),
     ])
-    check("the route table is exactly the twenty-one we expect, no more and no fewer",
+    check("the route table is exactly the twenty-three we expect, no more and no fewer",
           paths == expected)
 
 

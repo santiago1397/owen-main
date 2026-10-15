@@ -529,6 +529,65 @@ async def place_call(
             "callee_channel": callee_channel_id, "linkedid": op_channel_id}
 
 
+class AgentCallIn(BaseModel):
+    """An AI agent calls ONE number because a person in the CRM asked it to (2026-10-15)."""
+
+    to_number: str
+    agent_name: str
+    reason: str               # <= 300 characters; refused with a sentence beyond that
+    from_number: Optional[str] = None
+    customer_first_name: Optional[str] = None
+    # Who pressed the button, for the call log only (an email or a name). Optional.
+    requested_by: Optional[str] = None
+
+
+@router.post("/agent-calls", status_code=status.HTTP_202_ACCEPTED)
+async def place_agent_call(
+    body: AgentCallIn,
+    db: AsyncSession = Depends(get_db),
+    _key=Depends(require_scope(SCOPE_CRM_LINK)),
+) -> dict:
+    """Queue an AI agent's outbound call (app/agents/outbound_call.py). 503 while
+    AGENT_OUTBOUND_ENABLED is off — the default — and every other guard refuses with its own
+    sentence; a refused call dials nothing, sends nothing to Retell and queues nothing.
+    202 `{"call_id", "linkedid", "status": "dialing", ...}`: the worker rings the number now;
+    how it went reaches the CRM as the call's ordinary `ended` event."""
+    from app.agents import outbound_call
+
+    cfg = _require_enabled()
+    off = outbound_call._off_refusal()
+    if off is not None:
+        raise HTTPException(off.status, off.message)
+    # The CRM link's own destination allowlist, exactly as `POST /calls` applies it: a call
+    # the CRM asks for goes only where the link may call.
+    refusal = cfg.destination_refusal(body.to_number)
+    if refusal:
+        logger.warning("crm-link: REFUSED agent call to %s — %s", body.to_number, refusal)
+        raise HTTPException(status.HTTP_403_FORBIDDEN, refusal)
+    try:
+        return await outbound_call.place(outbound_call.DbStore(db), outbound_call.CallRequest(
+            to_number=body.to_number, agent_name=body.agent_name, reason=body.reason,
+            from_number=body.from_number or "",
+            customer_first_name=body.customer_first_name or "",
+            requested_by=body.requested_by or "crm"))
+    except outbound_call.Refused as r:
+        logger.warning("crm-link: REFUSED agent call to %s — %s", body.to_number, r.message)
+        raise HTTPException(r.status, r.message) from None
+
+
+@router.get("/agent-calls/status")
+async def agent_call_status(
+    db: AsyncSession = Depends(get_db),
+    _key=Depends(require_scope(SCOPE_CRM_LINK)),
+) -> dict:
+    """Whether the CRM can offer "have the agent call": on/off, the default from-number, the
+    day's cap and how much of it is used, and the calling hours."""
+    from app.agents import outbound_call
+
+    _require_enabled()
+    return await outbound_call.status(outbound_call.DbStore(db))
+
+
 class SoftphoneCredentialsIn(BaseModel):
     """The CRM user who wants to become a ring destination. Their EMAIL is the whole
     request: it is the identity OWEN maps to an operator, and nothing else about a CRM

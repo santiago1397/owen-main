@@ -12,6 +12,12 @@ registration (`retell_llm_dynamic_variables`). Seven are sent, always, all strin
     transfer_failed      "no", or "yes" when the agent takes the caller back after a transfer
                          nobody answered (2026-10-08) — and then the greeting apologises
 
+An OUTBOUND call a person asked the agent to place (2026-10-15) gets two more, and its own
+greeting (`for_outbound`):
+
+    call_direction       "outbound"
+    call_reason          what the person who started the call said it is about
+
 `customer_brief` ALWAYS starts with the disclosure rule, known caller or not, so a prompt
 that uses `{{customer_brief}}` can never receive facts without the rule above them. The rule
 is fixed here, not in Retell's dashboard, because it is the business's rule (decision 4) and
@@ -168,6 +174,44 @@ GREETING_KNOWN = GREETING_UNKNOWN   # the name comes in the introduction, after 
 # the message rather than greeting them as if the call had just started.
 GREETING_TRANSFER_FAILED = ("Sorry, nobody could pick up right now. I'll make sure the office "
                             "gets your message - what would you like me to pass on?")
+
+
+# An OUTBOUND call the agent places because a person asked it to (2026-10-15,
+# agents/outbound_call.py). The person called did not ring us, so the agent says who it is,
+# the notice (an AI voice is an "artificial voice" under the TCPA and the call is recorded),
+# who it hopes it is talking to, and why it is calling - in that order, in its first breath.
+OUTBOUND_INTRO = "Hi, this is Anisa with Dream Team Roofing."
+MAX_REASON = 300
+
+
+def clean_reason(reason) -> str:
+    """The reason as the agent will say it: one line, at most MAX_REASON characters, no
+    trailing full stop (the greeting adds its own). PURE."""
+    text = " ".join(str(reason or "").split())[:MAX_REASON].strip()
+    return text.rstrip(" .")
+
+
+def outbound_greeting(reason, first_name: str = "") -> str:
+    """The first words of an outbound agent call. PURE."""
+    first = _clean(first_name, 40)
+    greeting = f"{OUTBOUND_INTRO} {NOTICE} "
+    if first:
+        greeting += f"Is this {first}? "
+    return greeting + f"I'm calling about {clean_reason(reason)}."
+
+
+def for_outbound(variables: dict, *, reason, first_name: str = "") -> dict[str, str]:
+    """An outbound call's variables: the usual brief for the number called, plus
+    `call_direction` "outbound", `call_reason`, and the outbound greeting. The name in the
+    greeting is the one the person who started the call gave, else the brief's (a matched
+    customer). PURE; inbound calls never pass through here, so their variables are
+    unchanged."""
+    out = {str(k): str(v) for k, v in (variables or {}).items()}
+    name = _clean(first_name, 40) or out.get("customer_first_name", "")
+    out["call_direction"] = "outbound"
+    out["call_reason"] = clean_reason(reason)
+    out["greeting"] = outbound_greeting(reason, name)
+    return out
 
 
 def render_variables(answer, *, caller_number: str, dialed_number: str,

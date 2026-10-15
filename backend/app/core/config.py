@@ -209,6 +209,22 @@ class Settings(BaseSettings):
     # the consent notice) while this runs, so it is short.
     RETELL_REGISTER_TIMEOUT_SECONDS: float = 3.0
 
+    # --- Outbound agent calls a PERSON started (2026-10-15; app/agents/outbound_call.py) -----
+    # The master switch. OFF by default: `POST /api/crm-link/agent-calls` answers 503 and the
+    # CLI refuses with the same sentence — nothing is dialled, nothing reaches Retell,
+    # nothing is queued. Nothing in the system starts one of these calls by itself.
+    AGENT_OUTBOUND_ENABLED: bool = False
+    # The DID an agent call presents when the agent answers no CRM-assigned number (or
+    # several). E.164, one of OUR active BulkVS numbers; empty = no default, the request must
+    # name `from_number`. BulkVS rejects a call whose caller ID is not ours (SIP 486).
+    AGENT_OUTBOUND_FROM: str = ""
+    # At most this many agent calls per New York calendar day, and never the same number
+    # twice within AGENT_OUTBOUND_REPEAT_MINUTES. Counted from the calls actually queued.
+    AGENT_OUTBOUND_DAILY_MAX: int = 10
+    AGENT_OUTBOUND_REPEAT_MINUTES: int = 10
+    # How long the called person's phone rings before the call is reported as no-answer.
+    AGENT_OUTBOUND_RING_SECONDS: float = 30.0
+
     VOICE_AGENT_ENGINE: str = ""  # "" = per-agent | dummy | openai_realtime | vapi | diy
 
     # OpenAI Realtime voice-agent runtime (Ticket 12). Only active when an agent's engine (or

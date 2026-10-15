@@ -83,6 +83,14 @@ class AgentCallContext:
     # rendered dynamic variables), kept so a second session on the same call reuses it
     # instead of asking the CRM again while the caller waits.
     agent_variables: dict | None = None
+    # "outbound" when the AGENT placed this call because a person asked it to (2026-10-15,
+    # agents/outbound_call.py). Then `caller_number` is the person CALLED (the customer, so
+    # the brief, captures and in-call SMS work unchanged) and `dialed_number` is OUR DID the
+    # call was placed from. `call_reason` is what the person who started it said it is
+    # about; `customer_first_name` is the name they gave, if any.
+    direction: str = "inbound"
+    call_reason: str = ""
+    customer_first_name: str = ""
 
 
 @dataclass

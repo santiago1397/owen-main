@@ -30,6 +30,9 @@ with a private right of action and no cap. The engineering to do it safely (hard
 blocks, a voice suppression list, enforced AI disclosure, a consent ledger) is real work that
 buys nothing until there is a reason to dial out.
 
+*Amended 2026-10-15:* one exception, built and OFF: an agent calls ONE number because a
+PERSON asked it to (D16, "Outbound agent calls a person started"). No campaigns, no triggers.
+
 **"Inbound only" does not mean no outbound legs.** An inbound call transferred to an external
 number ([D9](#d9--transfer-targets-come-from-a-per-agent-allowlist)) still originates an
 outbound leg over the trunk — that is a *forwarded* call, initiated by the consumer, and
@@ -609,6 +612,69 @@ would have kept talking over the operator).
   vendors; not tried for this host).
 * Latency to the first word over the extra SIP hop (RETELL-PLAN "Open").
 
+### Outbound agent calls a person started (2026-10-15, BUILT AND OFF)
+
+The owner's test: have the agent call the boss. One call, started by a person, never by the
+system. `app/agents/outbound_call.py` (read its docstring first).
+
+**Off unless `AGENT_OUTBOUND_ENABLED=true`** (default false). While off,
+`POST /api/crm-link/agent-calls` answers 503 "Outbound AI calls are switched off on the phone
+system (AGENT_OUTBOUND_ENABLED)" and the CLI refuses with the same sentence: nothing dialled,
+nothing sent to Retell, nothing queued.
+
+* **Doors.** `POST /api/crm-link/agent-calls` (CRM key, plus the link's own destination
+  allowlist, as `POST /calls`) `{"to_number", "agent_name", "reason" (<= 300), "from_number"?,
+  "customer_first_name"?}` -> 202 `{"call_id" = "linkedid", "status": "dialing"}`;
+  `GET /api/crm-link/agent-calls/status` -> `{"enabled", "from_number", "daily_max",
+  "used_today", "hours"}`; and from a shell in the app or worker container
+  `python -m app.agents.outbound_call --to +1... --agent "NAME" --reason "..." [--from +1...]
+  [--first-name X] --yes` (no `--yes`: exit 2, nothing opened).
+* **Guards, each a sentence, nothing done:** the switch; telephony on; `RETELL_API_KEY`; a
+  reason; `to_number` a full US number, not one of our DIDs, not blocked; the agent exists with
+  an active version on engine `retell` with a `retell_agent_id`; `from_number` = given, else the
+  ONE number the CRM assigned the agent (C5 memory), else `AGENT_OUTBOUND_FROM` (never invented),
+  and it must be an active BulkVS number we own; 08:00-20:00 America/New_York; at most
+  `AGENT_OUTBOUND_DAILY_MAX` (10) a New York day; not the same number again within
+  `AGENT_OUTBOUND_REPEAT_MINUTES` (10); the AI spend cap. Attempts are counted in
+  `app_settings["agent_outbound_calls"]`.
+* **The call.** One `agent_outbound_call` job; the worker rings `to_number` over BulkVS with our
+  DID as caller ID for `AGENT_OUTBOUND_RING_SECONDS` (30). That leg IS the call (its id,
+  `agentout<hex>`, is the Linkedid), marked `appArgs=agent-outbound` so the consumer never runs
+  a flow on it, with `X_OWEN_DIRECTION/X_OWEN_FROM/X_OWEN_TO` so it is filed as outbound from our
+  DID to the person. Answered -> `run_agent_on_call(outbound=...)`: the Retell engine registers
+  with direction `outbound` (from our DID, to the person, metadata `outbound: true`), the usual
+  brief for the person's number plus `call_direction`, `call_reason` and the outbound greeting
+  ("Hi, this is Anisa with Dream Team Roofing. Just so you know, this call's recorded and I'm an
+  AI assistant. Is this {first}? I'm calling about {reason}."); then exactly the inbound path:
+  SIP leg, bridge, bridge recording, wait, functions, transfer (dialled with our DID as caller
+  ID), Listen / Take over, and the CRM's `ended` event as an OUTBOUND call with the same
+  `ai_call` (+ `direction`, `reason`). No answer / busy / failed: the CRM gets an outbound call
+  with that status, NO Retell registration. The job is never retried (a retry rings someone
+  twice).
+* **Nothing calls it automatically**: no trigger, flow node or loop over contacts; a test
+  fences the job name to `place()`, the worker and the two doors.
+
+**TCPA.** An AI voice is an "artificial voice" (FCC declaratory ruling, February 2024): calling a
+mobile with one needs the called party's prior express consent (prior express WRITTEN consent
+for telemarketing), and the call must identify the business at the start. This feature is for
+calls a person decides to make to someone who expects them (the boss; a customer who asked to be
+called back). Calling hours are enforced, not advised (the operator's soft 8-9 warning stays
+soft). The agent says it is an AI and that the call is recorded in its first sentence. Invariant 8
+is amended accordingly: an agent dials only a number a PERSON told it to, one call at a time.
+
+**Operator steps:** `asterisk/ari.conf` gains `X_OWEN_TO` in `channelvars`; reload ARI's config
+(`module reload res_ari.so`) before the first call, or the call row's caller is our own DID (the
+CRM report is unaffected). In `.env.prod`: `AGENT_OUTBOUND_ENABLED=true`, and
+`AGENT_OUTBOUND_FROM=+1...` unless the agent is assigned exactly one number. In Retell, the
+agent's begin message stays `{{greeting}}`; give `call_direction` / `call_reason` default values
+(empty) so an inbound call's prompt does not see the raw placeholders.
+
+**Unverified:** no outbound agent call has been placed. Whether Retell's agent speaks first on a
+call registered `outbound` (it should: the begin message), the 1-3 s of silence between the
+person's "hello" and the greeting (brief + registration + SIP), voicemail (Retell's agent-level
+voicemail detection is not set by OWEN; with it off the agent talks to the voicemail greeting),
+and BulkVS accepting the transfer leg's caller ID on an outbound call.
+
 ## Deploy record — steps 6-8 (DONE 2026-09-04)
 
 Deployed from `0e2c25f`. Both migrations applied cleanly on first run; `app` was brought up
@@ -829,3 +895,6 @@ already paid for.
 8. **Agents answer; agents do not dial.** Nothing in the agent runtime may originate a call to
    a number the platform was not already talking to. The moment that changes, D8's hard
    guardrails are a prerequisite, not a follow-up.
+   *Amended 2026-10-15:* an agent may dial ONE number a PERSON told it to (D16, "Outbound
+   agent calls a person started"): off by default, hard calling hours, a daily cap, no repeat
+   within 10 minutes, disclosure in the first sentence, never automatic.

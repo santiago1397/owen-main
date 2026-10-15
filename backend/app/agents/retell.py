@@ -32,6 +32,15 @@ brief (`ctx.agent_variables`, not fetched again), `transfer_failed` "yes" and an
 `greeting` (`brief.after_failed_transfer`), recorded as `<linkedid>-agent-2`. In that session
 the `transfer` function is refused (`functions.py`), so it cannot loop.
 
+## An outbound call a person started (2026-10-15)
+
+`agents/outbound_call.py` rings the person over BulkVS and, once they answer, runs THIS engine
+on their channel with `ctx.direction == "outbound"`: registered with direction "outbound",
+from our DID to them, metadata `outbound: true`, and the usual brief for their number plus
+`call_direction` / `call_reason` and the outbound greeting (`brief.for_outbound`). Everything
+after registration — the SIP leg, the bridge, the recording, the wait, functions, transfer,
+take-over — is the inbound path, unchanged.
+
 `failed` routes to the flow's fallback (voicemail) — decision 17. A caller never hears dead
 air because Retell is down, unconfigured or over budget.
 
@@ -105,6 +114,14 @@ class RetellVoiceAgentSession:
         else:
             variables = await _dynamic_variables(spec, ctx)
             ctx.agent_variables = dict(variables)
+        outbound = ctx.direction == "outbound"
+        if outbound:
+            # A call the agent placed because a person asked (2026-10-15): the same brief for
+            # the number called, plus why it is calling and the outbound greeting.
+            from app.integrations.retell.brief import for_outbound
+
+            variables = for_outbound(variables, reason=ctx.call_reason,
+                                     first_name=ctx.customer_first_name)
         if ctx.transfer_failed:
             from app.integrations.retell.brief import after_failed_transfer
 
@@ -114,17 +131,23 @@ class RetellVoiceAgentSession:
         from app.integrations.retell import registry
 
         pinned = (spec.config or {}).get("retell_agent_version")
+        customer = ctx.caller_number or ""
+        our_line = getattr(ctx, "dialed_number", None) or ""
         body = retell_client.register_body(
             agent_id=retell_agent_id,
-            from_number=ctx.caller_number or "",
-            to_number=getattr(ctx, "dialed_number", None) or "",
+            # Inbound: from the caller to the DID they rang. Outbound: from OUR DID to the
+            # person called (ctx.caller_number is always the customer).
+            from_number=our_line if outbound else customer,
+            to_number=customer if outbound else our_line,
             metadata={"linkedid": lid, "owen_agent": spec.agent_name or spec.agent_id,
                       "owen_version": spec.version_number if spec.version_number is not None
                       else spec.version_id,
+                      **({"outbound": True} if outbound else {}),
                       **({"after_failed_transfer": True} if ctx.transfer_failed else {})},
             variables=variables,
             agent_version=int(pinned) if isinstance(pinned, int) and not isinstance(pinned, bool)
             else None,
+            direction="outbound" if outbound else "inbound",
         )
         try:
             call = await retell_client.register_phone_call(body)

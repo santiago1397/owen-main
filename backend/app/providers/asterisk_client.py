@@ -22,7 +22,8 @@ import httpx
 from app.core.calllog import clog
 from app.core.config import settings
 from app.flows import dtmf
-from app.providers.asterisk import FLOW_DIAL_APP_ARG, FLOW_DIAL_CHANNEL_PREFIX
+from app.providers.asterisk import (AGENT_OUTBOUND_APP_ARG, FLOW_DIAL_APP_ARG,
+                                    FLOW_DIAL_CHANNEL_PREFIX)
 from app.telephony.credentials import operator_dial_endpoint
 
 logger = logging.getLogger("providers.asterisk_client")
@@ -85,6 +86,9 @@ _LEG_GONE_EVENTS = frozenset({"ChannelHangupRequest", "StasisEnd", "ChannelDestr
 # Q.850 hangup cause -> dial-node port for the outbound leg's ChannelDestroyed while
 # ringing. 17=user busy; 18/19/21=no response/no answer/rejected. Unlisted -> "failed".
 _DIAL_CAUSE_PORTS = {17: "busy", 18: "noanswer", 19: "noanswer", 21: "noanswer"}
+# `originate_agent_outbound` has no caller leg; this stands in for one, and no ARI channel id
+# can equal it (ids are Asterisk uniqueids or the hex ids this client assigns).
+_NO_CALLER_LEG = "<no-caller-leg>"
 # Hard ceiling on awaiting a menu prompt's PlaybackFinished. Only reached if the event is
 # missed (WS blip); the node then falls through to its digit timer rather than hanging.
 _PROMPT_MAX_S = 120.0
@@ -463,6 +467,44 @@ class AsteriskAriClient:
         except Exception:  # noqa: BLE001 - a failed leg is a port, never an exception
             logger.exception("ARI originate_sip_leg to %s failed", endpoint)
             return "failed"
+
+    async def originate_agent_outbound(
+        self, queue: asyncio.Queue, channel_id: str, number: str, *, caller_id: str,
+        timeout_s: float, variables: dict | None = None,
+    ) -> tuple[str, dict]:
+        """Ring `number` over the BulkVS trunk for an AI agent's outbound call (2026-10-15)
+        and wait for it to answer. Returns `(port, info)`: "answered", or the dial port it got
+        instead ("busy" / "noanswer" / "failed") with the cause, exactly as `dial_number`
+        reads them.
+
+        `channel_id` is pre-assigned (`AGENT_OUTBOUND_CHANNEL_PREFIX` + hex, no dash) and is
+        the call's Linkedid: this leg IS the call. It enters our Stasis app marked with
+        `AGENT_OUTBOUND_APP_ARG`, so the consumer never runs a flow on it, and with
+        `variables` (X_OWEN_DIRECTION / X_OWEN_FROM / X_OWEN_TO) so the projection files it
+        as an outbound call from our DID to `number`. `caller_id` is REQUIRED: BulkVS refuses
+        a call whose caller ID is not one of our DIDs (SIP 486), so a blank one is refused
+        here instead of being sent. `queue` must already watch `channel_id`. Never raises."""
+        if not str(caller_id or "").strip():
+            logger.error("ARI originate_agent_outbound: no caller ID; not dialling %s", number)
+            return "failed", {}
+        timeout_s = max(1.0, float(timeout_s or 30))
+        try:
+            created = await self._post_json("/ari/channels", params={
+                "endpoint": f"PJSIP/{number}@{settings.BULKVS_TRUNK_NAME}",
+                "app": settings.ARI_APP,
+                "appArgs": AGENT_OUTBOUND_APP_ARG,
+                "channelId": channel_id,
+                "callerId": str(caller_id),
+                "timeout": str(int(timeout_s)),
+            }, json={"variables": dict(variables)} if variables else None)
+            if not isinstance(created, dict) or not created.get("id"):
+                return "failed", {}
+            # There is no "caller" leg to watch: this leg is the whole call so far. A sentinel
+            # no real channel id can equal keeps `_await_dial_answer`'s caller check inert.
+            return await self._await_dial_answer(queue, _NO_CALLER_LEG, channel_id, timeout_s)
+        except Exception:  # noqa: BLE001 - a failed dial is a port, never an exception
+            logger.exception("ARI originate_agent_outbound to %s failed", number)
+            return "failed", {}
 
     def _log_dial_outcome(self, channel_id: str, target: str, port: str) -> None:
         """Emit the dial's forensic summary as one `call.dial.outcome` line."""
