@@ -167,7 +167,9 @@ def _known_lines(answer: dict, now: datetime | None) -> tuple[str, list[str]]:
 NOTICE = "Just so you know, this call's recorded and I'm an AI assistant."
 # Only "Hello?" - the agent then WAITS for the caller and introduces itself in its first reply
 # (the Retell prompt says how; it uses {{customer_first_name}} for a known caller).
-GREETING_UNKNOWN = NOTICE + " Hello?"
+# " - - - " is Retell's documented pause (spaced dashes; docs.retellai.com/build/add-pause): a
+# beat after the notice before "Hello?", like someone picking up (owner, 2026-10-16).
+GREETING_UNKNOWN = NOTICE + " - - - Hello?"
 GREETING_KNOWN = GREETING_UNKNOWN   # the name comes in the introduction, after the caller answers
 # The agent's first words when it takes the caller back after a transfer nobody answered
 # (2026-10-08, owner): the caller has just heard ringing, so it apologises and offers to take
