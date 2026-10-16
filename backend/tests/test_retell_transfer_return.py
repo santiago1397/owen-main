@@ -281,8 +281,8 @@ def test_unanswered_transfer_returns_to_the_same_agent():
         check(f"[{outcome}] session 1: transfer_failed = no, the normal greeting",
               v1["transfer_failed"] == "no" and v1["greeting"].endswith("Hello?"))
         from app.integrations.retell.brief import NOTICE
-        check(f"[{outcome}] the notice is spoken in session 1 only, never repeated after a transfer",
-              v1["greeting"].startswith(NOTICE) and NOTICE not in v2["greeting"])
+        check(f"[{outcome}] no notice at all, and session 2 does not say Hello? again",
+              v1["greeting"] == "Hello?" and NOTICE not in v2["greeting"] and "Hello?" not in v2["greeting"])
         check(f"[{outcome}] session 2: transfer_failed = yes",
               v2["transfer_failed"] == "yes")
         check(f"[{outcome}] session 2: the sorry greeting, word for word",
