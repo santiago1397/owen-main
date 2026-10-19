@@ -596,6 +596,20 @@ async def _agent_transfer_outcome(ari, channel_id: str, lid: str, chosen: dict,
     (2026-10-08): the office's Quo line forwards to ANOTHER AI number after 15 s, so ringing it
     for the platform's 25 s handed the caller to the wrong agent.
     """
+    steps = chosen.get("then") or []
+    if steps and chosen.get("kind") in ("number", "operator"):
+        # Ring the target, then each follow-up number in order (2026-10-19, owner: "12 s to
+        # the main line, then 15 s to another number"). Stops at the first answer, or when
+        # the caller hangs up; only if every step went unanswered does the caller go back.
+        first = {k: v for k, v in chosen.items() if k != "then"}
+        result = await _agent_transfer_outcome(ari, channel_id, lid, first, caller_id)
+        for i, step in enumerate(steps, 1):
+            if result in TRANSFER_HANDLED or result == "caller_gone":
+                break
+            clog(logger, "agent.transfer.next", linkedid=lid, step=i, previous=result)
+            result = await _agent_transfer_outcome(
+                ari, channel_id, lid, {**step, "name": chosen.get("name")}, caller_id)
+        return result
     kind, target = chosen["kind"], chosen["target"]
     ring_s = _ring_seconds(chosen)
     clog(logger, "agent.transfer", linkedid=lid, kind=kind, target=target,

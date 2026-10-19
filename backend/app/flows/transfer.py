@@ -39,6 +39,36 @@ def ring_seconds_problem(name: str, value) -> Optional[str]:
     return None
 
 
+# A target may declare up to THEN_MAX follow-up numbers to ring, in order, when it is not
+# answered (2026-10-19, owner): "12 s to the main line, then 15 s to another number". Each step
+# is `{"kind": "number"|"operator", "target": ..., "ring_seconds": N}`; only ringing kinds.
+THEN_MAX = 2
+
+
+def then_problems(name: str, then) -> list:
+    """Sentences saying why a target's `then` list is unusable (empty list = fine)."""
+    if then is None:
+        return []
+    if not isinstance(then, list) or not then:
+        return [f"transfer target '{name}' has a `then` that is not a non-empty list"]
+    if len(then) > THEN_MAX:
+        return [f"transfer target '{name}' rings at most {THEN_MAX} more numbers after the first"]
+    out = []
+    for i, step in enumerate(then, 1):
+        label = f"{name} (then #{i})"
+        if not isinstance(step, dict):
+            out.append(f"transfer target '{label}' must be an object"); continue
+        if str(step.get("kind") or "number") not in RING_KINDS:
+            out.append(f"transfer target '{label}' must be a number or operator (it rings)")
+        if not str(step.get("target") or "").strip():
+            out.append(f"transfer target '{label}' has no target")
+        if "ring_seconds" in step:
+            problem = ring_seconds_problem(label, step.get("ring_seconds"))
+            if problem:
+                out.append(problem)
+    return out
+
+
 def resolve_transfer_target(targets, name: str) -> Optional[dict]:
     """Look a destination NAME up in an agent version's declared allowlist.
 
@@ -62,6 +92,12 @@ def resolve_transfer_target(targets, name: str) -> Optional[dict]:
         # An invalid value is refused at activation (agents/service.py); one that slipped
         # through is ignored here, so the platform default rings rather than nothing.
         chosen["ring_seconds"] = ring
+    then = entry.get("then")
+    if kind in RING_KINDS and then is not None and not then_problems(str(name), then):
+        chosen["then"] = [{"kind": str(st.get("kind") or "number"),
+                           "target": str(st.get("target")).strip(),
+                           **({"ring_seconds": st["ring_seconds"]} if "ring_seconds" in st else {})}
+                          for st in then]
     return chosen
 
 
