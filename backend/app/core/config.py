@@ -406,7 +406,7 @@ class Settings(BaseSettings):
     # already handed to the carrier.
     CRM_LINK_MEDIA_SECRET: str = ""
 
-    ANALYSIS_ENGINE: str = "dummy"  # dummy | claude | minimax
+    ANALYSIS_ENGINE: str = "dummy"  # dummy | claude | minimax | openai
     ANTHROPIC_API_KEY: str = ""
     ANALYSIS_MODEL: str = "claude-haiku-4-5-20251001"
 

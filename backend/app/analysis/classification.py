@@ -266,7 +266,15 @@ class MinimaxAnalysisEngine:
                 },
             )
         resp.raise_for_status()
-        message = resp.json()["choices"][0]["message"]
+        body = resp.json()
+        if not body.get("choices"):
+            # MiniMax reports its own errors as HTTP 200 with `choices: null` and the reason
+            # in `base_resp` — e.g. 2069 "model no longer available", 2067 "Token Plan usage
+            # limit has been reached". Surface that rather than a bare TypeError.
+            base = body.get("base_resp") or {}
+            raise RuntimeError(
+                f"MiniMax error {base.get('status_code')}: {base.get('status_msg')}")
+        message = body["choices"][0]["message"]
         tool_calls = message.get("tool_calls") or []
         raw = tool_calls[0]["function"]["arguments"] if tool_calls else message.get("content", "")
         try:
@@ -286,7 +294,47 @@ class MinimaxAnalysisEngine:
         return _result_from_tool_input(data, settings.ANALYSIS_MODEL)
 
 
-_ENGINES = {"dummy": DummyAnalysisEngine, "claude": ClaudeAnalysisEngine, "minimax": MinimaxAnalysisEngine}
+class OpenAIAnalysisEngine:
+    """OpenAI chat completions with a forced function call. Reuses OPENAI_API_KEY (the
+    transcription key); the model is ANALYSIS_MODEL, e.g. gpt-4.1-mini."""
+
+    name = "openai"
+
+    async def analyze(self, transcript: str) -> AnalysisResult:
+        if not settings.OPENAI_API_KEY:
+            raise RuntimeError("OPENAI_API_KEY not set")
+        prompt = (
+            "Analyze this phone call transcript. Decide if it is unwanted sales/solicitation "
+            "(is_spam), assign one category, add a few descriptive tags, and summarize.\n"
+            f"{_JOB_INSTRUCTIONS}\n\n"
+            f"Transcript:\n{transcript}"
+        )
+        tool = {"type": "function", "function": {
+            "name": _TOOL["name"],
+            "description": _TOOL["description"],
+            "parameters": _TOOL["input_schema"],
+        }}
+        async with httpx.AsyncClient(timeout=60) as client:
+            resp = await client.post(
+                "https://api.openai.com/v1/chat/completions",
+                headers={"Authorization": f"Bearer {settings.OPENAI_API_KEY}"},
+                json={
+                    "model": settings.ANALYSIS_MODEL,
+                    "max_completion_tokens": 1024,
+                    "tools": [tool],
+                    "tool_choice": {"type": "function", "function": {"name": _TOOL["name"]}},
+                    "messages": [{"role": "user", "content": prompt}],
+                },
+            )
+        resp.raise_for_status()
+        message = resp.json()["choices"][0]["message"]
+        tool_calls = message.get("tool_calls") or []
+        raw = tool_calls[0]["function"]["arguments"] if tool_calls else message.get("content", "")
+        return _result_from_tool_input(_parse_tool_json(raw), settings.ANALYSIS_MODEL)
+
+
+_ENGINES = {"dummy": DummyAnalysisEngine, "claude": ClaudeAnalysisEngine,
+            "minimax": MinimaxAnalysisEngine, "openai": OpenAIAnalysisEngine}
 
 
 def get_analysis_engine() -> AnalysisEngine:

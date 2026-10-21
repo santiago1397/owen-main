@@ -263,7 +263,7 @@ never scheduled — spec W1/D21). What was imported and why is in
 Selected at runtime by `settings.TRANSCRIPTION_ENGINE` / `settings.ANALYSIS_ENGINE`.
 
 - `transcription.py` — `TranscriptionEngine` protocol (`transcribe` + `transcribe_segmented` for timestamped output). `dummy` (canned, offline/tests) · `openai` (mono via `OPENAI_TRANSCRIBE_MODEL`=gpt-4o-transcribe; stereo legs via whisper-1 for segment timestamps). **Prod uses `openai`.**
-- `classification.py` — `AnalysisEngine` protocol; controlled `CATEGORIES` vocab. `dummy` (keyword heuristic) · `claude` (Anthropic Messages API, tool-use for structured output) · `minimax` (OpenAI-compatible function calling). **Prod uses `minimax`.**
+- `classification.py` — `AnalysisEngine` protocol; controlled `CATEGORIES` vocab. `dummy` (keyword heuristic) · `claude` (Anthropic Messages API, tool-use for structured output) · `minimax` (OpenAI-compatible function calling) · `openai` (chat completions, forced function call, reuses `OPENAI_API_KEY`). **Prod uses `openai` with `gpt-4.1-mini`** (MiniMax-M2 was retired and the plan ran out, 2026-10).
 
 ### HTTP API (`app/api/`) — all JWT-authed except where noted
 
