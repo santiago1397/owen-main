@@ -23,6 +23,7 @@ Run: python -m tests.test_openphone_mirror
 import asyncio
 import json
 import re
+from datetime import datetime, timezone
 
 OUR_LINE = "+19417247244"
 OUR_LINE_ID = "PNRxH5G3uI"
@@ -34,6 +35,12 @@ def check(name, cond):
     print(f"  [{'PASS' if cond else 'FAIL'}] {name}")
     if not cond:
         raise SystemExit(f"openphone_mirror failed at: {name}")
+
+
+def fixture_now() -> datetime:
+    """The day after the fixtures. The backfill looks back 30 days, so against the wall
+    clock the 2026-09-11 fixtures fell out of the window on 2026-10-11."""
+    return datetime(2026, 9, 12, tzinfo=timezone.utc)
 
 
 # --- a transport that records every request and refuses to be surprised -------------------
@@ -237,7 +244,9 @@ def run_mirror(routes, *, enabled=True, fail_with=None, session=None, dry_run=Fa
     saved = (settings.OPENPHONE_MIRROR_ENABLED, settings.OPENPHONE_API_KEY,
              settings.AGENT_RUNTIME_KEY, httpx.AsyncClient, op_sync.SessionLocal,
              queue_mod.enqueue, op_push.queue.enqueue)
+    real_now = op_sync._now
     try:
+        op_sync._now = fixture_now
         settings.OPENPHONE_MIRROR_ENABLED = enabled
         settings.OPENPHONE_API_KEY = key
         settings.AGENT_RUNTIME_KEY = "owen_sk_test"
@@ -252,6 +261,7 @@ def run_mirror(routes, *, enabled=True, fail_with=None, session=None, dry_run=Fa
          settings.AGENT_RUNTIME_KEY, httpx.AsyncClient, op_sync.SessionLocal,
          queue_mod.enqueue, op_push.queue.enqueue) = saved
         op_client.httpx.AsyncClient = httpx.AsyncClient
+        op_sync._now = real_now
         assert _real is not None
     result["_jobs"] = jobs
     return result, transport, session
@@ -610,6 +620,7 @@ def test_a_missing_conversations_endpoint_degrades_instead_of_failing():
     saved = (settings.OPENPHONE_MIRROR_ENABLED, settings.OPENPHONE_API_KEY,
              settings.AGENT_RUNTIME_KEY, httpx.AsyncClient, op_sync.SessionLocal,
              queue_mod.enqueue, op_push.queue.enqueue)
+    real_now = op_sync._now
     try:
         settings.OPENPHONE_MIRROR_ENABLED = True
         settings.OPENPHONE_API_KEY = "op_test_key"
@@ -618,11 +629,13 @@ def test_a_missing_conversations_endpoint_degrades_instead_of_failing():
         op_sync.SessionLocal = lambda: session
         queue_mod.enqueue = fake_enqueue
         op_push.queue.enqueue = fake_enqueue
+        op_sync._now = fixture_now
         result = asyncio.run(op_sync.run_once())
     finally:
         (settings.OPENPHONE_MIRROR_ENABLED, settings.OPENPHONE_API_KEY,
          settings.AGENT_RUNTIME_KEY, httpx.AsyncClient, op_sync.SessionLocal,
          queue_mod.enqueue, op_push.queue.enqueue) = saved
+        op_sync._now = real_now
 
     check("the tick still ran", result["ran"] is True)
     check("it fell back to the address book and still mirrored the call",
@@ -677,8 +690,10 @@ def test_the_router_is_exactly_these_routes_and_the_crm_link_is_untouched():
     # adds none, which is what this line is actually for.
     # Eighteen since 2026-10-06: /numbers, /numbers/{id}/assignment and /agent-spend (Retell
     # voice agents, RETELL-PLAN C5/C6). Still none of them the mirror's.
-    check(f"the CRM link still has its eighteen paths, unwidened by the mirror ({len(crm)})",
-          len(crm) == 18 and "/api/crm-link/email-jobs" in crm)
+    # Twenty since 2026-10-15: /agent-calls and /agent-calls/status (an AI agent calls one
+    # number a person asked it to, 7e4b2aa). Not the mirror's either.
+    check(f"the CRM link still has its twenty paths, unwidened by the mirror ({len(crm)})",
+          len(crm) == 20 and "/api/crm-link/email-jobs" in crm)
     check("scopes exist and are the two reused ones",
           bool(SCOPE_AGENT_WRITE) and bool(SCOPE_CRM_LINK))
 
