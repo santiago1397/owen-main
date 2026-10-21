@@ -166,6 +166,37 @@ def test_recurring_rate_table():
     check("561 is not", not b.is_toll_free("+15618788090"))
 
 
+def test_an_empty_voice_window_is_no_records_not_an_error():
+    """BulkVS answers an empty /voice window with 404 + Code 6404 (measured 2026-10-21)."""
+    import asyncio
+
+    import httpx
+
+    from app.providers import bulkvs_client
+
+    def transport_for(status, body):
+        return httpx.MockTransport(lambda req: httpx.Response(status, json=body))
+
+    def fetch(status, body):
+        real = httpx.AsyncClient
+        bulkvs_client.httpx.AsyncClient = (
+            lambda *a, **kw: real(transport=transport_for(status, body)))
+        try:
+            return asyncio.run(bulkvs_client.fetch_voice_cdr(0, 1, "all"))
+        finally:
+            bulkvs_client.httpx.AsyncClient = real
+
+    empty = {"Status": "No Records Found", "Code": "6404",
+             "Description": "No Records found within Date Range"}
+    check("404 + 6404 is an empty list", fetch(404, empty) == [])
+    try:
+        fetch(404, {"Status": "Not Found"})
+        raised = False
+    except httpx.HTTPStatusError:
+        raised = True
+    check("any other 404 still raises", raised)
+
+
 def main():
     test_parse_basics()
     test_timezone()
@@ -175,6 +206,7 @@ def main():
     test_unrated_is_flagged_not_zeroed()
     test_rounding_helper()
     test_recurring_rate_table()
+    test_an_empty_voice_window_is_no_records_not_an_error()
     print("\nALL BILLING CHECKS PASSED")
 
 

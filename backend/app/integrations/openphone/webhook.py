@@ -346,6 +346,47 @@ async def _fetch_call(op, call_id: str) -> dict:
     return call
 
 
+def _quo_cannot_read(exc: BaseException) -> bool:
+    """Quo's permanent refusal of `GET /calls/{id}` for a call with more than two
+    participants (a transfer or a conference): 400, code 0101400, "Too Many Participants".
+    Retrying never changes it, so treating it as transient only dead-letters the job."""
+    resp = getattr(exc, "response", None)
+    if resp is None or getattr(resp, "status_code", None) != 400:
+        return False
+    try:
+        return str((resp.json() or {}).get("code")) == "0101400"
+    except Exception:  # noqa: BLE001 - not JSON; fall back to the words
+        return "too many participants" in (getattr(resp, "text", "") or "").lower()
+
+
+async def _call_from_ledger(db, call_id: str) -> Optional[dict]:
+    """What the mirror ledger knows about a call already sent to the CRM, or None.
+
+    Used only when Quo refuses to describe the call again. The customer comes back as its
+    ten-digit match key, which is re-expanded to E.164 the way Quo writes US numbers."""
+    from sqlalchemy import select
+
+    from app.integrations.openphone.models import OpenPhoneMirrorRow
+
+    rows = (await db.execute(
+        select(OpenPhoneMirrorRow).where(
+            OpenPhoneMirrorRow.external_id == call_id,
+            OpenPhoneMirrorRow.kind.in_(("call", "call_recording")),
+        )
+    )).scalars().all()
+    base = next((r for r in rows if r.kind == "call"), None)
+    if base is None or not base.line_number or not base.customer_key:
+        return None
+    key = base.customer_key
+    return {
+        "_from_ledger": True,
+        "line_number": base.line_number,
+        "customer_number": f"+1{key}" if len(key) == 10 else key,
+        "occurred_at": base.occurred_at,
+        "has_recording": any(r.kind == "call_recording" for r in rows),
+    }
+
+
 async def process(body: dict, *, session_factory=None) -> dict:
     """Mirror one webhook object through the poll's own idempotent functions.
 
@@ -388,7 +429,16 @@ async def process(body: dict, *, session_factory=None) -> dict:
         mirrored = await sync._already_mirrored(db, "call", call_id)
 
         if kind in CALL_EVENTS or not mirrored:
-            call = call if call is not None else await _fetch_call(op, call_id)
+            if call is None:
+                try:
+                    call = await _fetch_call(op, call_id)
+                except Exception as exc:  # noqa: BLE001 - only Quo's permanent refusal is handled
+                    if not _quo_cannot_read(exc):
+                        raise
+                    # Never mirrored and unreadable: retrying cannot change Quo's answer.
+                    logger.warning("openphone-mirror: %s for call %s skipped - Quo cannot "
+                                   "read a call with more than two participants", kind, call_id)
+                    return {"ok": True, "skipped": "too many participants"}
             line = _our_line(call, lines)
             if not line:
                 return {"ok": True, "skipped": "not a mirrored line"}
@@ -403,16 +453,34 @@ async def process(body: dict, *, session_factory=None) -> dict:
         part = CALL_PART_EVENTS[kind]
         if await sync._already_mirrored(db, part, call_id):
             return {"ok": True, "type": kind, "outcome": "duplicate"}
-        call = call if call is not None else await _fetch_call(op, call_id)
-        line = _our_line(call, lines)
-        if not line:
-            return {"ok": True, "skipped": "not a mirrored line"}
-        key = op_config.match_key(line)
-        entry = call_entry(call)
-        occurred = _ts(entry.get("createdAt") or entry.get("completedAt"))
+        if call is None:
+            try:
+                call = await _fetch_call(op, call_id)
+            except Exception as exc:  # noqa: BLE001 - only Quo's permanent refusal is handled
+                if not _quo_cannot_read(exc):
+                    raise
+                # The call row is already on the CRM thread, so the ledger knows its line
+                # and customer. The CRM merges on the call's dedupe key and only fills
+                # blanks, so the unknown status/duration are simply left as they are.
+                known = await _call_from_ledger(db, call_id)
+                if known is None:
+                    raise
+                call = known
+        if call.get("_from_ledger"):
+            line = call["line_number"]
+            customer = call["customer_number"]
+            entry = {"direction": "incoming", "hasRecording": call["has_recording"]}
+            occurred = call["occurred_at"]
+        else:
+            line = _our_line(call, lines)
+            if not line:
+                return {"ok": True, "skipped": "not a mirrored line"}
+            customer = _customer(call, op_config.match_key(line))
+            entry = call_entry(call)
+            occurred = _ts(entry.get("createdAt") or entry.get("completedAt"))
         facts = MirroredCall(
             external_id=call_id,
-            customer_number=_customer(call, key),
+            customer_number=customer,
             line_number=line,
             direction=str(entry.get("direction") or "incoming"),
             status=str(entry.get("status") or ""),

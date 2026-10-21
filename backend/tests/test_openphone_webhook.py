@@ -317,6 +317,92 @@ def test_a_calls_later_parts_each_go_once_under_the_calls_own_key():
           [c for c in openphone if c["method"] != "GET"] == [])
 
 
+def _quo_refuses_conference_calls():
+    """`get_call` as Quo answers it for a call with more than two participants."""
+    import httpx
+
+    async def refuse(call_id):
+        req = httpx.Request("GET", f"https://api.openphone.com/v1/calls/{call_id}")
+        resp = httpx.Response(400, request=req, json={
+            "message": "The call has too many participants. Only calls with two "
+                       "participants or less are supported.",
+            "code": "0101400", "status": 400, "title": "Too Many Participants"})
+        raise httpx.HTTPStatusError("400", request=req, response=resp)
+    return refuse
+
+
+def test_a_conference_calls_summary_still_reaches_the_crm_from_the_ledger():
+    print("Quo refuses GET /calls for a 3-party call; the summary comes from the ledger:")
+    from app.integrations.openphone import webhook
+    from app.integrations.openphone.events import to_crm_event
+    from app.providers import openphone_client as op_client
+
+    async def ledger(db, call_id):
+        return {"_from_ledger": True, "line_number": OUR_LINE,
+                "customer_number": CUSTOMER, "occurred_at": None, "has_recording": True}
+
+    saved = (op_client.get_call, webhook._call_from_ledger)
+    session = FakeSession(mirrored={("call", "AC_conf")})
+    summary = {"object": "callSummary", "callId": "AC_conf", "status": "completed",
+               "summary": ["The technician offered three roof options."]}
+    try:
+        op_client.get_call = _quo_refuses_conference_calls()
+        webhook._call_from_ledger = ledger
+        with configured():
+            result, jobs = process(queued_body("call.summary.completed", summary),
+                                   account(), session)
+    finally:
+        op_client.get_call, webhook._call_from_ledger = saved
+    check(f"sent, not retried ({result})", result.get("outcome") == "sent")
+    body = to_crm_event(jobs[0]["body"])
+    check("under the call's own dedupe key, so the CRM fills the existing row",
+          body["dedupe_key"] == "openphone:call:AC_conf")
+    check("carries the summary", body.get("summary") == summary["summary"][0])
+    check("and no invented status or duration",
+          "call_status" not in body and "duration_seconds" not in body)
+
+
+def test_an_unmirrored_conference_call_is_skipped_not_retried_forever():
+    print("Quo refuses GET /calls and the ledger has never seen the call:")
+    from app.providers import openphone_client as op_client
+
+    saved = op_client.get_call
+    try:
+        op_client.get_call = _quo_refuses_conference_calls()
+        with configured():
+            result, jobs = process(
+                queued_body("call.summary.completed",
+                            {"callId": "AC_conf", "summary": ["x"]}),
+                account(), FakeSession())
+    finally:
+        op_client.get_call = saved
+    check(f"acknowledged as skipped ({result})", result.get("skipped") == "too many participants")
+    check("nothing queued", jobs == [])
+
+
+def test_any_other_quo_failure_still_raises_so_the_queue_retries():
+    print("a 500 from Quo is still transient:")
+    import httpx
+
+    from app.providers import openphone_client as op_client
+
+    async def broken(call_id):
+        req = httpx.Request("GET", "https://api.openphone.com/v1/calls/x")
+        raise httpx.HTTPStatusError("500", request=req, response=httpx.Response(500, request=req))
+    saved = op_client.get_call
+    raised = False
+    try:
+        op_client.get_call = broken
+        with configured():
+            process(queued_body("call.summary.completed", {"callId": "AC_x", "summary": ["x"]}),
+                    account(), FakeSession())
+    except httpx.HTTPStatusError:
+        raised = True
+    finally:
+        op_client.get_call = saved
+    check("it raised (the route answers 502 and the job retries)", raised)
+
+
 def test_an_unanswered_call_with_a_voicemail_is_reported_as_voicemail():
     print("Quo's own example: status completed, never answered, voicemail present:")
     from app.integrations.openphone import webhook

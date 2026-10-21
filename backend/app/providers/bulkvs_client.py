@@ -174,6 +174,15 @@ async def fetch_ported_numbers() -> set[str]:
     return ported
 
 
+def _is_no_records(resp) -> bool:
+    """BulkVS's "No Records Found" (code 6404) — how /voice says an empty window."""
+    try:
+        body = resp.json()
+    except ValueError:
+        return False
+    return isinstance(body, dict) and str(body.get("Code")) == "6404"
+
+
 async def fetch_voice_cdr(start_epoch: int, end_epoch: int, call_type: str = "all") -> list[dict]:
     """GET /voice — BulkVS's OWN RATED call detail records.
 
@@ -196,6 +205,11 @@ async def fetch_voice_cdr(start_epoch: int, end_epoch: int, call_type: str = "al
     params = {"Type": call_type, "Start": str(int(start_epoch)), "End": str(int(end_epoch))}
     async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
         resp = await client.get(url, params=params, auth=auth)
+        if resp.status_code == 404 and _is_no_records(resp):
+            # An EMPTY window is a 404 with {"Code": "6404", "Status": "No Records Found"},
+            # not an empty list — e.g. a quiet weekend, or every call failing before BulkVS
+            # rated it. Measured on production 2026-10-21.
+            return []
         resp.raise_for_status()
         data = resp.json()
     if isinstance(data, dict):
