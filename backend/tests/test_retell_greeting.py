@@ -40,7 +40,7 @@ check("a normal call says transfer_failed = no", v(known)["transfer_failed"] == 
 back = brief.after_failed_transfer(v(known))
 check("after an unanswered transfer: transfer_failed = yes, the sorry greeting",
       back["transfer_failed"] == "yes" and back["greeting"] == brief.GREETING_TRANSFER_FAILED
-      and back["greeting"].startswith("Sorry, nobody could pick up right now."))
+      and back["greeting"].startswith("Sorry, no one from the office is available right now"))
 check("...and the same brief otherwise",
       {k: x for k, x in back.items() if k not in ("transfer_failed", "greeting")}
       == {k: x for k, x in v(known).items() if k not in ("transfer_failed", "greeting")})
