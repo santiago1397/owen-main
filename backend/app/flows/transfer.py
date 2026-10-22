@@ -69,6 +69,19 @@ def then_problems(name: str, then) -> list:
     return out
 
 
+# The office takes transfers only while it is open (2026-10-22, owner): Monday-Saturday,
+# 8 AM - 5 PM New York. Outside these hours an agent's transfer to a number never dials; the
+# agent tells the caller the office is closed and takes the message instead.
+OFFICE_DAYS = (0, 1, 2, 3, 4, 5)        # Monday .. Saturday
+OFFICE_OPEN_HOUR, OFFICE_CLOSE_HOUR = 8, 17
+
+
+def office_open(local_now) -> bool:
+    """`local_now` is a New York datetime. PURE."""
+    return (local_now.weekday() in OFFICE_DAYS
+            and OFFICE_OPEN_HOUR <= local_now.hour < OFFICE_CLOSE_HOUR)
+
+
 def resolve_transfer_target(targets, name: str) -> Optional[dict]:
     """Look a destination NAME up in an agent version's declared allowlist.
 

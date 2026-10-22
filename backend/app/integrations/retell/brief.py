@@ -179,6 +179,10 @@ GREETING_KNOWN = GREETING_UNKNOWN   # the name comes in the introduction, after 
 # the message rather than greeting them as if the call had just started.
 # 2026-10-22, the owner's words: "sorry no one from the office is available right now, but
 # once they are free we will call asap".
+# 2026-10-22, owner: transfers only Mon-Sat 8 AM - 5 PM; outside them, this.
+GREETING_OFFICE_CLOSED = ("Our office is closed right now - we're open Monday to Saturday, 8 AM "
+                          "to 5 PM - but we will call you back as soon as possible. Is there "
+                          "anything you'd like me to pass on to them?")
 GREETING_TRANSFER_FAILED = ("Sorry, no one from the office is available right now, but once "
                             "they are free we will call you back as soon as possible. Is there "
                             "anything you'd like me to pass on to them?")
@@ -255,10 +259,11 @@ def render_variables(answer, *, caller_number: str, dialed_number: str,
     }
 
 
-def after_failed_transfer(variables: dict) -> dict[str, str]:
+def after_failed_transfer(variables: dict, closed: bool = False) -> dict[str, str]:
     """The same call's variables for the agent taking the caller back after a transfer nobody
-    answered: the same brief, `transfer_failed` "yes", and the apology as the greeting. PURE."""
+    answered (or, `closed`, one never dialled because the office is closed): the same brief,
+    `transfer_failed` "yes", and the matching greeting. PURE."""
     out = {str(k): str(v) for k, v in (variables or {}).items()}
     out["transfer_failed"] = "yes"
-    out["greeting"] = GREETING_TRANSFER_FAILED
+    out["greeting"] = GREETING_OFFICE_CLOSED if closed else GREETING_TRANSFER_FAILED
     return out

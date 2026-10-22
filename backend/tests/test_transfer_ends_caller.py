@@ -12,6 +12,12 @@ from app.flows import runtime
 
 FAILS = []
 
+# Transfers ring only Mon-Sat 8-5 (2026-10-22): these checks run on a Thursday morning.
+from datetime import datetime as _dt  # noqa: E402
+from zoneinfo import ZoneInfo as _Z  # noqa: E402
+runtime._office_now = lambda: _dt(2026, 10, 22, 10, 0, tzinfo=_Z("America/New_York"))
+
+
 
 def check(name, cond):
     print(("  [PASS] " if cond else "  [FAIL] ") + name)

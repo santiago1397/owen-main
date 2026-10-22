@@ -182,6 +182,9 @@ def _run(ari, retell, reg, *, session=None, brief=KNOWN):
                       (engine, "POLL_SECONDS", 0.01), (engine, "EXIT_GRACE_SECONDS", 0.0),
                       (functions, "_version_config", version_config),
                       (runtime, "SessionLocal", FakeDb),
+                      (runtime, "_office_now", lambda: __import__("datetime").datetime(
+                          2026, 10, 22, 10, 0, tzinfo=__import__("zoneinfo").ZoneInfo(
+                              "America/New_York"))),
                       (runtime, "_resolve_active_agent_version", resolve),
                       (runtime, "_pin_agent_version", pin),
                       (runtime, "_store_agent_output", store),
@@ -237,6 +240,10 @@ def test_ring_seconds_reaches_the_dial():
     print("the dial rings for the target's ring_seconds, else the platform default:")
     from app.flows import runtime
     from app.flows.transfer import resolve_transfer_target
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    # Transfers ring only Mon-Sat 8-5 (2026-10-22): a Thursday morning.
+    runtime._office_now = lambda: datetime(2026, 10, 22, 10, 0, tzinfo=ZoneInfo("America/New_York"))
 
     chosen = resolve_transfer_target(CONFIG["transfer_targets"], "office")
     check("the allowlist carries ring_seconds", chosen.get("ring_seconds") == 12)

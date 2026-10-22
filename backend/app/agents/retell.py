@@ -125,7 +125,8 @@ class RetellVoiceAgentSession:
         if ctx.transfer_failed:
             from app.integrations.retell.brief import after_failed_transfer
 
-            variables = after_failed_transfer(variables)
+            variables = after_failed_transfer(
+                variables, closed=bool(getattr(ctx, "transfer_closed", False)))
 
         from app.integrations.retell import client as retell_client
         from app.integrations.retell import registry
