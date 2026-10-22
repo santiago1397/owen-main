@@ -13,6 +13,12 @@ import sys
 from app.flows import runtime
 from app.flows.transfer import resolve_transfer_target
 
+# Transfers ring only Mon-Sat 8-5 (2026-10-22): these checks run on a Thursday morning.
+from datetime import datetime as _dt  # noqa: E402
+from zoneinfo import ZoneInfo as _Z  # noqa: E402
+runtime._office_now = lambda: _dt(2026, 10, 22, 10, 0, tzinfo=_Z("America/New_York"))
+
+
 FAILS = []
 
 
@@ -98,6 +104,31 @@ class OldAri:
 
 check("a dialler without hold music is called the old way",
       run(OldAri()) == "answered")
+
+# ---- office hours (2026-10-22, owner): transfers only Mon-Sat 8 AM - 5 PM New York
+from datetime import datetime  # noqa: E402
+from zoneinfo import ZoneInfo  # noqa: E402
+
+from app.flows.transfer import office_open  # noqa: E402
+from app.integrations.retell import brief  # noqa: E402
+
+NY = ZoneInfo("America/New_York")
+check("open Mon-Sat 8-5, closed at night and on Sunday",
+      office_open(datetime(2026, 10, 22, 9, 0, tzinfo=NY))
+      and not office_open(datetime(2026, 10, 22, 20, 51, tzinfo=NY))
+      and not office_open(datetime(2026, 10, 25, 11, 0, tzinfo=NY))
+      and office_open(datetime(2026, 10, 24, 16, 59, tzinfo=NY)))
+saved = runtime._office_now
+runtime._office_now = lambda: datetime(2026, 10, 22, 20, 51, tzinfo=NY)
+try:
+    ari = Ari()
+    res = run(ari)
+    check("at 8:51 PM a transfer never dials -> closed", res == "closed" and ari.dialed == [])
+finally:
+    runtime._office_now = saved  # back to Thursday morning
+back = brief.after_failed_transfer({"greeting": "Hello?"}, closed=True)
+check("...and Anisa says the office is closed",
+      back["greeting"] == brief.GREETING_OFFICE_CLOSED and "closed" in back["greeting"])
 
 print("\n%d failed" % len(FAILS) if FAILS else "\nall passed")
 sys.exit(1 if FAILS else 0)

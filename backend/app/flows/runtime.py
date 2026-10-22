@@ -39,7 +39,7 @@ from app.flows.interpreter import AriControl, FlowInterpreter
 from app.agents.capture import normalise_capture
 from app.agents.report import build_report_body
 from app.services.ai_cost import PROVENANCE_DERIVED, charges_for_session, session_total
-from app.flows.transfer import resolve_transfer_target
+from app.flows.transfer import office_open, resolve_transfer_target
 from app.integrations.crm.events import CallEventFacts
 from app.models import (Agent, AgentSlot, AgentVersion, Call, CallCapture, CallCharge,
                         CallEvent, Campaign, Flow, FlowVersion, Number, Transcription)
@@ -610,6 +610,13 @@ async def bounced_transfer(ari, channel_id: str, lid: str, caller_number: str) -
     return True
 
 
+def _office_now():
+    """Now in New York (the office's hours); a function so tests can move the clock."""
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    return datetime.now(ZoneInfo(settings.BUSINESS_TZ))
+
+
 def _dial_kwargs(ari) -> dict:
     """`hold_music=True` when this dialler supports it (the real ARI client does)."""
     try:
@@ -642,6 +649,10 @@ async def _agent_transfer_outcome(ari, channel_id: str, lid: str, chosen: dict,
     (2026-10-08): the office's Quo line forwards to ANOTHER AI number after 15 s, so ringing it
     for the platform's 25 s handed the caller to the wrong agent.
     """
+    if chosen.get("kind") in ("number", "operator") and not office_open(_office_now()):
+        # Outside Mon-Sat 8-5 nobody is there to answer (2026-10-22, owner): never dial.
+        clog(logger, "agent.transfer.closed", linkedid=lid, target=chosen.get("target"))
+        return "closed"
     steps = chosen.get("then") or []
     if steps and chosen.get("kind") in ("number", "operator"):
         # Ring the target, then each follow-up number in order (2026-10-19, owner: "12 s to
@@ -764,7 +775,8 @@ async def _return_to_agent(*, session, spec, ctx: AgentCallContext, chosen: dict
     logger.info("flow runtime: transfer to %r %s; the agent takes the caller back "
                 "(linkedid=%s)", chosen.get("name"), outcome, ctx.linkedid)
     try:
-        second = await session.run(spec, dataclasses.replace(ctx, transfer_failed=True))
+        second = await session.run(spec, dataclasses.replace(
+            ctx, transfer_failed=True, transfer_closed=(outcome == "closed")))
     except Exception:  # noqa: BLE001 - a session that raises never started for the caller
         logger.exception("flow runtime: the second agent session raised (linkedid=%s)",
                          ctx.linkedid)

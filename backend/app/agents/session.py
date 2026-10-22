@@ -79,6 +79,8 @@ class AgentCallContext:
     # answered (2026-10-08, flows/runtime.py `_return_to_agent`). The Retell engine tells the
     # agent so (`transfer_failed`, a "sorry" greeting) and uses a second recording name.
     transfer_failed: bool = False
+    # ...because the office is closed (2026-10-22): the greeting says so instead.
+    transfer_closed: bool = False
     # What the engine worked out about the caller for the first session (the Retell engine's
     # rendered dynamic variables), kept so a second session on the same call reuses it
     # instead of asking the CRM again while the caller waits.
