@@ -354,9 +354,13 @@ class AsteriskAriClient:
 
     async def dial_number(
         self, channel_id: str, number: str, *, caller_id, timeout_s: float,
-        record_name: str | None = None,
+        record_name: str | None = None, hold_music: bool = False,
     ) -> str:
         """Real Forward-to-Phone (Ticket 15.3): originate + bridge, observed over the WS.
+
+        `hold_music` (2026-10-22, an agent's transfer): the caller hears music while the number
+        rings; it stops the moment the leg answers, BEFORE the two are bridged, so nobody ever
+        hears music over a conversation.
 
         The outbound leg is originated on the BulkVS PJSIP trunk INTO OUR OWN Stasis app,
         marked as a flow-dial leg (appArgs + channel-id prefix) so the consumer never treats
@@ -385,6 +389,11 @@ class AsteriskAriClient:
             }
             if caller_id:
                 params["callerId"] = str(caller_id)
+            if hold_music:
+                try:
+                    await self.moh_start(channel_id)
+                except Exception:  # noqa: BLE001 - silence is the old behaviour, never a failure
+                    logger.warning("ARI dial_number: hold music did not start on %s", channel_id)
             created = await self._post_json("/ari/channels", params=params)
             if not isinstance(created, dict) or not created.get("id"):
                 return "failed"
@@ -393,6 +402,11 @@ class AsteriskAriClient:
                 queue, channel_id, out_id, timeout_s
             )
             self._last_dial.update(answer_info)
+            if hold_music:
+                try:
+                    await self.moh_stop(channel_id)
+                except Exception:  # noqa: BLE001 - a caller already gone has no music to stop
+                    pass
             if port != "answered":
                 return port
 
@@ -807,6 +821,14 @@ class AsteriskAriClient:
 
     async def ring_stop(self, channel_id: str) -> None:
         await self._delete(f"/ari/channels/{channel_id}/ring")
+
+    async def moh_start(self, channel_id: str, moh_class: str = "default") -> None:
+        """Music on hold to a channel (2026-10-22: the caller waits to music while an agent's
+        transfer rings the office). Asterisk's `default` class (musiconhold.conf)."""
+        await self._post(f"/ari/channels/{channel_id}/moh", params={"mohClass": moh_class})
+
+    async def moh_stop(self, channel_id: str) -> None:
+        await self._delete(f"/ari/channels/{channel_id}/moh")
 
     async def play_and_wait(self, channel_id: str, media: str, *, timeout_s: float = 30.0) -> None:
         """Play a prompt and BLOCK until it finishes (PlaybackFinished over the WS) — so a

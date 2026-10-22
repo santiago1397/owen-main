@@ -177,8 +177,11 @@ GREETING_KNOWN = GREETING_UNKNOWN   # the name comes in the introduction, after 
 # The agent's first words when it takes the caller back after a transfer nobody answered
 # (2026-10-08, owner): the caller has just heard ringing, so it apologises and offers to take
 # the message rather than greeting them as if the call had just started.
-GREETING_TRANSFER_FAILED = ("Sorry, nobody could pick up right now. I'll make sure the office "
-                            "gets your message - what would you like me to pass on?")
+# 2026-10-22, the owner's words: "sorry no one from the office is available right now, but
+# once they are free we will call asap".
+GREETING_TRANSFER_FAILED = ("Sorry, no one from the office is available right now, but once "
+                            "they are free we will call you back as soon as possible. Is there "
+                            "anything you'd like me to pass on to them?")
 
 
 # An OUTBOUND call the agent places because a person asked it to (2026-10-15,

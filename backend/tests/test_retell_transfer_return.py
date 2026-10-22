@@ -286,8 +286,9 @@ def test_unanswered_transfer_returns_to_the_same_agent():
         check(f"[{outcome}] session 2: transfer_failed = yes",
               v2["transfer_failed"] == "yes")
         check(f"[{outcome}] session 2: the sorry greeting, word for word",
-              v2["greeting"] == "Sorry, nobody could pick up right now. I'll make sure the "
-                                "office gets your message - what would you like me to pass on?"
+              v2["greeting"] == "Sorry, no one from the office is available right now, but "
+                                "once they are free we will call you back as soon as possible. "
+                                "Is there anything you'd like me to pass on to them?"
               and v2["greeting"] == brief_mod.GREETING_TRANSFER_FAILED)
         check(f"[{outcome}] session 2: the same brief otherwise",
               {k: x for k, x in v2.items() if k not in ("transfer_failed", "greeting")}

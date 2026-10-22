@@ -575,13 +575,59 @@ def _ring_seconds(chosen: dict) -> float:
     return float(settings.OPERATOR_RING_TIMEOUT_SECONDS)
 
 
+# Transfers ringing right now, by the caller's number (2026-10-22, the loop guard). The office
+# lines (Quo, Zuper Connect) pick a call up themselves and, when nobody there answers, forward it
+# to an AI number - ours. That forwarded call arrives as a NEW inbound call carrying the caller's
+# own number (caller-ID passthrough), and without this the caller met the agent again, greeted
+# from scratch. A new inbound call from a number whose transfer is in progress is that bounce:
+# it is dropped, the transfer leg is ended, and the transfer counts as unanswered - so the next
+# number rings, or the agent takes the caller back with the "nobody is available" message.
+ACTIVE_TRANSFERS: dict[str, dict] = {}
+
+
+def _ten(number) -> str:
+    d = "".join(ch for ch in str(number or "") if ch.isdigit())
+    return d[-10:] if len(d) >= 10 else ""
+
+
+async def bounced_transfer(ari, channel_id: str, lid: str, caller_number: str) -> bool:
+    """True when this new inbound call is a transfer coming back to us; it has been handled
+    (the transfer leg and this call are both hung up)."""
+    entry = ACTIVE_TRANSFERS.get(_ten(caller_number))
+    if not entry or entry.get("lid") == lid:
+        return False
+    entry["bounced"] = True
+    clog(logger, "agent.transfer.bounced", linkedid=entry.get("lid"), back_as=lid,
+         channel=channel_id)
+    dialer = entry.get("ari")
+    out_leg = (getattr(dialer, "_last_dial", None) or {}).get("dial_out_leg")
+    for ch, who in ((out_leg, dialer), (channel_id, ari)):
+        if ch and who is not None:
+            try:
+                await who.hangup(ch)
+            except Exception:  # noqa: BLE001 - already gone is fine
+                pass
+    return True
+
+
+def _dial_kwargs(ari) -> dict:
+    """`hold_music=True` when this dialler supports it (the real ARI client does)."""
+    try:
+        import inspect
+        params = inspect.signature(ari.dial_number).parameters
+    except (TypeError, ValueError, AttributeError):
+        return {}
+    return {"hold_music": True} if "hold_music" in params else {}
+
+
 async def _do_agent_transfer(ari, channel_id: str, lid: str, chosen: dict) -> bool:
     """Move the caller to the destination the agent picked. Returns True if it was handled."""
     return await _agent_transfer_outcome(ari, channel_id, lid, chosen) in TRANSFER_HANDLED
 
 
 async def _agent_transfer_outcome(ari, channel_id: str, lid: str, chosen: dict,
-                                  caller_id: str | None = None) -> str:
+                                  caller_id: str | None = None,
+                                  caller_number: str | None = None) -> str:
     """Move the caller to the destination the agent picked, and say how it went:
     "answered" / "handled" (the caller is somewhere now), or why not: "noanswer", "busy",
     "failed", "caller_gone" (the caller hung up while it rang), "unrunnable".
@@ -602,13 +648,15 @@ async def _agent_transfer_outcome(ari, channel_id: str, lid: str, chosen: dict,
         # the main line, then 15 s to another number"). Stops at the first answer, or when
         # the caller hangs up; only if every step went unanswered does the caller go back.
         first = {k: v for k, v in chosen.items() if k != "then"}
-        result = await _agent_transfer_outcome(ari, channel_id, lid, first, caller_id)
+        result = await _agent_transfer_outcome(ari, channel_id, lid, first, caller_id,
+                                               caller_number)
         for i, step in enumerate(steps, 1):
             if result in TRANSFER_HANDLED or result == "caller_gone":
                 break
             clog(logger, "agent.transfer.next", linkedid=lid, step=i, previous=result)
             result = await _agent_transfer_outcome(
-                ari, channel_id, lid, {**step, "name": chosen.get("name")}, caller_id)
+                ari, channel_id, lid, {**step, "name": chosen.get("name")}, caller_id,
+                caller_number)
         return result
     kind, target = chosen["kind"], chosen["target"]
     ring_s = _ring_seconds(chosen)
@@ -616,14 +664,28 @@ async def _agent_transfer_outcome(ari, channel_id: str, lid: str, chosen: dict,
          ring_s=ring_s if kind in ("number", "operator") else None)
     try:
         if kind in ("number", "operator"):
-            if kind == "number":
-                result = await ari.dial_number(
-                    channel_id, target, caller_id=caller_id, timeout_s=ring_s,
-                )
-            else:
-                result = await ari.dial_operator(
-                    channel_id, [target], caller_id=None, timeout_s=ring_s,
-                )
+            key = _ten(caller_number)
+            entry = {"lid": lid, "ari": ari, "bounced": False}
+            if key:
+                ACTIVE_TRANSFERS[key] = entry
+            try:
+                if kind == "number":
+                    result = await ari.dial_number(
+                        channel_id, target, caller_id=caller_id, timeout_s=ring_s,
+                        **_dial_kwargs(ari),
+                    )
+                else:
+                    result = await ari.dial_operator(
+                        channel_id, [target], caller_id=None, timeout_s=ring_s,
+                    )
+            finally:
+                if key and ACTIVE_TRANSFERS.get(key) is entry:
+                    ACTIVE_TRANSFERS.pop(key, None)
+            if entry["bounced"]:
+                # The office line forwarded the caller back to us: nobody there answered.
+                clog(logger, "agent.transfer.unanswered", linkedid=lid, target=target,
+                     reason="forwarded back to an AI number")
+                return "noanswer"
             if result == "answered":
                 # The dial returns once EITHER leg leaves, and the interpreter then stands
                 # down (`transferred`: no routing, no hangup). If the person transferred to
@@ -894,7 +956,8 @@ async def run_agent_on_call(
                 # BulkVS refuses a transfer leg whose caller ID is not one of ours (SIP 486).
                 outcome = await _agent_transfer_outcome(
                     ari, channel_id, lid, chosen,
-                    caller_id=str(dialed) if outbound is not None and dialed else None)
+                    caller_id=str(dialed) if outbound is not None and dialed else None,
+                    caller_number=ctx.caller_number if outbound is None else None)
                 if outcome in TRANSFER_HANDLED:
                     port, data = "transferred", {**(result.data or {}), "transfer": chosen}
                 elif getattr(session, "name", "") == "retell" and not ctx.transfer_failed:
@@ -958,6 +1021,8 @@ async def run_flow_for_stasis(event: dict, ari: AriControl) -> None:
         return
     clog(logger, "stasis.start", linkedid=lid, channel=channel_id, dialed=dialed,
          caller=caller_number or None)
+    if caller_number and await bounced_transfer(ari, channel_id, lid, caller_number):
+        return                    # an office line sent the caller's transfer back to us
 
     try:
         async with SessionLocal() as db:
